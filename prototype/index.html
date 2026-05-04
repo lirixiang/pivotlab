@@ -1,0 +1,876 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=1440" />
+  <title>智线 PivotLab · 自动画线 / 形态筛选 / 入场信号</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'system-ui', 'sans-serif'],
+            mono: ['JetBrains Mono', 'SF Mono', 'Menlo', 'monospace'],
+          },
+          colors: {
+            ink: {
+              950: '#07090d',
+              900: '#0b0e14',
+              850: '#0f131b',
+              800: '#141923',
+              700: '#1c2230',
+              600: '#262d3d',
+              500: '#3a4254',
+            },
+            edge: '#2a3142',
+            cn: { up: '#ef4444', dn: '#10b981' },
+            gold: '#d4a857',
+            sky2: '#7dd3fc',
+          },
+          boxShadow: {
+            soft: '0 1px 0 rgba(255,255,255,0.04) inset, 0 8px 24px -12px rgba(0,0,0,0.6)',
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    html, body { background: #07090d; color: #d6dae3; font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; }
+    .num { font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums; }
+    .hairline { box-shadow: inset 0 0 0 1px #1f2535; }
+    .glow-gold { filter: drop-shadow(0 0 6px rgba(212,168,87,0.35)); }
+    .glow-sky { filter: drop-shadow(0 0 6px rgba(125,211,252,0.35)); }
+    .row-hover:hover { background: #11151f; }
+    .scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+    .scrollbar::-webkit-scrollbar-thumb { background: #262d3d; border-radius: 3px; }
+    .scrollbar::-webkit-scrollbar-track { background: transparent; }
+    .grad-head { background: linear-gradient(180deg, #0d1119 0%, #0a0d14 100%); }
+    .grad-card { background: linear-gradient(180deg, #11151f 0%, #0c1018 100%); }
+    .grad-gold { background: linear-gradient(135deg, #d4a857 0%, #b6873b 100%); }
+    .ring-soft { box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04); }
+    .tag { font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase; }
+    .ticker-pill { background: #0e1320; border: 1px solid #1f2535; }
+    .dot { width: 6px; height: 6px; border-radius: 999px; display: inline-block; }
+    .level-bar { height: 4px; border-radius: 2px; background: #1c2230; overflow: hidden; }
+    .level-fill { height: 100%; border-radius: 2px; }
+    .chip { padding: 2px 8px; border-radius: 999px; font-size: 11px; border: 1px solid #1f2535; background: #0e1320; }
+    .chip-on { background: rgba(212,168,87,0.10); border-color: rgba(212,168,87,0.45); color: #e6c98a; }
+    .chip-up { background: rgba(239,68,68,0.10); border-color: rgba(239,68,68,0.40); color: #fca5a5; }
+    .chip-dn { background: rgba(16,185,129,0.10); border-color: rgba(16,185,129,0.40); color: #6ee7b7; }
+    .seg { background: #0c111a; border: 1px solid #1f2535; border-radius: 8px; padding: 3px; display: inline-flex; }
+    .seg button { padding: 4px 10px; font-size: 12px; color: #8b93a7; border-radius: 6px; }
+    .seg button.on { background: #1a2030; color: #e6e9f0; box-shadow: inset 0 0 0 1px #2a3142; }
+    .kbd { font-family: 'JetBrains Mono', monospace; font-size: 10px; background: #0e1320; border: 1px solid #1f2535; border-bottom-width: 2px; padding: 1px 5px; border-radius: 4px; color: #9aa3b8; }
+    .divider { height: 1px; background: linear-gradient(90deg, transparent, #1f2535, transparent); }
+    .pulse-dot::before {
+      content:''; position:absolute; inset:-4px; border-radius:999px;
+      background: rgba(212,168,87,0.35); animation: pulse 1.8s ease-out infinite;
+    }
+    @keyframes pulse { 0% { transform: scale(0.6); opacity: 0.7; } 100% { transform: scale(1.6); opacity: 0; } }
+  </style>
+</head>
+<body class="min-h-screen">
+
+<!-- ============== TOP BAR ============== -->
+<header class="grad-head border-b border-ink-700 sticky top-0 z-30">
+  <div class="flex items-center h-12 px-4 gap-4">
+    <!-- Brand -->
+    <div class="flex items-center gap-2 pr-4 border-r border-ink-700">
+      <div class="w-7 h-7 rounded-md grad-gold flex items-center justify-center text-ink-950 font-bold">
+        <i class="fas fa-wave-square text-xs"></i>
+      </div>
+      <div class="leading-tight">
+        <div class="text-[13px] font-semibold tracking-wide text-white">PivotLab <span class="text-gold font-normal">智线</span></div>
+        <div class="text-[10px] text-ink-500 -mt-0.5 tracking-widest">AUTO LEVELS · SCREENER</div>
+      </div>
+    </div>
+
+    <!-- Mode tabs -->
+    <nav class="flex items-center gap-1 text-[13px]">
+      <button class="px-3 py-1.5 rounded-md text-white bg-ink-800 ring-soft">画线工作台</button>
+      <button class="px-3 py-1.5 rounded-md text-ink-500 hover:text-ink-300">形态筛选</button>
+      <button class="px-3 py-1.5 rounded-md text-ink-500 hover:text-ink-300">历史回测</button>
+      <button class="px-3 py-1.5 rounded-md text-ink-500 hover:text-ink-300">自选监控</button>
+    </nav>
+
+    <!-- Search -->
+    <div class="flex-1 flex justify-center">
+      <div class="relative w-[420px]">
+        <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-ink-500 text-xs"></i>
+        <input class="w-full bg-ink-850 border border-ink-700 rounded-md pl-9 pr-20 py-1.5 text-sm placeholder:text-ink-500 focus:outline-none focus:border-gold/60" placeholder="搜索代码 / 名称 / 行业    例如：600519 贵州茅台" />
+        <span class="kbd absolute right-2 top-1/2 -translate-y-1/2">⌘K</span>
+      </div>
+    </div>
+
+    <!-- Right tools -->
+    <div class="flex items-center gap-3 text-ink-500">
+      <div class="flex items-center gap-2 text-[11px]">
+        <span class="dot bg-cn-dn"></span>
+        <span class="text-ink-300">数据已同步</span>
+        <span class="num">15:00:03</span>
+      </div>
+      <div class="w-px h-5 bg-ink-700"></div>
+      <button class="hover:text-white text-sm"><i class="far fa-bell"></i></button>
+      <button class="hover:text-white text-sm"><i class="fas fa-sliders"></i></button>
+      <div class="w-7 h-7 rounded-full bg-ink-700 ring-soft flex items-center justify-center text-xs text-ink-300">IV</div>
+    </div>
+  </div>
+
+  <!-- Index strip -->
+  <div class="flex items-center h-9 px-4 gap-6 border-t border-ink-800 text-[12px] num">
+    <div class="flex items-center gap-2"><span class="text-ink-500">上证</span><span class="text-cn-up">3,287.42</span><span class="text-cn-up text-[11px]">+0.62%</span></div>
+    <div class="flex items-center gap-2"><span class="text-ink-500">深成</span><span class="text-cn-up">10,514.28</span><span class="text-cn-up text-[11px]">+0.81%</span></div>
+    <div class="flex items-center gap-2"><span class="text-ink-500">创业板</span><span class="text-cn-dn">2,108.93</span><span class="text-cn-dn text-[11px]">-0.24%</span></div>
+    <div class="flex items-center gap-2"><span class="text-ink-500">科创50</span><span class="text-cn-up">964.10</span><span class="text-cn-up text-[11px]">+1.12%</span></div>
+    <div class="flex items-center gap-2"><span class="text-ink-500">两市成交</span><span class="text-ink-200">8,914</span><span class="text-ink-500 text-[11px]">亿</span></div>
+    <div class="flex-1"></div>
+    <div class="flex items-center gap-2 text-ink-500">
+      <i class="fas fa-circle-info text-[10px]"></i>
+      <span>开源数据 · akshare · 仅供研究 · 不构成投资建议</span>
+    </div>
+  </div>
+</header>
+
+<!-- ============== MAIN GRID ============== -->
+<main class="grid" style="grid-template-columns: 280px 1fr 340px; min-height: calc(100vh - 84px);">
+
+  <!-- ===== LEFT: Watchlist + Screener summary ===== -->
+  <aside class="border-r border-ink-700 bg-ink-900 flex flex-col">
+    <!-- Section: Watchlist -->
+    <div class="p-3 border-b border-ink-800">
+      <div class="flex items-center justify-between mb-2">
+        <div class="flex items-center gap-2">
+          <span class="tag text-ink-500">自选 · WATCHLIST</span>
+          <span class="text-[11px] text-ink-500">12</span>
+        </div>
+        <button class="text-ink-500 hover:text-white text-xs"><i class="fas fa-plus"></i></button>
+      </div>
+      <div class="seg w-full">
+        <button class="on flex-1">全部</button>
+        <button class="flex-1">突破</button>
+        <button class="flex-1">企稳</button>
+        <button class="flex-1">观察</button>
+      </div>
+    </div>
+
+    <div class="overflow-y-auto scrollbar flex-1">
+      <!-- Active row -->
+      <div class="px-3 py-2.5 border-l-2 border-gold bg-ink-850 cursor-pointer">
+        <div class="flex justify-between items-baseline">
+          <div>
+            <div class="text-[13px] text-white font-medium">贵州茅台</div>
+            <div class="text-[10px] text-ink-500 num tracking-wider">600519 · SH</div>
+          </div>
+          <div class="text-right num">
+            <div class="text-cn-up text-[13px]">1,684.20</div>
+            <div class="text-cn-up text-[10px]">+1.84%</div>
+          </div>
+        </div>
+        <div class="flex items-center gap-1.5 mt-1.5">
+          <span class="chip chip-on">突破回踩</span>
+          <span class="chip">日</span>
+        </div>
+      </div>
+
+      <!-- Other rows -->
+      <template id="row-template"></template>
+      <div class="row-hover px-3 py-2.5 cursor-pointer border-b border-ink-850/60">
+        <div class="flex justify-between items-baseline">
+          <div>
+            <div class="text-[13px] text-ink-200">宁德时代</div>
+            <div class="text-[10px] text-ink-500 num tracking-wider">300750 · SZ</div>
+          </div>
+          <div class="text-right num">
+            <div class="text-cn-up text-[13px]">241.36</div>
+            <div class="text-cn-up text-[10px]">+2.41%</div>
+          </div>
+        </div>
+        <div class="flex items-center gap-1.5 mt-1.5">
+          <span class="chip chip-up">逼近压力</span>
+        </div>
+      </div>
+
+      <div class="row-hover px-3 py-2.5 cursor-pointer border-b border-ink-850/60">
+        <div class="flex justify-between items-baseline">
+          <div>
+            <div class="text-[13px] text-ink-200">招商银行</div>
+            <div class="text-[10px] text-ink-500 num tracking-wider">600036 · SH</div>
+          </div>
+          <div class="text-right num">
+            <div class="text-cn-dn text-[13px]">38.92</div>
+            <div class="text-cn-dn text-[10px]">-0.43%</div>
+          </div>
+        </div>
+        <div class="flex items-center gap-1.5 mt-1.5">
+          <span class="chip chip-dn">下跌企稳</span>
+        </div>
+      </div>
+
+      <div class="row-hover px-3 py-2.5 cursor-pointer border-b border-ink-850/60">
+        <div class="flex justify-between items-baseline">
+          <div>
+            <div class="text-[13px] text-ink-200">比亚迪</div>
+            <div class="text-[10px] text-ink-500 num tracking-wider">002594 · SZ</div>
+          </div>
+          <div class="text-right num">
+            <div class="text-cn-up text-[13px]">285.11</div>
+            <div class="text-cn-up text-[10px]">+0.92%</div>
+          </div>
+        </div>
+        <div class="flex items-center gap-1.5 mt-1.5">
+          <span class="chip">箱体震荡</span>
+        </div>
+      </div>
+
+      <div class="row-hover px-3 py-2.5 cursor-pointer border-b border-ink-850/60">
+        <div class="flex justify-between items-baseline">
+          <div>
+            <div class="text-[13px] text-ink-200">海光信息</div>
+            <div class="text-[10px] text-ink-500 num tracking-wider">688041 · SH</div>
+          </div>
+          <div class="text-right num">
+            <div class="text-cn-up text-[13px]">96.58</div>
+            <div class="text-cn-up text-[10px]">+3.12%</div>
+          </div>
+        </div>
+        <div class="flex items-center gap-1.5 mt-1.5">
+          <span class="chip chip-on">突破回踩</span>
+          <span class="chip">周</span>
+        </div>
+      </div>
+
+      <div class="row-hover px-3 py-2.5 cursor-pointer border-b border-ink-850/60">
+        <div class="flex justify-between items-baseline">
+          <div>
+            <div class="text-[13px] text-ink-200">中际旭创</div>
+            <div class="text-[10px] text-ink-500 num tracking-wider">300308 · SZ</div>
+          </div>
+          <div class="text-right num">
+            <div class="text-cn-dn text-[13px]">142.70</div>
+            <div class="text-cn-dn text-[10px]">-1.05%</div>
+          </div>
+        </div>
+        <div class="flex items-center gap-1.5 mt-1.5">
+          <span class="chip">支撑测试</span>
+        </div>
+      </div>
+
+      <div class="row-hover px-3 py-2.5 cursor-pointer border-b border-ink-850/60">
+        <div class="flex justify-between items-baseline">
+          <div>
+            <div class="text-[13px] text-ink-200">长江电力</div>
+            <div class="text-[10px] text-ink-500 num tracking-wider">600900 · SH</div>
+          </div>
+          <div class="text-right num">
+            <div class="text-cn-up text-[13px]">29.84</div>
+            <div class="text-cn-up text-[10px]">+0.13%</div>
+          </div>
+        </div>
+        <div class="flex items-center gap-1.5 mt-1.5">
+          <span class="chip chip-dn">下跌企稳</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom: today scan -->
+    <div class="border-t border-ink-800 p-3 grad-card">
+      <div class="flex items-center justify-between mb-2">
+        <span class="tag text-ink-500">今日扫描 · 4,832 只</span>
+        <span class="text-[11px] text-gold">14:58 完成</span>
+      </div>
+      <div class="grid grid-cols-3 gap-2 text-center">
+        <div class="bg-ink-850 ring-soft rounded-md py-2">
+          <div class="num text-cn-up text-base">38</div>
+          <div class="text-[10px] text-ink-500 mt-0.5">突破回踩</div>
+        </div>
+        <div class="bg-ink-850 ring-soft rounded-md py-2">
+          <div class="num text-cn-dn text-base">21</div>
+          <div class="text-[10px] text-ink-500 mt-0.5">下跌企稳</div>
+        </div>
+        <div class="bg-ink-850 ring-soft rounded-md py-2">
+          <div class="num text-gold text-base">12</div>
+          <div class="text-[10px] text-ink-500 mt-0.5">高强信号</div>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ===== CENTER: Chart workspace ===== -->
+  <section class="bg-ink-950 flex flex-col">
+
+    <!-- Chart header -->
+    <div class="flex items-center px-5 py-3 border-b border-ink-800 grad-head gap-4">
+      <div>
+        <div class="flex items-baseline gap-3">
+          <h1 class="text-xl font-semibold text-white tracking-wide">贵州茅台</h1>
+          <span class="text-ink-500 num text-sm">600519.SH</span>
+          <span class="chip chip-up">食品饮料 · 白酒</span>
+          <span class="chip">沪深300</span>
+        </div>
+        <div class="flex items-baseline gap-3 mt-1">
+          <span class="num text-2xl text-cn-up font-semibold">1,684.20</span>
+          <span class="num text-cn-up text-sm">+30.40 (+1.84%)</span>
+          <span class="text-[11px] text-ink-500">成交 32.4亿 · 量比 1.62 · 换手 0.18%</span>
+        </div>
+      </div>
+
+      <div class="flex-1"></div>
+
+      <!-- Period -->
+      <div class="seg">
+        <button>1分</button>
+        <button>5分</button>
+        <button>30分</button>
+        <button class="on">日线</button>
+        <button>周线</button>
+        <button>月线</button>
+      </div>
+
+      <!-- Layer toggles -->
+      <div class="flex items-center gap-2">
+        <button class="chip chip-on flex items-center gap-1.5"><span class="dot bg-gold"></span>压力位</button>
+        <button class="chip chip-on flex items-center gap-1.5"><span class="dot bg-sky2"></span>支撑位</button>
+        <button class="chip flex items-center gap-1.5"><span class="dot bg-ink-500"></span>均线</button>
+        <button class="chip flex items-center gap-1.5"><span class="dot bg-ink-500"></span>筹码峰</button>
+      </div>
+
+      <button class="ml-2 px-3 py-1.5 rounded-md grad-gold text-ink-950 text-[12px] font-semibold flex items-center gap-1.5">
+        <i class="fas fa-wand-magic-sparkles text-[11px]"></i> 重新画线
+      </button>
+    </div>
+
+    <!-- Chart canvas (SVG mock) -->
+    <div class="relative flex-1 px-5 pt-4 pb-2 overflow-hidden">
+      <!-- Y-axis grid lines & labels rendered inside SVG -->
+      <svg viewBox="0 0 1000 460" class="w-full h-[460px]" preserveAspectRatio="none">
+        <defs>
+          <linearGradient id="up" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stop-color="#ef4444" stop-opacity="0.18"/>
+            <stop offset="100%" stop-color="#ef4444" stop-opacity="0"/>
+          </linearGradient>
+          <pattern id="grid" width="50" height="46" patternUnits="userSpaceOnUse">
+            <path d="M 50 0 L 0 0 0 46" fill="none" stroke="#141923" stroke-width="0.5"/>
+          </pattern>
+          <filter id="goldGlow"><feGaussianBlur stdDeviation="1.4"/></filter>
+        </defs>
+
+        <rect width="1000" height="460" fill="url(#grid)"/>
+
+        <!-- Resistance zones (gold band + line) -->
+        <g>
+          <rect x="0" y="60" width="1000" height="14" fill="#d4a857" fill-opacity="0.08"/>
+          <line x1="0" y1="67" x2="1000" y2="67" stroke="#d4a857" stroke-width="1.2" stroke-dasharray="6 4"/>
+          <text x="8" y="62" fill="#d4a857" font-size="10" font-family="JetBrains Mono">R3  1,720.00   ★★★★★  触及 6 次</text>
+
+          <rect x="0" y="138" width="1000" height="12" fill="#d4a857" fill-opacity="0.06"/>
+          <line x1="0" y1="144" x2="1000" y2="144" stroke="#d4a857" stroke-width="1" stroke-dasharray="6 4" stroke-opacity="0.8"/>
+          <text x="8" y="139" fill="#d4a857" font-size="10" font-family="JetBrains Mono" fill-opacity="0.85">R2  1,684.50   ★★★★    刚突破</text>
+
+          <line x1="0" y1="200" x2="1000" y2="200" stroke="#d4a857" stroke-width="0.8" stroke-dasharray="3 4" stroke-opacity="0.55"/>
+          <text x="8" y="195" fill="#d4a857" font-size="10" font-family="JetBrains Mono" fill-opacity="0.65">R1  1,648.00   ★★★      已转支撑</text>
+        </g>
+
+        <!-- Support zones (sky band + line) -->
+        <g>
+          <line x1="0" y1="290" x2="1000" y2="290" stroke="#7dd3fc" stroke-width="0.8" stroke-dasharray="3 4" stroke-opacity="0.55"/>
+          <text x="8" y="285" fill="#7dd3fc" font-size="10" font-family="JetBrains Mono" fill-opacity="0.7">S1  1,612.40   ★★★      MA20</text>
+
+          <rect x="0" y="345" width="1000" height="12" fill="#7dd3fc" fill-opacity="0.06"/>
+          <line x1="0" y1="351" x2="1000" y2="351" stroke="#7dd3fc" stroke-width="1" stroke-dasharray="6 4" stroke-opacity="0.85"/>
+          <text x="8" y="346" fill="#7dd3fc" font-size="10" font-family="JetBrains Mono" fill-opacity="0.9">S2  1,560.00   ★★★★    密集成交区</text>
+
+          <rect x="0" y="408" width="1000" height="14" fill="#7dd3fc" fill-opacity="0.08"/>
+          <line x1="0" y1="415" x2="1000" y2="415" stroke="#7dd3fc" stroke-width="1.2" stroke-dasharray="6 4"/>
+          <text x="8" y="410" fill="#7dd3fc" font-size="10" font-family="JetBrains Mono">S3  1,498.00   ★★★★★  历史强支撑</text>
+        </g>
+
+        <!-- MA lines -->
+        <path d="M0,330 C100,320 200,310 300,300 S500,260 600,240 700,210 800,170 1000,150"
+              fill="none" stroke="#7c87a3" stroke-width="1" stroke-opacity="0.55"/>
+        <path d="M0,360 C100,350 250,335 400,310 S700,210 1000,170"
+              fill="none" stroke="#a78bfa" stroke-width="1" stroke-opacity="0.45"/>
+
+        <!-- Candlesticks (mocked) -->
+        <g font-family="JetBrains Mono">
+          <!-- helper script-free static candles -->
+          <!-- A ramp of about 60 candles -->
+          <!-- We draw via repeated <line>+<rect> -->
+          <!-- Generated approximate -->
+          <!-- 1..60 -->
+          <g>
+            <!-- Each: x in 60..960 step 15 -->
+            <!-- prices: open,close,high,low (mocked) -->
+            <!-- using a simple uptrend with noise -->
+          </g>
+        </g>
+
+        <!-- We'll generate ~60 candles inline -->
+        <g id="candles"></g>
+
+        <!-- Breakout marker -->
+        <g transform="translate(820,150)">
+          <circle r="5" fill="#d4a857" filter="url(#goldGlow)"/>
+          <circle r="9" fill="none" stroke="#d4a857" stroke-opacity="0.5"/>
+          <text x="14" y="-6" fill="#e6c98a" font-size="10" font-family="Inter">放量突破 R2</text>
+          <text x="14" y="6" fill="#9aa3b8" font-size="9" font-family="JetBrains Mono">04-28  量比 1.86</text>
+        </g>
+
+        <!-- Pullback marker -->
+        <g transform="translate(910,168)">
+          <circle r="5" fill="#7dd3fc"/>
+          <circle r="9" fill="none" stroke="#7dd3fc" stroke-opacity="0.5"/>
+          <text x="-110" y="-6" fill="#bae6fd" font-size="10" font-family="Inter" text-anchor="end">缩量回踩确认</text>
+          <text x="-110" y="6" fill="#9aa3b8" font-size="9" font-family="JetBrains Mono" text-anchor="end">05-02  量比 0.42</text>
+        </g>
+
+        <!-- Crosshair -->
+        <line x1="640" y1="0" x2="640" y2="460" stroke="#3a4254" stroke-dasharray="2 3" stroke-opacity="0.6"/>
+        <line x1="0" y1="248" x2="1000" y2="248" stroke="#3a4254" stroke-dasharray="2 3" stroke-opacity="0.6"/>
+      </svg>
+
+      <!-- Volume sub-pane -->
+      <svg viewBox="0 0 1000 90" class="w-full h-[90px] mt-1" preserveAspectRatio="none">
+        <rect width="1000" height="90" fill="url(#grid)"/>
+        <g id="volume"></g>
+        <text x="8" y="14" fill="#6b7388" font-size="10" font-family="JetBrains Mono">VOL  32.4亿  量比 1.62</text>
+      </svg>
+
+      <!-- Floating right-side price scale -->
+      <div class="absolute right-5 top-4 bottom-2 w-14 flex flex-col justify-between items-end text-[10px] num text-ink-500 pointer-events-none">
+        <div>1,740</div><div>1,700</div><div>1,660</div><div>1,620</div><div>1,580</div><div>1,540</div><div>1,500</div>
+      </div>
+
+      <!-- Tools rail -->
+      <div class="absolute left-2 top-1/2 -translate-y-1/2 flex flex-col gap-1 bg-ink-850 hairline rounded-md p-1">
+        <button class="w-7 h-7 rounded text-ink-500 hover:text-white hover:bg-ink-700" title="十字光标"><i class="fas fa-crosshairs text-xs"></i></button>
+        <button class="w-7 h-7 rounded text-gold bg-ink-700" title="自动画线"><i class="fas fa-wave-square text-xs"></i></button>
+        <button class="w-7 h-7 rounded text-ink-500 hover:text-white hover:bg-ink-700" title="趋势线"><i class="fas fa-arrow-trend-up text-xs"></i></button>
+        <button class="w-7 h-7 rounded text-ink-500 hover:text-white hover:bg-ink-700" title="斐波"><i class="fas fa-percent text-xs"></i></button>
+        <button class="w-7 h-7 rounded text-ink-500 hover:text-white hover:bg-ink-700" title="筹码"><i class="fas fa-layer-group text-xs"></i></button>
+        <div class="divider my-1 w-5 mx-auto"></div>
+        <button class="w-7 h-7 rounded text-ink-500 hover:text-white hover:bg-ink-700" title="测量"><i class="fas fa-ruler text-xs"></i></button>
+      </div>
+    </div>
+
+    <!-- ============== Bottom: Screener Result Table ============== -->
+    <div class="border-t border-ink-800 grad-head">
+      <div class="flex items-center justify-between px-5 py-2.5">
+        <div class="flex items-center gap-3">
+          <span class="text-[12px] font-semibold text-white tracking-wide">今日筛选结果</span>
+          <div class="seg">
+            <button class="on">突破回踩 · 38</button>
+            <button>下跌企稳 · 21</button>
+            <button>箱体突破 · 14</button>
+            <button>三角整理 · 9</button>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="text-[11px] text-ink-500">排序</span>
+          <select class="bg-ink-850 border border-ink-700 rounded-md text-[12px] px-2 py-1 text-ink-200 focus:outline-none">
+            <option>信号强度 ↓</option>
+            <option>量比 ↓</option>
+            <option>距压力位 ↑</option>
+          </select>
+          <button class="px-2.5 py-1 text-[12px] rounded-md bg-ink-800 ring-soft text-ink-200 hover:text-white"><i class="far fa-file-excel mr-1"></i>导出</button>
+          <button class="px-2.5 py-1 text-[12px] rounded-md bg-ink-800 ring-soft text-ink-200 hover:text-white"><i class="far fa-bookmark mr-1"></i>加入自选</button>
+        </div>
+      </div>
+
+      <div class="overflow-x-auto">
+        <table class="w-full text-[12px] num">
+          <thead class="text-ink-500 text-[10px] tracking-wider uppercase">
+            <tr class="border-y border-ink-800">
+              <th class="text-left font-normal px-5 py-2">代码 / 名称</th>
+              <th class="text-right font-normal px-2">现价</th>
+              <th class="text-right font-normal px-2">涨跌</th>
+              <th class="text-right font-normal px-2">突破价 / 回踩价</th>
+              <th class="text-right font-normal px-2">距支撑</th>
+              <th class="text-right font-normal px-2">量比</th>
+              <th class="text-left  font-normal px-2">信号强度</th>
+              <th class="text-left  font-normal px-2">触发条件</th>
+              <th class="text-right font-normal px-5">建议</th>
+            </tr>
+          </thead>
+          <tbody class="text-ink-200">
+            <tr class="row-hover border-b border-ink-850/70">
+              <td class="px-5 py-2.5">
+                <div class="flex items-center gap-2">
+                  <span class="relative inline-block"><span class="dot bg-gold pulse-dot"></span></span>
+                  <div>
+                    <div class="font-sans text-ink-100">海光信息</div>
+                    <div class="text-[10px] text-ink-500">688041</div>
+                  </div>
+                </div>
+              </td>
+              <td class="text-right text-cn-up">96.58</td>
+              <td class="text-right text-cn-up">+3.12%</td>
+              <td class="text-right">94.20 / 92.80</td>
+              <td class="text-right text-cn-dn">+0.41%</td>
+              <td class="text-right">1.86</td>
+              <td>
+                <div class="flex items-center gap-2 w-32">
+                  <div class="level-bar flex-1"><div class="level-fill" style="width:92%; background: linear-gradient(90deg,#d4a857,#f0c674);"></div></div>
+                  <span class="text-gold">92</span>
+                </div>
+              </td>
+              <td><span class="chip chip-on">放量突破</span> <span class="chip">缩量回踩</span></td>
+              <td class="text-right pr-5"><button class="text-gold hover:underline">查看图表 →</button></td>
+            </tr>
+
+            <tr class="row-hover border-b border-ink-850/70">
+              <td class="px-5 py-2.5">
+                <div class="flex items-center gap-2">
+                  <span class="dot bg-gold"></span>
+                  <div>
+                    <div class="font-sans text-ink-100">中微公司</div>
+                    <div class="text-[10px] text-ink-500">688012</div>
+                  </div>
+                </div>
+              </td>
+              <td class="text-right text-cn-up">198.40</td>
+              <td class="text-right text-cn-up">+2.18%</td>
+              <td class="text-right">194.00 / 191.20</td>
+              <td class="text-right text-cn-dn">+0.62%</td>
+              <td class="text-right">1.62</td>
+              <td>
+                <div class="flex items-center gap-2 w-32">
+                  <div class="level-bar flex-1"><div class="level-fill" style="width:86%; background: linear-gradient(90deg,#d4a857,#f0c674);"></div></div>
+                  <span class="text-gold">86</span>
+                </div>
+              </td>
+              <td><span class="chip chip-on">突破颈线</span> <span class="chip">日线确认</span></td>
+              <td class="text-right pr-5"><button class="text-ink-300 hover:text-white">查看图表 →</button></td>
+            </tr>
+
+            <tr class="row-hover border-b border-ink-850/70">
+              <td class="px-5 py-2.5">
+                <div class="flex items-center gap-2">
+                  <span class="dot bg-sky2"></span>
+                  <div>
+                    <div class="font-sans text-ink-100">恒生电子</div>
+                    <div class="text-[10px] text-ink-500">600570</div>
+                  </div>
+                </div>
+              </td>
+              <td class="text-right text-cn-up">22.85</td>
+              <td class="text-right text-cn-up">+1.20%</td>
+              <td class="text-right">— / 22.40</td>
+              <td class="text-right text-cn-dn">+1.98%</td>
+              <td class="text-right">1.34</td>
+              <td>
+                <div class="flex items-center gap-2 w-32">
+                  <div class="level-bar flex-1"><div class="level-fill" style="width:78%; background: linear-gradient(90deg,#7dd3fc,#bae6fd);"></div></div>
+                  <span class="text-sky2">78</span>
+                </div>
+              </td>
+              <td><span class="chip chip-dn">下跌企稳</span> <span class="chip">看涨吞没</span></td>
+              <td class="text-right pr-5"><button class="text-ink-300 hover:text-white">查看图表 →</button></td>
+            </tr>
+
+            <tr class="row-hover border-b border-ink-850/70">
+              <td class="px-5 py-2.5">
+                <div class="flex items-center gap-2">
+                  <span class="dot bg-gold"></span>
+                  <div>
+                    <div class="font-sans text-ink-100">沪电股份</div>
+                    <div class="text-[10px] text-ink-500">002463</div>
+                  </div>
+                </div>
+              </td>
+              <td class="text-right text-cn-up">42.18</td>
+              <td class="text-right text-cn-up">+4.05%</td>
+              <td class="text-right">40.50 / 40.80</td>
+              <td class="text-right text-cn-dn">+0.94%</td>
+              <td class="text-right">2.10</td>
+              <td>
+                <div class="flex items-center gap-2 w-32">
+                  <div class="level-bar flex-1"><div class="level-fill" style="width:75%; background: linear-gradient(90deg,#d4a857,#f0c674);"></div></div>
+                  <span class="text-gold">75</span>
+                </div>
+              </td>
+              <td><span class="chip chip-on">突破回踩</span></td>
+              <td class="text-right pr-5"><button class="text-ink-300 hover:text-white">查看图表 →</button></td>
+            </tr>
+
+            <tr class="row-hover border-b border-ink-850/70">
+              <td class="px-5 py-2.5">
+                <div class="flex items-center gap-2">
+                  <span class="dot bg-sky2"></span>
+                  <div>
+                    <div class="font-sans text-ink-100">紫金矿业</div>
+                    <div class="text-[10px] text-ink-500">601899</div>
+                  </div>
+                </div>
+              </td>
+              <td class="text-right text-cn-up">17.62</td>
+              <td class="text-right text-cn-up">+0.86%</td>
+              <td class="text-right">— / 17.40</td>
+              <td class="text-right text-cn-dn">+1.26%</td>
+              <td class="text-right">1.18</td>
+              <td>
+                <div class="flex items-center gap-2 w-32">
+                  <div class="level-bar flex-1"><div class="level-fill" style="width:71%; background: linear-gradient(90deg,#7dd3fc,#bae6fd);"></div></div>
+                  <span class="text-sky2">71</span>
+                </div>
+              </td>
+              <td><span class="chip chip-dn">下跌企稳</span> <span class="chip">三日不破低</span></td>
+              <td class="text-right pr-5"><button class="text-ink-300 hover:text-white">查看图表 →</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- ===== RIGHT: Levels & signals ===== -->
+  <aside class="border-l border-ink-700 bg-ink-900 flex flex-col overflow-y-auto scrollbar">
+
+    <!-- Active signal -->
+    <div class="p-4 border-b border-ink-800">
+      <div class="flex items-center justify-between mb-2">
+        <span class="tag text-ink-500">实时形态</span>
+        <span class="text-[11px] text-cn-up flex items-center gap-1.5"><span class="dot bg-cn-up"></span>触发中</span>
+      </div>
+
+      <div class="rounded-lg ring-soft grad-card p-4">
+        <div class="flex items-center justify-between">
+          <div>
+            <div class="text-[15px] text-white font-semibold tracking-wide">突破回踩确认</div>
+            <div class="text-[11px] text-ink-500 mt-0.5">日线 · R2 = 1,684.50</div>
+          </div>
+          <div class="text-right">
+            <div class="num text-2xl text-gold leading-none">92<span class="text-[11px] text-ink-500 ml-1">/100</span></div>
+            <div class="text-[10px] text-gold mt-1">高强信号</div>
+          </div>
+        </div>
+
+        <!-- Score breakdown -->
+        <div class="mt-4 space-y-2.5">
+          <div>
+            <div class="flex justify-between text-[11px] text-ink-300">
+              <span>突破力度（量价配合）</span><span class="num text-ink-200">28 / 30</span>
+            </div>
+            <div class="level-bar mt-1"><div class="level-fill" style="width:93%; background:#d4a857;"></div></div>
+          </div>
+          <div>
+            <div class="flex justify-between text-[11px] text-ink-300">
+              <span>回踩缩量验证</span><span class="num text-ink-200">24 / 25</span>
+            </div>
+            <div class="level-bar mt-1"><div class="level-fill" style="width:96%; background:#d4a857;"></div></div>
+          </div>
+          <div>
+            <div class="flex justify-between text-[11px] text-ink-300">
+              <span>压力位历史强度</span><span class="num text-ink-200">22 / 25</span>
+            </div>
+            <div class="level-bar mt-1"><div class="level-fill" style="width:88%; background:#d4a857;"></div></div>
+          </div>
+          <div>
+            <div class="flex justify-between text-[11px] text-ink-300">
+              <span>多周期共振</span><span class="num text-ink-200">18 / 20</span>
+            </div>
+            <div class="level-bar mt-1"><div class="level-fill" style="width:90%; background:#d4a857;"></div></div>
+          </div>
+        </div>
+
+        <!-- Trade plan -->
+        <div class="mt-4 pt-3 border-t border-ink-800 grid grid-cols-3 gap-2 text-center">
+          <div>
+            <div class="text-[10px] text-ink-500 tag">参考入场</div>
+            <div class="num text-cn-up text-sm mt-1">1,684</div>
+          </div>
+          <div>
+            <div class="text-[10px] text-ink-500 tag">止损</div>
+            <div class="num text-cn-dn text-sm mt-1">1,648</div>
+          </div>
+          <div>
+            <div class="text-[10px] text-ink-500 tag">目标</div>
+            <div class="num text-gold text-sm mt-1">1,720</div>
+          </div>
+        </div>
+        <div class="mt-2 text-[10px] text-ink-500 text-center">盈亏比 <span class="text-ink-200 num">1 : 1.0</span> · 仅供参考</div>
+      </div>
+    </div>
+
+    <!-- Levels list -->
+    <div class="p-4 border-b border-ink-800">
+      <div class="flex items-center justify-between mb-3">
+        <span class="tag text-ink-500">支撑压力位 · 日线</span>
+        <button class="text-[11px] text-ink-500 hover:text-white">参数 <i class="fas fa-chevron-down text-[9px] ml-0.5"></i></button>
+      </div>
+
+      <div class="space-y-1.5">
+        <!-- Level row -->
+        <div class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-ink-850">
+          <span class="num text-[11px] text-gold w-6">R3</span>
+          <span class="num text-[12px] text-ink-100 w-16">1,720.00</span>
+          <span class="text-gold text-[10px] w-14">★★★★★</span>
+          <span class="text-[10px] text-ink-500 flex-1">触及 6 · 60日</span>
+          <span class="num text-[11px] text-cn-up">+2.13%</span>
+        </div>
+        <div class="flex items-center gap-2 px-2 py-1.5 rounded bg-ink-850 ring-soft">
+          <span class="num text-[11px] text-gold w-6">R2</span>
+          <span class="num text-[12px] text-white w-16">1,684.50</span>
+          <span class="text-gold text-[10px] w-14">★★★★</span>
+          <span class="text-[10px] text-gold flex-1">刚突破 · 现价区</span>
+          <span class="num text-[11px] text-ink-300">±0%</span>
+        </div>
+        <div class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-ink-850">
+          <span class="num text-[11px] text-gold w-6">R1</span>
+          <span class="num text-[12px] text-ink-100 w-16">1,648.00</span>
+          <span class="text-gold text-[10px] w-14">★★★</span>
+          <span class="text-[10px] text-ink-500 flex-1">已转支撑</span>
+          <span class="num text-[11px] text-cn-dn">-2.15%</span>
+        </div>
+
+        <div class="divider my-2"></div>
+
+        <div class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-ink-850">
+          <span class="num text-[11px] text-sky2 w-6">S1</span>
+          <span class="num text-[12px] text-ink-100 w-16">1,612.40</span>
+          <span class="text-sky2 text-[10px] w-14">★★★</span>
+          <span class="text-[10px] text-ink-500 flex-1">MA20 动态</span>
+          <span class="num text-[11px] text-cn-dn">-4.26%</span>
+        </div>
+        <div class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-ink-850">
+          <span class="num text-[11px] text-sky2 w-6">S2</span>
+          <span class="num text-[12px] text-ink-100 w-16">1,560.00</span>
+          <span class="text-sky2 text-[10px] w-14">★★★★</span>
+          <span class="text-[10px] text-ink-500 flex-1">密集成交区</span>
+          <span class="num text-[11px] text-cn-dn">-7.37%</span>
+        </div>
+        <div class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-ink-850">
+          <span class="num text-[11px] text-sky2 w-6">S3</span>
+          <span class="num text-[12px] text-ink-100 w-16">1,498.00</span>
+          <span class="text-sky2 text-[10px] w-14">★★★★★</span>
+          <span class="text-[10px] text-ink-500 flex-1">历史强支撑 · 180日</span>
+          <span class="num text-[11px] text-cn-dn">-11.06%</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Algorithm settings -->
+    <div class="p-4 border-b border-ink-800">
+      <div class="flex items-center justify-between mb-3">
+        <span class="tag text-ink-500">算法配置</span>
+        <span class="chip">默认</span>
+      </div>
+      <div class="space-y-3 text-[12px]">
+        <div>
+          <div class="flex justify-between mb-1"><span class="text-ink-300">回看周期</span><span class="num text-ink-200">120 日</span></div>
+          <input type="range" min="30" max="240" value="120" class="w-full accent-gold">
+        </div>
+        <div>
+          <div class="flex justify-between mb-1"><span class="text-ink-300">极值灵敏度</span><span class="num text-ink-200">0.6</span></div>
+          <input type="range" min="0" max="100" value="60" class="w-full accent-gold">
+        </div>
+        <div>
+          <div class="flex justify-between mb-1"><span class="text-ink-300">价位聚类容差</span><span class="num text-ink-200">1.2%</span></div>
+          <input type="range" min="0" max="100" value="40" class="w-full accent-gold">
+        </div>
+        <div class="flex flex-wrap gap-1.5 pt-1">
+          <span class="chip chip-on">局部极值</span>
+          <span class="chip chip-on">密集成交</span>
+          <span class="chip chip-on">均线动态</span>
+          <span class="chip">筹码峰</span>
+          <span class="chip">斐波回撤</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Backtest -->
+    <div class="p-4">
+      <div class="flex items-center justify-between mb-3">
+        <span class="tag text-ink-500">压力位历史有效性</span>
+        <span class="text-[11px] text-gold">R2 · 1,684.50</span>
+      </div>
+      <div class="grid grid-cols-3 gap-2">
+        <div class="bg-ink-850 ring-soft rounded-md p-3 text-center">
+          <div class="num text-lg text-white">86<span class="text-[10px] text-ink-500">%</span></div>
+          <div class="text-[10px] text-ink-500 mt-0.5">触及反应率</div>
+        </div>
+        <div class="bg-ink-850 ring-soft rounded-md p-3 text-center">
+          <div class="num text-lg text-cn-up">+3.4<span class="text-[10px] text-ink-500">%</span></div>
+          <div class="text-[10px] text-ink-500 mt-0.5">突破后5日收益</div>
+        </div>
+        <div class="bg-ink-850 ring-soft rounded-md p-3 text-center">
+          <div class="num text-lg text-white">68<span class="text-[10px] text-ink-500">%</span></div>
+          <div class="text-[10px] text-ink-500 mt-0.5">回踩成功率</div>
+        </div>
+      </div>
+
+      <button class="mt-3 w-full py-2 rounded-md bg-ink-850 ring-soft text-[12px] text-ink-200 hover:text-white">
+        <i class="fas fa-clock-rotate-left text-[11px] mr-1"></i> 查看完整回测报告
+      </button>
+    </div>
+
+  </aside>
+</main>
+
+<!-- ============== FOOTER STATUS BAR ============== -->
+<footer class="h-8 border-t border-ink-800 grad-head flex items-center px-4 text-[11px] text-ink-500 gap-4">
+  <span class="flex items-center gap-1.5"><span class="dot bg-cn-dn"></span> akshare 在线</span>
+  <span class="flex items-center gap-1.5"><span class="dot bg-cn-dn"></span> 算法引擎 v1.4.0</span>
+  <span>已扫描 4,832 / 5,201</span>
+  <span class="flex-1"></span>
+  <span><span class="kbd">F</span> 重新画线</span>
+  <span><span class="kbd">S</span> 切筛选</span>
+  <span><span class="kbd">⌘ ⇧ E</span> 导出</span>
+  <span class="text-ink-600">© PivotLab · 开源数据 · 仅供研究</span>
+</footer>
+
+<!-- Inline candle generator (visual only) -->
+<script>
+  (function () {
+    const svg = document.getElementById('candles');
+    const vol = document.getElementById('volume');
+    if (!svg) return;
+    const N = 60;
+    const xStart = 30, xEnd = 970;
+    const step = (xEnd - xStart) / (N - 1);
+    let price = 350; // y = price (lower y = higher price visually)
+    const candles = [];
+    const seed = (i) => Math.sin(i * 1.7) * 6 + Math.cos(i * 0.6) * 4;
+    for (let i = 0; i < N; i++) {
+      // overall uptrend: y goes from ~360 down to ~150
+      const trend = 360 - (i / (N - 1)) * 220;
+      const o = trend + seed(i);
+      const c = trend + seed(i + 1) - 2;
+      const h = Math.min(o, c) - 4 - Math.abs(seed(i + 2));
+      const l = Math.max(o, c) + 4 + Math.abs(seed(i + 3));
+      candles.push({ x: xStart + i * step, o, c, h, l });
+    }
+
+    let html = '';
+    candles.forEach((k, i) => {
+      const up = k.c < k.o; // lower y = higher price; up day means close above open => c<o
+      const color = up ? '#ef4444' : '#10b981';
+      const top = Math.min(k.o, k.c);
+      const bot = Math.max(k.o, k.c);
+      // wick
+      html += `<line x1="${k.x}" x2="${k.x}" y1="${k.h}" y2="${k.l}" stroke="${color}" stroke-width="1" stroke-opacity="0.85"/>`;
+      // body
+      html += `<rect x="${k.x - 4}" y="${top}" width="8" height="${Math.max(1, bot - top)}" fill="${color}" fill-opacity="${up ? 0.95 : 0.95}"/>`;
+    });
+    svg.innerHTML = html;
+
+    // volume bars
+    if (vol) {
+      let vh = '';
+      candles.forEach((k, i) => {
+        const up = k.c < k.o;
+        const color = up ? '#ef4444' : '#10b981';
+        const baseH = 20 + Math.abs(seed(i)) * 4 + (i > 50 ? 25 : 0);
+        const h = Math.min(78, baseH);
+        vh += `<rect x="${k.x - 4}" y="${88 - h}" width="8" height="${h}" fill="${color}" fill-opacity="0.55"/>`;
+      });
+      vol.innerHTML = vh;
+    }
+  })();
+</script>
+
+</body>
+</html>

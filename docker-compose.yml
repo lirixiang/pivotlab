@@ -1,0 +1,14 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        DOCKERHUB_LIBRARY_MIRROR: ${DOCKERHUB_LIBRARY_MIRROR:-m.daocloud.io/docker.io/library}
+    container_name: pivotlab
+    ports:
+      - "5173:80"
+      - "8001:18080"
+    volumes:
+      - ./backend/data:/app/backend/data
+    restart: unless-stopped
