@@ -1,19 +1,31 @@
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime
 
+from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import init_db
-from .routers import market, screener, stocks, watchlist
+from .routers import market, screener, stocks, watchlist, sync, settings
+from .services.data_provider import preload_candles
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s :: %(message)s")
+
+_scheduler = BackgroundScheduler()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # Pre-fetch candles on startup and refresh every 30 minutes
+    _scheduler.add_job(
+        preload_candles, "interval", minutes=30,
+        next_run_time=datetime.now(), id="preload_candles",
+    )
+    _scheduler.start()
     yield
+    _scheduler.shutdown(wait=False)
 
 
 app = FastAPI(title="PivotLab API", version="0.1.0", lifespan=lifespan)
@@ -30,6 +42,8 @@ app.include_router(market.router)
 app.include_router(stocks.router)
 app.include_router(screener.router)
 app.include_router(watchlist.router)
+app.include_router(sync.router)
+app.include_router(settings.router)
 
 
 @app.get("/api/health")

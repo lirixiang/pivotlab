@@ -15,6 +15,15 @@ export type Level = {
   touches: number;
   note?: string;
   distance_pct: number;
+  score?: number;          // 0-100 confidence (normalised)
+  factors?: Record<string, number | boolean>;  // score breakdown details
+  reasons?: string[];      // human-readable reason tags
+};
+
+export type SrFactor = {
+  key: string;
+  label: string;
+  default_weight: number;
 };
 
 export type StockQuote = {
@@ -28,6 +37,68 @@ export type StockQuote = {
   volume_ratio: number;
   turnover: number;
   industry: string;
+  market: string;
+  open: number;
+  high: number;
+  low: number;
+  prev_close: number;
+  turnover_rate: number;
+  pe_ratio: number;
+  market_cap: number;
+  concepts: string[];
+  fundamentals: FundamentalSnapshot | null;
+  analyst_consensus: AnalystConsensus | null;
+};
+
+export type FundamentalSnapshot = {
+  report_period: string;
+  eps_ttm: number;
+  roe: number;
+  revenue_yoy: number;
+  net_profit_yoy: number;
+  pe_ratio_ttm: number;
+  total_revenue: number;
+  net_profit: number;
+  fundamental_status: "healthy" | "neutral" | "weak" | "risk" | "unknown";
+  fundamental_summary: string;
+};
+
+export type AnalystConsensus = {
+  consensus_target: number | null;
+  target_high: number | null;
+  target_low: number | null;
+  analyst_count: number;
+  buy_count: number;
+  overweight_count: number;
+  neutral_count: number;
+  underweight_count: number;
+  sell_count: number;
+  eps_current_year: number | null;
+  eps_next_year: number | null;
+};
+
+export type SyncTask = {
+  id: number;
+  task_type: string;
+  status: string;
+  total: number;
+  processed: number;
+  error_msg: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
+export type DbStats = {
+  stocks: number;
+  daily_candles: number;
+  candle_codes: number;
+  candle_min_date: string;
+  candle_max_date: string;
+  quote_cache: number;
+  financial_snapshots: number;
+  stock_concepts: number;
+  analyst_consensus: number;
+  sync_tasks: number;
 };
 
 export type StockDetail = {
@@ -76,5 +147,10 @@ export type WatchlistItem = {
   code: string;
   name: string;
   note: string;
+  industry: string;
+  price: number;
+  change_pct: number;
+  volume: number;
+  amount: number;
   created_at: string;
 };

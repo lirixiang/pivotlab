@@ -5,20 +5,33 @@ type Props = {
   price: number;
 };
 
+function strengthBadge(score: number | undefined) {
+  if (!score) return { text: "—", cls: "text-ink-500" };
+  if (score >= 70) return { text: "强", cls: "text-cn-up" };
+  if (score >= 40) return { text: "中", cls: "text-gold" };
+  return { text: "弱", cls: "text-ink-500" };
+}
+
 export function LevelsPanel({ levels, price }: Props) {
   const resistances = levels.filter((l) => l.kind === "resistance");
   const supports = levels.filter((l) => l.kind === "support");
 
   const Row = ({ l }: { l: Level }) => {
     const color = l.kind === "resistance" ? "text-gold" : "text-sky2";
-    const stars = "★".repeat(l.strength);
+    const badge = strengthBadge(l.score);
     const distColor = l.distance_pct >= 0 ? "text-cn-up" : "text-cn-dn";
+    const reasons = l.reasons?.length ? l.reasons : [];
+    const isWeekly = !!l.factors?.weekly_confluence;
     return (
-      <div className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-ink-850">
+      <div className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-ink-850 group">
         <span className={"num text-[11px] w-8 " + color}>{l.label}</span>
         <span className="num text-[12px] text-ink-100 w-16">{l.price.toFixed(2)}</span>
-        <span className={"text-[10px] w-16 " + color}>{stars}</span>
-        <span className="text-[10px] text-ink-500 flex-1 truncate">{l.note}</span>
+        <span className={"text-[10px] font-medium w-6 text-center " + badge.cls}>{badge.text}</span>
+        {isWeekly && <span className="text-[9px] text-blue-400 font-medium">周</span>}
+        <span className="num text-[10px] text-ink-400 w-8">{l.score ? Math.round(l.score) : "—"}</span>
+        <span className="text-[10px] text-ink-500 flex-1 truncate">
+          {reasons.length > 0 ? reasons.join(" · ") : l.note}
+        </span>
         <span className={"num text-[11px] " + distColor}>
           {l.distance_pct >= 0 ? "+" : ""}
           {l.distance_pct.toFixed(2)}%

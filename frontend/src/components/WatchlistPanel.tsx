@@ -1,25 +1,78 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../services/api";
+import type { WatchlistItem } from "../types";
 
-type Item = { code: string; name: string; industry: string };
+type UnivItem = { code: string; name: string; industry: string };
 
 export function WatchlistPanel({
   activeCode,
   onSelect,
   scanCounts,
+  refreshKey,
 }: {
   activeCode: string;
   onSelect: (code: string) => void;
   scanCounts: { breakout: number; bottom: number; high: number };
+  refreshKey?: number;
 }) {
-  const [items, setItems] = useState<Item[]>([]);
-  const [tab, setTab] = useState<"all" | "breakout" | "bottom" | "watch">("all");
+  const [items, setItems] = useState<WatchlistItem[]>([]);
+  const [showAdd, setShowAdd] = useState(false);
+  const [addQuery, setAddQuery] = useState("");
+  const [addResults, setAddResults] = useState<UnivItem[]>([]);
+  const addRef = useRef<HTMLDivElement>(null);
+  const addTimer = useRef<ReturnType<typeof setTimeout>>();
 
-  useEffect(() => {
-    api.universe().then(setItems).catch(() => {});
+  // Load watchlist from DB
+  const loadWatchlist = useCallback(() => {
+    api.watchlist().then(setItems).catch(() => {});
   }, []);
 
-  const filtered = items;
+  useEffect(() => {
+    loadWatchlist();
+  }, [loadWatchlist, refreshKey]);
+
+  // Auto-refresh watchlist every 30s for price updates
+  useEffect(() => {
+    const t = setInterval(loadWatchlist, 30_000);
+    return () => clearInterval(t);
+  }, [loadWatchlist]);
+
+  // Debounced remote search for add panel
+  useEffect(() => {
+    const q = addQuery.trim();
+    if (!q) { setAddResults([]); return; }
+    clearTimeout(addTimer.current);
+    addTimer.current = setTimeout(() => {
+      api.searchStocks(q, 10).then(setAddResults).catch(() => {});
+    }, 250);
+    return () => clearTimeout(addTimer.current);
+  }, [addQuery]);
+
+  // Close add popover on outside click
+  useEffect(() => {
+    if (!showAdd) return;
+    const handler = (e: MouseEvent) => {
+      if (addRef.current && !addRef.current.contains(e.target as Node)) setShowAdd(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showAdd]);
+
+  const watchedCodes = new Set(items.map((i) => i.code));
+
+  const handleAdd = async (code: string, name: string) => {
+    await api.addWatch(code, name);
+    loadWatchlist();
+    setShowAdd(false);
+    setAddQuery("");
+  };
+
+  const handleRemove = async (code: string) => {
+    await api.removeWatch(code);
+    setItems((prev) => prev.filter((i) => i.code !== code));
+  };
+
+
 
   return (
     <aside className="border-r border-ink-700 bg-ink-900 flex flex-col h-full">
@@ -29,48 +82,66 @@ export function WatchlistPanel({
             <span className="tag text-ink-500">自选 · WATCHLIST</span>
             <span className="text-[11px] text-ink-500">{items.length}</span>
           </div>
-          <button className="text-ink-500 hover:text-white text-xs">
-            <i className="fas fa-plus" />
-          </button>
-        </div>
-        <div className="seg w-full">
-          {(["all", "breakout", "bottom", "watch"] as const).map((k) => (
+          <div className="relative" ref={addRef}>
             <button
-              key={k}
-              className={"flex-1 " + (tab === k ? "on" : "")}
-              onClick={() => setTab(k)}
+              className="w-6 h-6 flex items-center justify-center rounded bg-ink-800 hover:bg-gold/20 text-ink-400 hover:text-gold text-sm transition"
+              onClick={() => setShowAdd(!showAdd)}
+              title="添加自选"
             >
-              {k === "all" ? "全部" : k === "breakout" ? "突破" : k === "bottom" ? "企稳" : "观察"}
+              +
             </button>
-          ))}
+            {showAdd && (
+              <div className="absolute right-0 top-full mt-1 w-64 bg-ink-900 border border-ink-700 rounded-lg shadow-2xl z-50 overflow-hidden">
+                <div className="p-2 border-b border-ink-800">
+                  <input
+                    autoFocus
+                    className="w-full bg-ink-850 border border-ink-700 rounded px-3 py-1.5 text-[12px] placeholder:text-ink-500 focus:outline-none focus:border-gold/60"
+                    placeholder="搜索代码/名称/行业"
+                    value={addQuery}
+                    onChange={(e) => setAddQuery(e.target.value)}
+                  />
+                </div>
+                <div className="max-h-[240px] overflow-y-auto">
+                  {addResults.map((s) => (
+                    <button
+                      key={s.code}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-left text-[12px] hover:bg-ink-800 transition"
+                      onClick={() => handleAdd(s.code, s.name)}
+                    >
+                      <span className="num text-ink-500 w-14">{s.code}</span>
+                      <span className="flex-1 text-ink-200">{s.name}</span>
+                      {watchedCodes.has(s.code) ? (
+                        <span className="text-[10px] text-gold">已添加</span>
+                      ) : (
+                        <span className="text-[10px] text-ink-500">{s.industry}</span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
+
       </div>
 
       <div className="overflow-y-auto scrollbar flex-1">
-        {filtered.map((it) => {
+        {items.length === 0 && (
+          <div className="p-6 text-center text-ink-500 text-[12px]">
+            <i className="fas fa-star text-2xl text-ink-700 mb-3 block" />
+            <div>还没有自选股</div>
+            <div className="mt-1 text-[11px]">点击右上角 + 或在K线图点 ☆加自选</div>
+          </div>
+        )}
+        {items.map((it) => {
           const active = it.code === activeCode;
-          // Stable but "fake" badges for visual richness
-          const seed = parseInt(it.code) % 5;
-          const badges =
-            seed === 0
-              ? [{ cls: "chip-on", text: "突破回踩" }]
-              : seed === 1
-              ? [{ cls: "chip-up", text: "逼近压力" }]
-              : seed === 2
-              ? [{ cls: "chip-dn", text: "下跌企稳" }]
-              : seed === 3
-              ? [{ cls: "", text: "箱体震荡" }]
-              : [{ cls: "", text: "支撑测试" }];
-          // pseudo price
-          const base = 10 + (parseInt(it.code) % 1000) / 5;
-          const chg = ((parseInt(it.code) % 700) - 300) / 100;
-          const up = chg >= 0;
+          const up = it.change_pct >= 0;
           return (
             <div
               key={it.code}
               onClick={() => onSelect(it.code)}
               className={
-                "px-3 py-2.5 cursor-pointer border-b border-ink-850/60 row-hover " +
+                "group px-3 py-2.5 cursor-pointer border-b border-ink-850/60 row-hover relative " +
                 (active ? "border-l-2 border-gold bg-ink-850" : "")
               }
             >
@@ -81,25 +152,32 @@ export function WatchlistPanel({
                   </div>
                   <div className="text-[10px] text-ink-500 num tracking-wider">
                     {it.code} · {it.code.startsWith("6") ? "SH" : "SZ"}
+                    {it.industry ? ` · ${it.industry}` : ""}
                   </div>
                 </div>
                 <div className="text-right num">
-                  <div className={"text-[13px] " + (up ? "text-cn-up" : "text-cn-dn")}>
-                    {base.toFixed(2)}
-                  </div>
-                  <div className={"text-[10px] " + (up ? "text-cn-up" : "text-cn-dn")}>
-                    {up ? "+" : ""}
-                    {chg.toFixed(2)}%
-                  </div>
+                  {it.price > 0 ? (
+                    <>
+                      <div className={"text-[13px] " + (up ? "text-cn-up" : "text-cn-dn")}>
+                        {it.price.toFixed(2)}
+                      </div>
+                      <div className={"text-[10px] " + (up ? "text-cn-up" : "text-cn-dn")}>
+                        {up ? "+" : ""}{it.change_pct.toFixed(2)}%
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-[11px] text-ink-600">待同步</div>
+                  )}
                 </div>
               </div>
-              <div className="flex items-center gap-1.5 mt-1.5">
-                {badges.map((b, i) => (
-                  <span key={i} className={"chip " + b.cls}>
-                    {b.text}
-                  </span>
-                ))}
-              </div>
+              {/* Remove button */}
+              <button
+                  className="absolute right-2 top-2 opacity-0 group-hover:opacity-100 text-ink-600 hover:text-red-400 text-[10px] transition"
+                  onClick={(e) => { e.stopPropagation(); handleRemove(it.code); }}
+                  title="移除自选"
+                >
+                  <i className="fas fa-xmark" />
+                </button>
             </div>
           );
         })}
@@ -107,7 +185,7 @@ export function WatchlistPanel({
 
       <div className="border-t border-ink-800 p-3 grad-card">
         <div className="flex items-center justify-between mb-2">
-          <span className="tag text-ink-500">今日扫描 · {items.length} 只</span>
+          <span className="tag text-ink-500">今日扫描</span>
           <span className="text-[11px] text-gold">实时</span>
         </div>
         <div className="grid grid-cols-3 gap-2 text-center">

@@ -1,14 +1,35 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { TopBar, IndexStrip, type TabKey } from "./components/TopBar";
 import { WorkspacePage } from "./pages/WorkspacePage";
 import { ScreenerPage } from "./pages/ScreenerPage";
 import { BacktestPage } from "./pages/BacktestPage";
 import { MonitorPage } from "./pages/MonitorPage";
+import { SyncPage } from "./pages/SyncPage";
 import type { ScreenerItem } from "./types";
 
+// ── URL ↔ state helpers ──
+const TAB_PATHS: Record<TabKey, string> = {
+  workspace: "/",
+  screener: "/screener",
+  backtest: "/backtest",
+  monitor: "/monitor",
+  sync: "/sync",
+};
+const PATH_TO_TAB: Record<string, TabKey> = Object.fromEntries(
+  Object.entries(TAB_PATHS).map(([k, v]) => [v, k as TabKey]),
+) as Record<string, TabKey>;
+
+function parseLocation(): { tab: TabKey; code: string } {
+  const p = window.location.pathname;
+  // /stock/600519 → workspace with code
+  const stockMatch = p.match(/^\/stock\/(\d{6})$/);
+  if (stockMatch) return { tab: "workspace", code: stockMatch[1] };
+  return { tab: PATH_TO_TAB[p] ?? "workspace", code: "" };
+}
+
 export default function App() {
-  const [tab, setTab] = useState<TabKey>("workspace");
-  const [code, setCode] = useState("600519");
+  const [tab, setTab] = useState<TabKey>(() => parseLocation().tab);
+  const [code, setCode] = useState(() => parseLocation().code || "600519");
   const [breakoutResults, setBreakoutResults] = useState<ScreenerItem[]>([]);
   const [bottomResults, setBottomResults] = useState<ScreenerItem[]>([]);
 
@@ -16,22 +37,68 @@ export default function App() {
     breakoutResults.filter((i) => i.score >= 80).length +
     bottomResults.filter((i) => i.score >= 80).length;
 
-  const goWorkspace = (c: string) => {
+  // Push URL on tab/code change
+  const pushUrl = useCallback((t: TabKey, c?: string) => {
+    const path = t === "workspace" ? `/stock/${c || code}` : TAB_PATHS[t];
+    if (window.location.pathname !== path) {
+      window.history.pushState(null, "", path);
+    }
+  }, [code]);
+
+  // Handle tab changes
+  const handleTabChange = useCallback((t: TabKey) => {
+    setTab(t);
+    pushUrl(t);
+  }, [pushUrl]);
+
+  // Handle stock selection — navigate to workspace
+  const goWorkspace = useCallback((c: string) => {
     setCode(c);
     setTab("workspace");
-  };
+    const path = `/stock/${c}`;
+    if (window.location.pathname !== path) {
+      window.history.pushState(null, "", path);
+    }
+  }, []);
+
+  // Handle code selection within workspace (no tab change)
+  const handleSelectCode = useCallback((c: string) => {
+    setCode(c);
+    const path = `/stock/${c}`;
+    if (window.location.pathname !== path) {
+      window.history.pushState(null, "", path);
+    }
+  }, []);
+
+  // Listen to browser back/forward
+  useEffect(() => {
+    const onPop = () => {
+      const { tab: t, code: c } = parseLocation();
+      setTab(t);
+      if (c) setCode(c);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  // Set initial URL if at root
+  useEffect(() => {
+    if (window.location.pathname === "/") {
+      window.history.replaceState(null, "", `/stock/${code}`);
+    }
+  }, []);
 
   return (
     <div className="min-h-screen flex flex-col">
       <header className="grad-head border-b border-ink-700 sticky top-0 z-30">
-        <TopBar tab={tab} onTabChange={setTab} />
+        <TopBar tab={tab} onTabChange={handleTabChange} onSearch={goWorkspace} />
         <IndexStrip />
       </header>
 
       {tab === "workspace" && (
         <WorkspacePage
           code={code}
-          onSelect={setCode}
+          onSelect={handleSelectCode}
           onScanResults={(r) => {
             setBreakoutResults(r.breakout);
             setBottomResults(r.bottom);
@@ -49,6 +116,7 @@ export default function App() {
       {tab === "screener" && <ScreenerPage onPickStock={goWorkspace} />}
       {tab === "backtest" && <BacktestPage defaultCode={code} />}
       {tab === "monitor" && <MonitorPage onPickStock={goWorkspace} />}
+      {tab === "sync" && <SyncPage />}
 
       <footer className="h-8 border-t border-ink-800 grad-head flex items-center px-4 text-[11px] text-ink-500 gap-4">
         <span className="flex items-center gap-1.5">

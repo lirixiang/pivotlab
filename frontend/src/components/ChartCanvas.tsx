@@ -1,180 +1,508 @@
-import { useMemo } from "react";
-import type { Candle, Level } from "../types";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { Candle, Level, AnalystConsensus } from "../types";
 
 type Props = {
   candles: Candle[];
   levels: Level[];
+  consensus?: AnalystConsensus | null;
 };
 
-const W = 1000;
-const H_PRICE = 460;
-const H_VOL = 90;
-const PAD_L = 30;
-const PAD_R = 30;
+/* ── constants ── */
+const UP = "#ef4444";
+const DN = "#10b981";
+const GRID = "#141923";
+const BG = "#0b0f19";
+const TEXT = "#6b7388";
+const CROSS = "#3a4254";
+const GOLD = "#d4a857";
+const SKY = "#7dd3fc";
+const PRICE_LABEL_W = 72;
+const VOL_RATIO = 0.18;      // volume pane height ratio
+const PAD_T = 18;
+const PAD_B = 28;
+const PAD_L = 16;
+const MIN_VISIBLE = 20;
+const MAX_VISIBLE = 300;
+const DEFAULT_VISIBLE = 90;
 
-export function ChartCanvas({ candles, levels }: Props) {
-  const { mappedCandles, priceToY, last } = useMemo(() => {
-    if (!candles.length) {
-      return { mappedCandles: [] as any[], priceToY: (_: number) => 0, last: 0 };
+function clamp(v: number, lo: number, hi: number) { return Math.max(lo, Math.min(hi, v)); }
+function fmtPrice(v: number, range: number) {
+  const d = range < 2 ? 3 : range < 20 ? 2 : 1;
+  return v.toFixed(d);
+}
+function fmtVol(v: number) {
+  if (v >= 1e8) return `${(v / 1e8).toFixed(1)}亿`;
+  if (v >= 1e4) return `${(v / 1e4).toFixed(0)}万`;
+  return v.toFixed(0);
+}
+function fmtDate(s: string) { return s.length >= 10 ? s.slice(5) : s; }
+
+export function ChartCanvas({ candles, levels, consensus }: Props) {
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const cvRef = useRef<HTMLCanvasElement>(null);
+  const rafRef = useRef(0);
+
+  // viewport: [start, end) indices into candles
+  const vpRef = useRef<{ start: number; end: number } | null>(null);
+  // interaction state
+  const dragRef = useRef<{ sx: number; vpStart: number; vpEnd: number; moved: boolean } | null>(null);
+  const [hover, setHover] = useState<{ x: number; y: number } | null>(null);
+  const hoverRef = useRef(hover);
+  hoverRef.current = hover;
+
+  /* ── ensure viewport ── */
+  const ensureVp = useCallback(() => {
+    const n = candles.length;
+    if (n === 0) { vpRef.current = { start: 0, end: 0 }; return; }
+    if (!vpRef.current) {
+      const cnt = Math.min(n, DEFAULT_VISIBLE);
+      vpRef.current = { start: n - cnt, end: n };
+      return;
     }
-    const lows = candles.map((c) => c.low);
-    const highs = candles.map((c) => c.high);
-    const minP = Math.min(...lows, ...levels.map((l) => l.price)) * 0.99;
-    const maxP = Math.max(...highs, ...levels.map((l) => l.price)) * 1.01;
-    const range = maxP - minP || 1;
-    const xStart = PAD_L;
-    const xEnd = W - PAD_R;
-    const step = (xEnd - xStart) / Math.max(1, candles.length - 1);
-    const priceToY = (p: number) => 12 + ((maxP - p) / range) * (H_PRICE - 24);
-    const mapped = candles.map((c, i) => {
-      const x = xStart + i * step;
-      return {
-        x,
-        c,
-        oY: priceToY(c.open),
-        cY: priceToY(c.close),
-        hY: priceToY(c.high),
-        lY: priceToY(c.low),
-        up: c.close >= c.open,
+    // keep existing viewport but clamp
+    const vp = vpRef.current;
+    const cnt = clamp(vp.end - vp.start, MIN_VISIBLE, MAX_VISIBLE);
+    let end = clamp(vp.end, cnt, n);
+    let start = end - cnt;
+    if (start < 0) { start = 0; end = Math.min(n, cnt); }
+    vpRef.current = { start, end };
+  }, [candles.length]);
+
+  /* ── draw ── */
+  const draw = useCallback(() => {
+    const cv = cvRef.current;
+    const wrap = wrapRef.current;
+    if (!cv || !wrap) return;
+    const dpr = window.devicePixelRatio || 1;
+    const W = wrap.clientWidth;
+    const H = wrap.clientHeight;
+    if (W < 10 || H < 10) return;
+    if (cv.width !== W * dpr || cv.height !== H * dpr) {
+      cv.width = W * dpr;
+      cv.height = H * dpr;
+      cv.style.width = `${W}px`;
+      cv.style.height = `${H}px`;
+    }
+    const ctx = cv.getContext("2d")!;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+
+    ensureVp();
+    const vp = vpRef.current!;
+    const slice = candles.slice(vp.start, vp.end);
+    const n = slice.length;
+    if (n === 0) { ctx.fillStyle = TEXT; ctx.font = "13px sans-serif"; ctx.fillText("暂无数据", W / 2 - 28, H / 2); return; }
+
+    const padR = PRICE_LABEL_W + 8;
+    const plotW = W - PAD_L - padR;
+    const volH = Math.max(40, Math.min(96, H * VOL_RATIO));
+    const gap = 12;
+    const priceH = H - PAD_T - PAD_B - volH - gap;
+    const volTop = PAD_T + priceH + gap;
+
+    const step = plotW / n;
+    const cw = Math.max(1, step * 0.65);
+    const xOf = (i: number) => PAD_L + i * step + step / 2;
+
+    // price range
+    let pMin = Infinity, pMax = -Infinity;
+    for (const c of slice) { if (c.low < pMin) pMin = c.low; if (c.high > pMax) pMax = c.high; }
+    for (const l of levels) { if (l.price < pMin) pMin = l.price; if (l.price > pMax) pMax = l.price; }
+    if (consensus?.consensus_target) {
+      if (consensus.target_high != null) { if (consensus.target_high > pMax) pMax = consensus.target_high; if (consensus.target_high < pMin) pMin = consensus.target_high; }
+      if (consensus.target_low != null) { if (consensus.target_low > pMax) pMax = consensus.target_low; if (consensus.target_low < pMin) pMin = consensus.target_low; }
+    }
+    const pPad = (pMax - pMin) * 0.04 || 1;
+    pMin -= pPad; pMax += pPad;
+    const pRange = pMax - pMin || 1;
+    const priceY = (p: number) => PAD_T + ((pMax - p) / pRange) * priceH;
+
+    // vol range
+    let vMax = 0;
+    for (const c of slice) { if (c.volume > vMax) vMax = c.volume; }
+    vMax = vMax || 1;
+
+    /* ── grid ── */
+    ctx.strokeStyle = GRID;
+    ctx.lineWidth = 0.5;
+    // horizontal grid (price area)
+    const gridRows = 5;
+    for (let i = 0; i <= gridRows; i++) {
+      const y = PAD_T + (priceH / gridRows) * i;
+      ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - padR, y); ctx.stroke();
+    }
+    // price axis labels
+    ctx.fillStyle = TEXT;
+    ctx.font = "10px 'JetBrains Mono', monospace";
+    ctx.textAlign = "left";
+    for (let i = 0; i <= gridRows; i++) {
+      const y = PAD_T + (priceH / gridRows) * i;
+      const p = pMax - (pRange / gridRows) * i;
+      ctx.fillText(fmtPrice(p, pRange), W - padR + 6, y + 3);
+    }
+    // date axis (every ~N candles)
+    ctx.textAlign = "center";
+    const dateStep = Math.max(1, Math.floor(n / 6));
+    for (let i = 0; i < n; i += dateStep) {
+      const x = xOf(i);
+      ctx.fillText(fmtDate(slice[i].date), x, H - 6);
+      ctx.beginPath(); ctx.moveTo(x, PAD_T); ctx.lineTo(x, PAD_T + priceH); ctx.stroke();
+    }
+
+    /* ── levels (strength-based visuals) ── */
+    for (const l of levels) {
+      const y = priceY(l.price);
+      if (y < PAD_T - 10 || y > PAD_T + priceH + 10) continue;
+      const color = l.kind === "resistance" ? GOLD : SKY;
+      const score = l.score ?? (l.strength * 20);
+
+      // Strength-based visual parameters
+      const lineW = score >= 70 ? 2.2 : score >= 50 ? 1.6 : score >= 30 ? 1.0 : 0.7;
+      const alpha = Math.min(0.95, 0.3 + score / 120);
+      const dashPattern: number[] = score >= 60 ? [10, 4] : score >= 40 ? [6, 4] : [4, 5];
+
+      ctx.save();
+
+      // Glow effect for strong levels (score >= 60)
+      if (score >= 60) {
+        ctx.globalAlpha = 0.12 + (score - 60) * 0.003;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = lineW + 4;
+        ctx.setLineDash([]);
+        ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - padR, y); ctx.stroke();
+
+        // Subtle zone band
+        ctx.fillStyle = color;
+        ctx.globalAlpha = 0.04 + (score - 60) * 0.001;
+        const bandH = score >= 80 ? 8 : 5;
+        ctx.fillRect(PAD_L, y - bandH / 2, W - PAD_L - padR, bandH);
+      }
+
+      // Main dashed line
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = lineW;
+      ctx.setLineDash(dashPattern);
+      ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - padR, y); ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Label with score and stars
+      ctx.font = "10px 'JetBrains Mono', monospace";
+      ctx.fillStyle = color;
+      const stars = "★".repeat(l.strength) + "☆".repeat(Math.max(0, 5 - l.strength));
+      const scoreTxt = score > 0 ? ` ${score.toFixed(0)}分` : "";
+      const noteTxt = l.note ? ` · ${l.note}` : "";
+      const txt = `${l.label}  ${l.price.toFixed(2)}  ${stars}${scoreTxt}${noteTxt}`;
+      if (l.kind === "resistance") {
+        ctx.textAlign = "left";
+        ctx.fillText(txt, PAD_L + 4, y - 5);
+      } else {
+        ctx.textAlign = "right";
+        ctx.fillText(txt, W - padR - 4, y - 5);
+      }
+      ctx.restore();
+    }
+
+    /* ── consensus target price lines ── */
+    if (consensus?.consensus_target) {
+      const PURPLE = "#a855f7";
+      const drawTarget = (price: number, label: string, alpha: number, lineW: number, dash: number[]) => {
+        const y = priceY(price);
+        if (y < PAD_T - 10 || y > PAD_T + priceH + 10) return;
+        ctx.save();
+        // Glow
+        ctx.globalAlpha = 0.10;
+        ctx.strokeStyle = PURPLE;
+        ctx.lineWidth = lineW + 4;
+        ctx.setLineDash([]);
+        ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - padR, y); ctx.stroke();
+        // Line
+        ctx.globalAlpha = alpha;
+        ctx.strokeStyle = PURPLE;
+        ctx.lineWidth = lineW;
+        ctx.setLineDash(dash);
+        ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - padR, y); ctx.stroke();
+        ctx.setLineDash([]);
+        // Label
+        ctx.fillStyle = PURPLE;
+        ctx.font = "10px 'JetBrains Mono', monospace";
+        ctx.textAlign = "right";
+        ctx.fillText(`${label}  ${price.toFixed(2)}`, W - padR - 4, y - 5);
+        ctx.restore();
       };
-    });
-    return { mappedCandles: mapped, priceToY, last: candles[candles.length - 1].close };
-  }, [candles, levels]);
+      drawTarget(consensus.consensus_target, "◎ 一致目标", 0.85, 1.8, [8, 4]);
+      if (consensus.target_high != null) drawTarget(consensus.target_high, "目标高", 0.45, 0.8, [4, 6]);
+      if (consensus.target_low != null) drawTarget(consensus.target_low, "目标低", 0.45, 0.8, [4, 6]);
+    }
 
-  const maxVol = useMemo(
-    () => Math.max(1, ...candles.map((c) => c.volume)),
-    [candles]
-  );
+    /* ── consensus target price lines ── */
+    if (consensus?.consensus_target) {
+      const CONSENSUS_CLR = "#c084fc"; // purple for analyst target
+      const targets: { price: number; label: string }[] = [];
+      if (consensus.target_high != null) targets.push({ price: consensus.target_high, label: "目标高" });
+      if (consensus.consensus_target != null) targets.push({ price: consensus.consensus_target, label: "一致目标价" });
+      if (consensus.target_low != null) targets.push({ price: consensus.target_low, label: "目标低" });
 
-  const candleWidth = mappedCandles.length > 1 ? Math.max(2, (mappedCandles[1].x - mappedCandles[0].x) * 0.65) : 6;
+      for (const t of targets) {
+        const y = priceY(t.price);
+        if (y < PAD_T - 10 || y > PAD_T + priceH + 10) continue;
+        ctx.save();
+
+        const isMain = t.label === "一致目标价";
+
+        // Glow for main target
+        if (isMain) {
+          ctx.globalAlpha = 0.10;
+          ctx.strokeStyle = CONSENSUS_CLR;
+          ctx.lineWidth = 5;
+          ctx.setLineDash([]);
+          ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - padR, y); ctx.stroke();
+        }
+
+        // Dashed line
+        ctx.globalAlpha = isMain ? 0.85 : 0.45;
+        ctx.strokeStyle = CONSENSUS_CLR;
+        ctx.lineWidth = isMain ? 1.8 : 0.8;
+        ctx.setLineDash(isMain ? [8, 4] : [4, 6]);
+        ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - padR, y); ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Label
+        ctx.font = "10px 'JetBrains Mono', monospace";
+        ctx.fillStyle = CONSENSUS_CLR;
+        ctx.globalAlpha = isMain ? 0.9 : 0.6;
+        ctx.textAlign = "right";
+        const lbl = `${t.label} ${t.price.toFixed(2)}`;
+        ctx.fillText(lbl, W - padR - 4, y + (isMain ? -5 : 12));
+
+        ctx.restore();
+      }
+    }
+
+    /* ── candles ── */
+    for (let i = 0; i < n; i++) {
+      const c = slice[i];
+      const x = xOf(i);
+      const up = c.close >= c.open;
+      const color = up ? UP : DN;
+      // wick
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.globalAlpha = 0.85;
+      ctx.beginPath(); ctx.moveTo(x, priceY(c.high)); ctx.lineTo(x, priceY(c.low)); ctx.stroke();
+      // body
+      ctx.globalAlpha = 0.95;
+      ctx.fillStyle = color;
+      const oY = priceY(c.open), cY = priceY(c.close);
+      const top = Math.min(oY, cY), h = Math.max(1, Math.abs(oY - cY));
+      ctx.fillRect(x - cw / 2, top, cw, h);
+      ctx.globalAlpha = 1;
+    }
+
+    /* ── latest price line ── */
+    const last = slice[n - 1].close;
+    const lastY = priceY(last);
+    ctx.strokeStyle = CROSS;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 3]);
+    ctx.globalAlpha = 0.6;
+    ctx.beginPath(); ctx.moveTo(PAD_L, lastY); ctx.lineTo(W - padR, lastY); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+    // price badge
+    ctx.fillStyle = "#1a2030";
+    ctx.strokeStyle = GOLD;
+    ctx.lineWidth = 0.6;
+    const bx = W - padR + 2, bw = PRICE_LABEL_W - 4, bh = 16;
+    ctx.beginPath();
+    ctx.roundRect(bx, lastY - bh / 2, bw, bh, 2);
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle = "#e6c98a";
+    ctx.font = "10px 'JetBrains Mono', monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(last.toFixed(2), bx + bw / 2, lastY + 4);
+
+    /* ── volume bars ── */
+    // vol grid line
+    ctx.strokeStyle = GRID; ctx.lineWidth = 0.5;
+    ctx.beginPath(); ctx.moveTo(PAD_L, volTop); ctx.lineTo(W - padR, volTop); ctx.stroke();
+    ctx.fillStyle = TEXT; ctx.font = "10px 'JetBrains Mono', monospace";
+    ctx.textAlign = "left"; ctx.fillText("VOL", PAD_L + 4, volTop + 12);
+    for (let i = 0; i < n; i++) {
+      const c = slice[i];
+      const x = xOf(i);
+      const up = c.close >= c.open;
+      const h = Math.max(1, (c.volume / vMax) * (volH - 12));
+      ctx.fillStyle = up ? UP : DN;
+      ctx.globalAlpha = 0.55;
+      ctx.fillRect(x - cw / 2, volTop + volH - h, cw, h);
+    }
+    ctx.globalAlpha = 1;
+
+    /* ── crosshair + tooltip ── */
+    const mouse = hoverRef.current;
+    if (mouse && mouse.x >= PAD_L && mouse.x <= W - padR && mouse.y >= PAD_T && mouse.y <= volTop + volH) {
+      // find nearest candle
+      const ci = clamp(Math.round((mouse.x - PAD_L - step / 2) / step), 0, n - 1);
+      const cx = xOf(ci);
+      const c = slice[ci];
+      // vertical line
+      ctx.strokeStyle = "#4a5568";
+      ctx.lineWidth = 0.5;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(cx, PAD_T); ctx.lineTo(cx, volTop + volH); ctx.stroke();
+      // horizontal line
+      ctx.beginPath(); ctx.moveTo(PAD_L, mouse.y); ctx.lineTo(W - padR, mouse.y); ctx.stroke();
+      ctx.setLineDash([]);
+      // price at cursor
+      if (mouse.y >= PAD_T && mouse.y <= PAD_T + priceH) {
+        const hp = pMax - ((mouse.y - PAD_T) / priceH) * pRange;
+        ctx.fillStyle = "#1e293b";
+        ctx.beginPath();
+        ctx.roundRect(W - padR + 2, mouse.y - 8, PRICE_LABEL_W - 4, 16, 2);
+        ctx.fill();
+        ctx.fillStyle = "#cbd5e1";
+        ctx.font = "10px 'JetBrains Mono', monospace";
+        ctx.textAlign = "center";
+        ctx.fillText(fmtPrice(hp, pRange), W - padR + 2 + (PRICE_LABEL_W - 4) / 2, mouse.y + 4);
+      }
+      // date at cursor
+      ctx.fillStyle = "#1e293b";
+      ctx.beginPath();
+      ctx.roundRect(cx - 32, H - PAD_B + 2, 64, 16, 2);
+      ctx.fill();
+      ctx.fillStyle = "#cbd5e1";
+      ctx.textAlign = "center";
+      ctx.fillText(fmtDate(c.date), cx, H - PAD_B + 14);
+      // OHLC tooltip top-left
+      const up = c.close >= c.open;
+      ctx.font = "11px 'JetBrains Mono', monospace";
+      ctx.textAlign = "left";
+      const items = [
+        { l: "开", v: c.open.toFixed(2) },
+        { l: "高", v: c.high.toFixed(2) },
+        { l: "低", v: c.low.toFixed(2) },
+        { l: "收", v: c.close.toFixed(2) },
+        { l: "量", v: fmtVol(c.volume) },
+      ];
+      let tx = PAD_L + 8;
+      const ty = PAD_T + 12;
+      for (const it of items) {
+        ctx.fillStyle = TEXT;
+        ctx.fillText(it.l, tx, ty);
+        tx += 14;
+        ctx.fillStyle = up ? UP : DN;
+        ctx.fillText(it.v, tx, ty);
+        tx += ctx.measureText(it.v).width + 12;
+      }
+    }
+  }, [candles, levels, consensus, ensureVp]);
+
+  /* ── schedule draw ── */
+  const scheduleDraw = useCallback(() => {
+    cancelAnimationFrame(rafRef.current);
+    rafRef.current = requestAnimationFrame(draw);
+  }, [draw]);
+
+  /* ── resize observer ── */
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => scheduleDraw());
+    ro.observe(el);
+    scheduleDraw();
+    return () => { ro.disconnect(); cancelAnimationFrame(rafRef.current); };
+  }, [scheduleDraw]);
+
+  /* ── redraw on data change ── */
+  useEffect(() => {
+    // reset viewport when candle data changes significantly
+    const n = candles.length;
+    const vp = vpRef.current;
+    if (!vp || Math.abs((vp.end - vp.start) - 0) === 0) {
+      vpRef.current = null; // will re-init in ensureVp
+    }
+    scheduleDraw();
+  }, [candles, levels, consensus, scheduleDraw]);
+
+  /* ── mouse handlers ── */
+  const getPos = (e: React.MouseEvent) => {
+    const r = cvRef.current!.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  };
+
+  const onMouseDown = (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    const { x } = getPos(e);
+    const vp = vpRef.current;
+    if (!vp) return;
+    dragRef.current = { sx: x, vpStart: vp.start, vpEnd: vp.end, moved: false };
+    (e.target as HTMLElement).setPointerCapture((e.nativeEvent as PointerEvent).pointerId);
+  };
+
+  const onMouseMove = (e: React.MouseEvent) => {
+    const pos = getPos(e);
+    const drag = dragRef.current;
+    if (drag) {
+      const dx = pos.x - drag.sx;
+      if (Math.abs(dx) > 2) drag.moved = true;
+      if (!drag.moved) return;
+      const wrap = wrapRef.current!;
+      const padR = PRICE_LABEL_W + 8;
+      const plotW = wrap.clientWidth - PAD_L - padR;
+      const cnt = drag.vpEnd - drag.vpStart;
+      const step = plotW / cnt;
+      const shift = Math.round(-dx / step);
+      const n = candles.length;
+      let start = clamp(drag.vpStart + shift, 0, n - cnt);
+      let end = start + cnt;
+      if (end > n) { end = n; start = n - cnt; }
+      vpRef.current = { start, end };
+      scheduleDraw();
+    } else {
+      setHover(pos);
+      scheduleDraw();
+    }
+  };
+
+  const onMouseUp = () => { dragRef.current = null; };
+  const onMouseLeave = () => { dragRef.current = null; setHover(null); scheduleDraw(); };
+
+  const onWheel = (e: React.WheelEvent) => {
+    e.preventDefault();
+    const vp = vpRef.current;
+    if (!vp) return;
+    const n = candles.length;
+    const cnt = vp.end - vp.start;
+    const delta = e.deltaY > 0 ? Math.max(1, Math.round(cnt * 0.1)) : -Math.max(1, Math.round(cnt * 0.1));
+    let newCnt = clamp(cnt + delta, MIN_VISIBLE, Math.min(n, MAX_VISIBLE));
+    // zoom centered on cursor
+    const pos = getPos(e as any);
+    const wrap = wrapRef.current!;
+    const padR = PRICE_LABEL_W + 8;
+    const plotW = wrap.clientWidth - PAD_L - padR;
+    const ratio = clamp((pos.x - PAD_L) / plotW, 0, 1);
+    const grow = newCnt - cnt;
+    let start = Math.round(vp.start - grow * ratio);
+    let end = start + newCnt;
+    if (start < 0) { start = 0; end = newCnt; }
+    if (end > n) { end = n; start = Math.max(0, n - newCnt); }
+    vpRef.current = { start, end };
+    scheduleDraw();
+  };
 
   return (
-    <>
-      <svg viewBox={`0 0 ${W} ${H_PRICE}`} className="w-full h-[460px]" preserveAspectRatio="none">
-        <defs>
-          <pattern id="grid" width="50" height="46" patternUnits="userSpaceOnUse">
-            <path d="M 50 0 L 0 0 0 46" fill="none" stroke="#141923" strokeWidth="0.5" />
-          </pattern>
-          <filter id="goldGlow">
-            <feGaussianBlur stdDeviation="1.4" />
-          </filter>
-        </defs>
-        <rect width={W} height={H_PRICE} fill="url(#grid)" />
-
-        {/* Levels */}
-        {levels.map((l, i) => {
-          const y = priceToY(l.price);
-          const color = l.kind === "resistance" ? "#d4a857" : "#7dd3fc";
-          const stars = "★".repeat(l.strength) + "☆".repeat(Math.max(0, 5 - l.strength));
-          const opacity = Math.min(0.95, 0.45 + l.strength * 0.1);
-          // Stagger labels so resistance/support stacks don't overlap.
-          const labelX = l.kind === "resistance" ? 8 : W - 8;
-          const anchor = l.kind === "resistance" ? "start" : "end";
-          return (
-            <g key={i}>
-              <line
-                x1={0}
-                y1={y}
-                x2={W}
-                y2={y}
-                stroke={color}
-                strokeWidth={l.strength >= 4 ? 1.4 : 1}
-                strokeDasharray="6 4"
-                strokeOpacity={opacity}
-              />
-              <text
-                x={labelX}
-                y={y - 4}
-                fill={color}
-                fontSize="10"
-                fontFamily="JetBrains Mono"
-                fillOpacity={opacity + 0.05}
-                textAnchor={anchor}
-              >
-                {l.label}  {l.price.toFixed(2)}   {stars}   · 触及{l.touches}
-              </text>
-            </g>
-          );
-        })}
-
-        {/* Candles */}
-        {mappedCandles.map((m, i) => {
-          const color = m.up ? "#ef4444" : "#10b981";
-          const top = Math.min(m.oY, m.cY);
-          const bot = Math.max(m.oY, m.cY);
-          return (
-            <g key={i}>
-              <line x1={m.x} x2={m.x} y1={m.hY} y2={m.lY} stroke={color} strokeWidth="1" strokeOpacity="0.85" />
-              <rect
-                x={m.x - candleWidth / 2}
-                y={top}
-                width={candleWidth}
-                height={Math.max(1, bot - top)}
-                fill={color}
-                fillOpacity={0.95}
-              />
-            </g>
-          );
-        })}
-
-        {/* Latest price line */}
-        {candles.length > 0 && (
-          <g>
-            <line
-              x1={0}
-              x2={W}
-              y1={priceToY(last)}
-              y2={priceToY(last)}
-              stroke="#3a4254"
-              strokeDasharray="2 3"
-              strokeOpacity="0.6"
-            />
-            <rect
-              x={W - 60}
-              y={priceToY(last) - 8}
-              width={56}
-              height={16}
-              fill="#1a2030"
-              stroke="#d4a857"
-              strokeWidth="0.6"
-              rx="2"
-            />
-            <text
-              x={W - 32}
-              y={priceToY(last) + 4}
-              fill="#e6c98a"
-              fontSize="10"
-              fontFamily="JetBrains Mono"
-              textAnchor="middle"
-            >
-              {last.toFixed(2)}
-            </text>
-          </g>
-        )}
-      </svg>
-
-      {/* Volume pane */}
-      <svg viewBox={`0 0 ${W} ${H_VOL}`} className="w-full h-[90px] mt-1" preserveAspectRatio="none">
-        <rect width={W} height={H_VOL} fill="url(#grid)" />
-        {mappedCandles.map((m, i) => {
-          const color = m.up ? "#ef4444" : "#10b981";
-          const h = Math.max(1, (m.c.volume / maxVol) * (H_VOL - 12));
-          return (
-            <rect
-              key={i}
-              x={m.x - candleWidth / 2}
-              y={H_VOL - h}
-              width={candleWidth}
-              height={h}
-              fill={color}
-              fillOpacity="0.55"
-            />
-          );
-        })}
-        <text x={8} y={14} fill="#6b7388" fontSize="10" fontFamily="JetBrains Mono">
-          VOL
-        </text>
-      </svg>
-    </>
+    <div ref={wrapRef} className="w-full" style={{ height: "560px" }}>
+      <canvas
+        ref={cvRef}
+        className="block cursor-crosshair"
+        onPointerDown={onMouseDown}
+        onPointerMove={onMouseMove}
+        onPointerUp={onMouseUp}
+        onPointerLeave={onMouseLeave}
+        onWheel={onWheel}
+        style={{ touchAction: "none" }}
+      />
+    </div>
   );
 }

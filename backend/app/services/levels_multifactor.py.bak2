@@ -1,0 +1,525 @@
+"""Multi-factor support/resistance detection engine.
+
+Factors (extensible):
+ 1. touch_count       – effective reversal touch count at pivot zone
+ 2. volume_weight     – avg volume at touches vs global avg
+ 3. recency           – exponential decay: recent touches worth more
+ 4. touch_quality     – filter noise; only count real swing reversals
+ 5. dwell_time        – how many bars price stayed in the zone
+ 6. trend_alignment   – support stronger in uptrend, resistance in downtrend
+ 7. ma_resonance      – convergence with MA20/60/120/250 or round numbers
+ 8. role_reversal     – broken S→R or R→S after retest (polarity flip)
+ 9. false_breakout    – penalty for repeated false breakouts
+10. zone_tightness    – narrower cluster → sharper, stronger level
+
+Each factor returns a float score 0-1.  Final score = weighted sum → mapped to
+strength 1-5 and a 0-100 confidence score.
+
+Usage:
+    levels = detect_levels_multifactor(candles, factor_weights={...})
+"""
+from __future__ import annotations
+
+import math
+from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import Callable
+
+import numpy as np
+from scipy.signal import argrelextrema
+
+from ..schemas import Candle, Level
+
+# ── Default factor weights (user-adjustable) ──
+DEFAULT_WEIGHTS: dict[str, float] = {
+    "touch_count":    1.0,
+    "volume_weight":  1.2,
+    "recency":        1.0,
+    "touch_quality":  0.8,
+    "dwell_time":     0.6,
+    "trend_alignment":0.7,
+    "ma_resonance":   0.9,
+    "role_reversal":  0.8,
+    "false_breakout": 0.5,
+    "zone_tightness": 0.4,
+}
+
+
+@dataclass
+class PivotPoint:
+    """A detected swing high/low."""
+    index: int          # index in the candle array
+    price: float
+    kind: str           # "high" or "low"
+    volume: float
+    bar_range: float    # high - low of the candle
+    body_ratio: float   # abs(close-open) / (high-low)
+
+
+@dataclass
+class PriceZone:
+    """Cluster of nearby pivots forming a support/resistance zone."""
+    center: float
+    kind: str           # "resistance" or "support"
+    pivots: list[PivotPoint] = field(default_factory=list)
+    # factor scores filled during evaluation
+    factor_scores: dict[str, float] = field(default_factory=dict)
+    final_score: float = 0.0
+    strength: int = 1
+
+
+# ────────────────────────────────────────────────────────────
+#  Pivot detection
+# ────────────────────────────────────────────────────────────
+
+def _detect_pivots(candles: list[Candle], order: int = 5) -> list[PivotPoint]:
+    """Find swing highs and lows using argrelextrema."""
+    highs = np.array([c.high for c in candles])
+    lows = np.array([c.low for c in candles])
+    hi_idx = argrelextrema(highs, np.greater_equal, order=order)[0]
+    lo_idx = argrelextrema(lows, np.less_equal, order=order)[0]
+
+    pivots: list[PivotPoint] = []
+    for i in hi_idx:
+        c = candles[i]
+        rng = c.high - c.low
+        body = abs(c.close - c.open)
+        pivots.append(PivotPoint(
+            index=i, price=c.high, kind="high",
+            volume=c.volume, bar_range=rng,
+            body_ratio=body / rng if rng > 0 else 0,
+        ))
+    for i in lo_idx:
+        c = candles[i]
+        rng = c.high - c.low
+        body = abs(c.close - c.open)
+        pivots.append(PivotPoint(
+            index=i, price=c.low, kind="low",
+            volume=c.volume, bar_range=rng,
+            body_ratio=body / rng if rng > 0 else 0,
+        ))
+    return pivots
+
+
+# ────────────────────────────────────────────────────────────
+#  Clustering pivots into price zones
+# ────────────────────────────────────────────────────────────
+
+def _cluster_into_zones(
+    pivots: list[PivotPoint],
+    last_price: float,
+    tol_pct: float = 0.012,
+) -> list[PriceZone]:
+    """Group nearby pivots into zones, assign resistance/support."""
+    if not pivots:
+        return []
+    sorted_p = sorted(pivots, key=lambda p: p.price)
+    clusters: list[list[PivotPoint]] = [[sorted_p[0]]]
+    for p in sorted_p[1:]:
+        center = np.mean([pp.price for pp in clusters[-1]])
+        if abs(p.price - center) / max(center, 1e-6) <= tol_pct:
+            clusters[-1].append(p)
+        else:
+            clusters.append([p])
+
+    zones: list[PriceZone] = []
+    for cl in clusters:
+        center = float(np.mean([p.price for p in cl]))
+        kind = "resistance" if center > last_price else "support"
+        zones.append(PriceZone(center=center, kind=kind, pivots=cl))
+    return zones
+
+
+# ────────────────────────────────────────────────────────────
+#  Individual factor functions
+# ────────────────────────────────────────────────────────────
+
+def _f_touch_count(zone: PriceZone, candles: list[Candle], **_kw) -> float:
+    """More touches → higher score. Saturates around 8."""
+    n = len(zone.pivots)
+    return min(1.0, n / 8.0)
+
+
+def _f_volume_weight(zone: PriceZone, candles: list[Candle], **_kw) -> float:
+    """Average volume at touch points vs overall average."""
+    if not zone.pivots:
+        return 0.0
+    global_avg = float(np.mean([c.volume for c in candles])) or 1.0
+    touch_avg = float(np.mean([p.volume for p in zone.pivots]))
+    ratio = touch_avg / global_avg
+    # ratio=1 → 0.5, ratio=2 → 0.8, ratio=3+ → ~1.0
+    return min(1.0, ratio / 3.0)
+
+
+def _f_recency(zone: PriceZone, candles: list[Candle], **_kw) -> float:
+    """Recent touches weighted exponentially higher.
+    Half-life = 30 bars."""
+    n = len(candles)
+    if not zone.pivots:
+        return 0.0
+    half_life = 30
+    decay = math.log(2) / half_life
+    scores = []
+    for p in zone.pivots:
+        age = n - 1 - p.index
+        scores.append(math.exp(-decay * age))
+    # weighted average, recent pivots dominate
+    return float(np.mean(scores))
+
+
+def _f_touch_quality(zone: PriceZone, candles: list[Candle], **_kw) -> float:
+    """Filter noise: real reversals have larger body, not just wicks.
+    Score based on body_ratio and bar_range."""
+    if not zone.pivots:
+        return 0.0
+    avg_range = float(np.mean([c.high - c.low for c in candles])) or 1.0
+    quality_scores = []
+    for p in zone.pivots:
+        # bar_range should be significant (> 0.5 * avg)
+        range_factor = min(1.0, p.bar_range / avg_range)
+        # body_ratio > 0.5 → real candle; < 0.3 → wick/doji noise
+        body_factor = min(1.0, p.body_ratio / 0.6)
+        quality_scores.append(0.5 * range_factor + 0.5 * body_factor)
+    return float(np.mean(quality_scores))
+
+
+def _f_dwell_time(zone: PriceZone, candles: list[Candle], **_kw) -> float:
+    """Count bars where price is within the zone band.
+    More bars → more chip exchange → stronger."""
+    if not zone.pivots:
+        return 0.0
+    band = max(zone.center * 0.012, 0.5)
+    lo, hi = zone.center - band, zone.center + band
+    count = sum(1 for c in candles if c.low <= hi and c.high >= lo)
+    # normalize: 20 bars in zone → score 1.0
+    return min(1.0, count / 20.0)
+
+
+def _f_trend_alignment(zone: PriceZone, candles: list[Candle], **_kw) -> float:
+    """Support stronger in uptrend, resistance stronger in downtrend.
+    Uses MA20 slope as trend proxy."""
+    if len(candles) < 20:
+        return 0.5  # neutral
+    closes = [c.close for c in candles]
+    ma20_now = float(np.mean(closes[-20:]))
+    ma20_prev = float(np.mean(closes[-40:-20])) if len(closes) >= 40 else ma20_now
+    uptrend = ma20_now > ma20_prev
+
+    if zone.kind == "support" and uptrend:
+        return 0.9
+    if zone.kind == "resistance" and not uptrend:
+        return 0.9
+    if zone.kind == "support" and not uptrend:
+        return 0.3
+    if zone.kind == "resistance" and uptrend:
+        return 0.3
+    return 0.5
+
+
+def _f_ma_resonance(zone: PriceZone, candles: list[Candle], **_kw) -> float:
+    """Check convergence with MA20/60/120/250 and round numbers.
+    Each resonance boosts score."""
+    closes = [c.close for c in candles]
+    resonance = 0
+    for w in [20, 60, 120, 250]:
+        if len(closes) >= w:
+            ma = float(np.mean(closes[-w:]))
+            if abs(ma - zone.center) / max(zone.center, 1e-6) < 0.015:
+                resonance += 1
+
+    # round-number check (multiples of 10, 50, 100)
+    for base in [100, 50, 10]:
+        nearest = round(zone.center / base) * base
+        if abs(nearest - zone.center) / max(zone.center, 1e-6) < 0.008:
+            resonance += 1
+            break  # only count strongest round-number match
+
+    # each resonance adds ~0.2, max 1.0
+    return min(1.0, resonance * 0.25)
+
+
+def _f_role_reversal(zone: PriceZone, candles: list[Candle], **_kw) -> float:
+    """Detect polarity flip: was resistance, now support (or vice versa).
+    If zone has both 'high' and 'low' pivots → likely flipped."""
+    kinds = set(p.kind for p in zone.pivots)
+    if len(kinds) == 2:
+        # has both high and low pivots → confirmed flip
+        return 1.0
+    # check if price crossed through the zone
+    n = len(candles)
+    above = 0
+    below = 0
+    band = max(zone.center * 0.01, 0.3)
+    for c in candles[-min(60, n):]:
+        if c.close > zone.center + band:
+            above += 1
+        elif c.close < zone.center - band:
+            below += 1
+    if above > 5 and below > 5:
+        return 0.7  # price has been on both sides
+    return 0.0
+
+
+def _f_false_breakout(zone: PriceZone, candles: list[Candle], **_kw) -> float:
+    """Penalty: count false breakouts. Each lowers confidence.
+    A false breakout = price crosses zone but reverses within 3 bars."""
+    band = max(zone.center * 0.008, 0.2)
+    false_breaks = 0
+    n = len(candles)
+    for i in range(3, n - 3):
+        c = candles[i]
+        # check if this bar crossed the zone
+        crossed_up = c.high > zone.center + band and c.close < zone.center
+        crossed_dn = c.low < zone.center - band and c.close > zone.center
+        if crossed_up or crossed_dn:
+            # check reversal within 3 bars
+            reverted = False
+            for j in range(1, 4):
+                if i + j < n:
+                    fj = candles[i + j]
+                    if crossed_up and fj.close < zone.center - band:
+                        pass  # actual breakout, not false
+                    elif crossed_dn and fj.close > zone.center + band:
+                        pass
+                    else:
+                        reverted = True
+            if reverted:
+                false_breaks += 1
+
+    # each false breakout applies 0.7x penalty → score = 0.7^false_breaks
+    penalty = 0.7 ** min(false_breaks, 5)
+    return penalty  # 1.0 = no false breaks, 0.0 = many
+
+
+def _f_zone_tightness(zone: PriceZone, candles: list[Candle], **_kw) -> float:
+    """Tighter price cluster → sharper, stronger level.
+    Measured as std dev of pivot prices relative to center."""
+    if len(zone.pivots) < 2:
+        return 0.5
+    prices = [p.price for p in zone.pivots]
+    std = float(np.std(prices))
+    relative_std = std / max(zone.center, 1e-6)
+    # std < 0.3% → very tight (1.0), std > 2% → loose (0.1)
+    return max(0.1, 1.0 - relative_std / 0.02)
+
+
+# ── Factor registry (extensible) ──
+FACTOR_REGISTRY: dict[str, Callable[..., float]] = {
+    "touch_count":     _f_touch_count,
+    "volume_weight":   _f_volume_weight,
+    "recency":         _f_recency,
+    "touch_quality":   _f_touch_quality,
+    "dwell_time":      _f_dwell_time,
+    "trend_alignment": _f_trend_alignment,
+    "ma_resonance":    _f_ma_resonance,
+    "role_reversal":   _f_role_reversal,
+    "false_breakout":  _f_false_breakout,
+    "zone_tightness":  _f_zone_tightness,
+}
+
+
+# ────────────────────────────────────────────────────────────
+#  Score calculation
+# ────────────────────────────────────────────────────────────
+
+def _score_zone(
+    zone: PriceZone,
+    candles: list[Candle],
+    weights: dict[str, float],
+) -> None:
+    """Calculate factor scores and final weighted score for a zone."""
+    total_weight = 0.0
+    weighted_sum = 0.0
+    for name, fn in FACTOR_REGISTRY.items():
+        w = weights.get(name, 0.0)
+        if w <= 0:
+            continue
+        try:
+            score = fn(zone, candles)
+        except Exception:
+            score = 0.5
+        zone.factor_scores[name] = round(score, 3)
+        weighted_sum += score * w
+        total_weight += w
+
+    if total_weight > 0:
+        zone.final_score = round(weighted_sum / total_weight * 100, 1)
+    else:
+        zone.final_score = 0.0
+
+    # map 0-100 → strength 1-5
+    if zone.final_score >= 75:
+        zone.strength = 5
+    elif zone.final_score >= 60:
+        zone.strength = 4
+    elif zone.final_score >= 45:
+        zone.strength = 3
+    elif zone.final_score >= 30:
+        zone.strength = 2
+    else:
+        zone.strength = 1
+
+
+# ────────────────────────────────────────────────────────────
+#  Main entry point
+# ────────────────────────────────────────────────────────────
+
+def detect_levels_multifactor(
+    candles: list[Candle],
+    lookback: int = 120,
+    sensitivity: int = 5,
+    cluster_tol_pct: float = 0.012,
+    max_per_side: int = 4,
+    min_touches: int = 2,
+    factor_weights: dict[str, float] | None = None,
+) -> list[Level]:
+    """Detect S/R levels using multi-factor scoring.
+
+    Returns Level objects with:
+      - strength (1-5)
+      - score (0-100 confidence)
+      - factors dict with individual factor scores
+      - descriptive note
+    """
+    if not candles:
+        return []
+
+    weights = dict(DEFAULT_WEIGHTS)
+    if factor_weights:
+        weights.update(factor_weights)
+
+    data = candles[-lookback:] if len(candles) > lookback else candles
+    last_price = data[-1].close
+
+    # 1. Detect pivots
+    pivots = _detect_pivots(data, order=sensitivity)
+
+    # 2. Cluster into zones
+    zones = _cluster_into_zones(pivots, last_price, cluster_tol_pct)
+
+    # 3. Score each zone
+    for z in zones:
+        _score_zone(z, data, weights)
+
+    # 4. Filter: require minimum touches
+    zones = [z for z in zones if len(z.pivots) >= min_touches]
+
+    # 5. Sort and select top per side
+    resistances = sorted(
+        [z for z in zones if z.kind == "resistance"],
+        key=lambda z: z.center,
+    )[:max_per_side]
+    supports = sorted(
+        [z for z in zones if z.kind == "support"],
+        key=lambda z: z.center,
+        reverse=True,
+    )[:max_per_side]
+
+    # 6. Build Level objects
+    levels: list[Level] = []
+
+    for i, z in enumerate(resistances, 1):
+        note = _build_note(z)
+        levels.append(Level(
+            label=f"R{i}",
+            price=round(z.center, 2),
+            kind="resistance",
+            strength=z.strength,
+            touches=len(z.pivots),
+            distance_pct=round((z.center - last_price) / last_price * 100, 2),
+            note=note,
+            score=z.final_score,
+            factors=z.factor_scores,
+        ))
+
+    for i, z in enumerate(supports, 1):
+        note = _build_note(z)
+        levels.append(Level(
+            label=f"S{i}",
+            price=round(z.center, 2),
+            kind="support",
+            strength=z.strength,
+            touches=len(z.pivots),
+            distance_pct=round((z.center - last_price) / last_price * 100, 2),
+            note=note,
+            score=z.final_score,
+            factors=z.factor_scores,
+        ))
+
+    # 7. Add MA dynamic levels
+    closes = [c.close for c in data]
+    for w, label in [(20, "MA20"), (60, "MA60")]:
+        if len(closes) >= w:
+            ma = float(np.mean(closes[-w:]))
+            kind = "support" if ma < last_price else "resistance"
+            dist = round((ma - last_price) / last_price * 100, 2)
+            # check if MA is close to an existing level
+            too_close = any(
+                abs(l.price - ma) / max(ma, 1e-6) < 0.008
+                for l in levels
+            )
+            if not too_close:
+                levels.append(Level(
+                    label=label,
+                    price=round(ma, 2),
+                    kind=kind,
+                    strength=3,
+                    touches=0,
+                    distance_pct=dist,
+                    note=f"{label} 动态{'支撑' if kind == 'support' else '压力'}",
+                    score=50.0,
+                    factors={},
+                ))
+
+    return levels
+
+
+def _build_note(z: PriceZone) -> str:
+    """Build a human-readable note from factor scores."""
+    parts = []
+    fs = z.factor_scores
+    touches = len(z.pivots)
+    parts.append(f"触及{touches}次")
+
+    if fs.get("volume_weight", 0) > 0.6:
+        parts.append("放量确认")
+    if fs.get("recency", 0) > 0.6:
+        parts.append("近期有效")
+    if fs.get("ma_resonance", 0) > 0.4:
+        parts.append("均线共振")
+    if fs.get("role_reversal", 0) > 0.5:
+        parts.append("角色转换")
+    if fs.get("trend_alignment", 0) > 0.7:
+        parts.append("顺势")
+    if fs.get("false_breakout", 0) < 0.5:
+        parts.append("多次假突破⚠")
+    if fs.get("zone_tightness", 0) > 0.7:
+        parts.append("密集")
+    if fs.get("dwell_time", 0) > 0.5:
+        parts.append("横盘沉淀")
+
+    return " · ".join(parts)
+
+
+def get_available_factors() -> list[dict]:
+    """Return metadata about available factors for frontend config UI."""
+    descriptions = {
+        "touch_count":     "触点数量 – 有效触及次数越多越强",
+        "volume_weight":   "成交量 – 放量形成的位置权重更高",
+        "recency":         "时间衰减 – 近期触点权重指数级高于远期",
+        "touch_quality":   "触碰质量 – 剔除毛刺，只算真反转",
+        "dwell_time":      "停留时间 – 横盘越久筹码交换越充分",
+        "trend_alignment": "趋势背景 – 顺势位更强，逆势位更弱",
+        "ma_resonance":    "多重共振 – 与均线/整数关口重合则增强",
+        "role_reversal":   "角色转换 – 突破回踩确认后强度拉满",
+        "false_breakout":  "假突破扣分 – 假突破越多强度越低",
+        "zone_tightness":  "区间宽度 – 越窄越尖锐越强",
+    }
+    return [
+        {
+            "key": name,
+            "label": descriptions.get(name, name),
+            "default_weight": DEFAULT_WEIGHTS.get(name, 1.0),
+        }
+        for name in FACTOR_REGISTRY
+    ]

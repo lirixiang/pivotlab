@@ -1,28 +1,92 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { MarketOverview } from "../types";
 import { api } from "../services/api";
 
-export type TabKey = "workspace" | "screener" | "backtest" | "monitor";
+export type TabKey = "workspace" | "screener" | "backtest" | "monitor" | "sync";
 
 const TABS: { k: TabKey; l: string }[] = [
   { k: "workspace", l: "画线工作台" },
   { k: "screener", l: "形态筛选" },
   { k: "backtest", l: "历史回测" },
   { k: "monitor", l: "自选监控" },
+  { k: "sync", l: "数据同步" },
 ];
+
+type StockItem = { code: string; name: string; industry: string };
 
 export function TopBar({
   tab,
   onTabChange,
+  onSearch,
 }: {
   tab: TabKey;
   onTabChange: (t: TabKey) => void;
+  onSearch?: (code: string) => void;
 }) {
   const [time, setTime] = useState(new Date());
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<StockItem[]>([]);
+  const [open, setOpen] = useState(false);
+  const [activeIdx, setActiveIdx] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const searchTimer = useRef<ReturnType<typeof setTimeout>>();
+
   useEffect(() => {
     const t = setInterval(() => setTime(new Date()), 1000);
     return () => clearInterval(t);
   }, []);
+
+  // Debounced remote search
+  useEffect(() => {
+    const q = query.trim();
+    if (!q) { setResults([]); return; }
+    clearTimeout(searchTimer.current);
+    searchTimer.current = setTimeout(() => {
+      api.searchStocks(q, 15).then((r) => {
+        setResults(r);
+        setActiveIdx(0);
+      }).catch(() => {});
+    }, 250);
+    return () => clearTimeout(searchTimer.current);
+  }, [query]);
+
+  // Close on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  // Keyboard shortcut: Cmd+K / Ctrl+K
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+        e.preventDefault();
+        inputRef.current?.focus();
+        setOpen(true);
+      }
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, []);
+
+  const pick = (code: string) => {
+    onSearch?.(code);
+    setQuery("");
+    setOpen(false);
+    inputRef.current?.blur();
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); setActiveIdx((i) => Math.min(i + 1, results.length - 1)); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setActiveIdx((i) => Math.max(i - 1, 0)); }
+    else if (e.key === "Enter" && results[activeIdx]) { e.preventDefault(); pick(results[activeIdx].code); }
+    else if (e.key === "Escape") { setOpen(false); }
+  };
   return (
     <div className="flex flex-wrap items-center min-h-12 px-4 gap-x-4 gap-y-2 py-1.5">
       <div className="flex items-center gap-2 pr-4 border-r border-ink-700">
@@ -57,13 +121,43 @@ export function TopBar({
       </nav>
 
       <div className="flex-1 min-w-[240px] flex justify-center">
-        <div className="relative w-full max-w-[420px]">
+        <div className="relative w-full max-w-[420px]" ref={wrapRef}>
           <i className="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-ink-500 text-xs" />
           <input
+            ref={inputRef}
             className="w-full bg-ink-850 border border-ink-700 rounded-md pl-9 pr-20 py-1.5 text-sm placeholder:text-ink-500 focus:outline-none focus:border-gold/60"
             placeholder="搜索代码 / 名称 / 行业    例如：600519 贵州茅台"
+            value={query}
+            onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
+            onFocus={() => setOpen(true)}
+            onKeyDown={onKeyDown}
           />
           <span className="kbd absolute right-2 top-1/2 -translate-y-1/2">⌘K</span>
+
+          {open && query.trim() && results.length > 0 && (
+            <div className="absolute left-0 right-0 top-full mt-1 bg-ink-900 border border-ink-700 rounded-lg shadow-2xl z-50 overflow-hidden max-h-[360px] overflow-y-auto">
+              {results.map((s, i) => (
+                <button
+                  key={s.code}
+                  className={
+                    "w-full flex items-center gap-3 px-4 py-2.5 text-left text-sm transition " +
+                    (i === activeIdx ? "bg-ink-800 text-white" : "text-ink-300 hover:bg-ink-850 hover:text-white")
+                  }
+                  onMouseEnter={() => setActiveIdx(i)}
+                  onClick={() => pick(s.code)}
+                >
+                  <span className="num text-ink-500 w-16 text-[12px]">{s.code}</span>
+                  <span className="flex-1 font-medium">{s.name}</span>
+                  <span className="chip text-[10px]">{s.industry}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {open && query.trim() && results.length === 0 && (
+            <div className="absolute left-0 right-0 top-full mt-1 bg-ink-900 border border-ink-700 rounded-lg shadow-2xl z-50 p-4 text-center text-ink-500 text-sm">
+              未找到匹配的股票
+            </div>
+          )}
         </div>
       </div>
 

@@ -23,6 +23,17 @@ class StockQuote(BaseModel):
     volume_ratio: float = 0.0
     turnover: float = 0.0
     industry: str = ""
+    market: str = ""
+    open: float = 0.0
+    high: float = 0.0
+    low: float = 0.0
+    prev_close: float = 0.0
+    turnover_rate: float = 0.0
+    pe_ratio: float = 0.0
+    market_cap: float = 0.0
+    concepts: list[str] = Field(default_factory=list)
+    fundamentals: dict | None = None
+    analyst_consensus: dict | None = None
 
 
 class Level(BaseModel):
@@ -33,6 +44,9 @@ class Level(BaseModel):
     touches: int
     note: str = ""
     distance_pct: float = 0.0
+    score: float = 0.0       # 0-100 confidence score (normalised)
+    factors: dict[str, Any] = Field(default_factory=dict)  # score breakdown details
+    reasons: list[str] = Field(default_factory=list)  # human-readable reason tags
 
 
 class StockDetail(BaseModel):

@@ -1,10 +1,72 @@
+"""Database adapter layer — Strategy pattern for multi-database support.
+
+Set DATABASE_URL env var to switch backend:
+  PostgreSQL: postgresql+asyncpg://user:pass@host:port/dbname
+  SQLite:     sqlite+aiosqlite:///data/pivotlab.db  (default)
+"""
+
 import os
+
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data/pivotlab.db")
 
-engine = create_async_engine(DATABASE_URL, echo=False, future=True)
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+# ── Strategy ───────────────────────────────────────────────────────────────
+
+class _DBStrategy:
+    supports_concurrent_writes: bool = True
+
+    def create_engine(self, url: str):
+        raise NotImplementedError
+
+
+class _PostgresStrategy(_DBStrategy):
+    supports_concurrent_writes = True
+
+    def create_engine(self, url: str):
+        return create_async_engine(url, echo=False, pool_size=10, max_overflow=20)
+
+
+class _SQLiteStrategy(_DBStrategy):
+    supports_concurrent_writes = False
+
+    def create_engine(self, url: str):
+        db_path = url.split("///", 1)[1]
+        if not os.path.isabs(db_path):
+            db_path = os.path.join(_BASE_DIR, db_path)
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        url = f"sqlite+aiosqlite:///{db_path}"
+
+        eng = create_async_engine(
+            url, echo=False,
+            connect_args={"check_same_thread": False},
+        )
+
+        @event.listens_for(eng.sync_engine, "connect")
+        def _set_pragma(dbapi_conn, _):
+            cur = dbapi_conn.cursor()
+            cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute("PRAGMA busy_timeout=5000")
+            cur.close()
+
+        return eng
+
+
+def _pick_strategy(url: str) -> _DBStrategy:
+    if url.startswith("sqlite"):
+        return _SQLiteStrategy()
+    return _PostgresStrategy()
+
+
+# ── Public objects ─────────────────────────────────────────────────────────
+
+db_strategy = _pick_strategy(DATABASE_URL)
+engine = db_strategy.create_engine(DATABASE_URL)
 AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
@@ -14,7 +76,6 @@ class Base(DeclarativeBase):
 
 async def init_db() -> None:
     from . import models  # noqa: F401
-    os.makedirs("./data", exist_ok=True)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
