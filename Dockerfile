@@ -37,7 +37,7 @@ COPY <<'EOF' /app/start.sh
 #!/bin/sh
 set -e
 
-uvicorn app.main:app --host 0.0.0.0 --port 18080 &
+uvicorn app.main:app --host 0.0.0.0 --port 18080 --workers 2 &
 exec nginx -g 'daemon off;'
 EOF
 

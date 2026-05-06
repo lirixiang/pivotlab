@@ -26,27 +26,33 @@ export function MonitorPage({ onPickStock }: { onPickStock: (code: string) => vo
   });
   const [filter, setFilter] = useState("all");
   const [loading, setLoading] = useState(false);
+  const [scanned, setScanned] = useState(false);
 
+  // Only load universe on mount (fast DB query), screener is manual
   useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    Promise.all([
-      api.universe(),
-      api.screener("breakout_pullback", 200),
-      api.screener("bottom_stabilize", 200),
-    ])
-      .then(([u, b, s]) => {
-        if (cancelled) return;
-        setUniverse(u);
-        setSignals({ breakout: b.items, bottom: s.items });
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+    api.universe().then(setUniverse);
   }, []);
+
+  async function runScan() {
+    setLoading(true);
+    try {
+      await api.triggerScan();
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 2000));
+        const [b, s] = await Promise.all([
+          api.screener("breakout_pullback", 200),
+          api.screener("bottom_stabilize", 200),
+        ]);
+        if (b.total > 0 || s.total > 0 || i >= 29) {
+          setSignals({ breakout: b.items, bottom: s.items });
+          setScanned(true);
+          break;
+        }
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
 
   const rows: Row[] = useMemo(() => {
     const bp = new Map(signals.breakout.map((i) => [i.code, i] as const));
@@ -86,6 +92,17 @@ export function MonitorPage({ onPickStock }: { onPickStock: (code: string) => vo
         <div className="flex items-center gap-2">
           <button className="px-3 py-1.5 text-[12px] rounded-md bg-ink-800 ring-soft text-ink-200 hover:text-white">
             <i className="fas fa-bell mr-1" /> 提醒规则
+          </button>
+          <button
+            className="px-3 py-1.5 text-[12px] rounded-md bg-sky-700 hover:bg-sky-600 text-white disabled:opacity-50 font-semibold"
+            onClick={runScan}
+            disabled={loading}
+          >
+            {loading ? (
+              <><i className="fas fa-circle-notch fa-spin mr-1" />扫描中...</>
+            ) : (
+              <><i className="fas fa-search mr-1" />{scanned ? "重新扫描" : "开始扫描"}</>
+            )}
           </button>
           <button className="px-3 py-1.5 text-[12px] rounded-md grad-gold text-ink-950 font-semibold">
             <i className="fas fa-plus mr-1" /> 添加自选

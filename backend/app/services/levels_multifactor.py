@@ -846,3 +846,90 @@ def get_available_factors() -> list[dict]:
         {"key": name, "label": desc, "default_weight": 1.0}
         for name, desc in FACTOR_REGISTRY.items()
     ]
+
+
+# ── Decision score ──
+
+_DECISION_LABELS = [
+    (80, "强买"),
+    (60, "偏多"),
+    (40, "中性"),
+    (20, "偏空"),
+    (0, "回避"),
+]
+
+
+def compute_decision_score(
+    candles: list[Candle],
+    levels: list[Level],
+    current_price: float,
+) -> tuple[float, str]:
+    """Compute a 0-100 decision score for a stock based on S/R context.
+
+    Factors:
+      1. Support proximity – closer to strong support = higher score
+      2. Risk/reward ratio – R1 distance vs S1 distance
+      3. Trend alignment – price vs MA20
+      4. Support depth – multiple supports below
+      5. Resistance pressure – penalise if near strong resistance
+
+    Returns (score, label).
+    """
+    supports = sorted(
+        [l for l in levels if l.kind == "support" and l.price < current_price],
+        key=lambda l: current_price - l.price,
+    )
+    resistances = sorted(
+        [l for l in levels if l.kind == "resistance" and l.price > current_price],
+        key=lambda l: l.price - current_price,
+    )
+
+    score = 50.0  # neutral base
+
+    # 1. Support proximity bonus (max +25)
+    if supports:
+        s1 = supports[0]
+        dist_pct = (current_price - s1.price) / current_price
+        if dist_pct < 0.05:
+            proximity = 1.0 - dist_pct / 0.05  # 1.0 at support, 0.0 at 5% away
+            quality = min(s1.score, 100.0) / 100.0
+            score += proximity * quality * 25
+
+    # 2. Risk/reward bonus (max +15)
+    if supports and resistances:
+        s1, r1 = supports[0], resistances[0]
+        dist_s = max(current_price - s1.price, 0.001)
+        dist_r = r1.price - current_price
+        rr = dist_r / dist_s
+        score += min(rr * 5, 15)
+
+    # 3. Trend alignment (max +10)
+    if len(candles) >= 20:
+        ma20 = sum(c.close for c in candles[-20:]) / 20
+        if current_price > ma20:
+            score += 10
+        elif current_price < ma20 * 0.97:
+            score -= 5
+
+    # 4. Support depth bonus (max +10)
+    if len(supports) >= 2:
+        score += min(len(supports) * 3, 10)
+
+    # 5. Resistance pressure penalty (max -15)
+    if resistances:
+        r1 = resistances[0]
+        dist_pct = (r1.price - current_price) / current_price
+        if dist_pct < 0.02:
+            pressure = 1.0 - dist_pct / 0.02
+            quality = min(r1.score, 100.0) / 100.0
+            score -= pressure * quality * 15
+
+    score = max(0, min(100, score))
+
+    label = "回避"
+    for threshold, lbl in _DECISION_LABELS:
+        if score >= threshold:
+            label = lbl
+            break
+
+    return round(score, 1), label

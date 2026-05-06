@@ -45,6 +45,7 @@ except Exception as e:  # pragma: no cover
 # Isolate slow network calls so they can't starve the default asyncio executor
 _net_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="net")
 _sync_executor = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="sync")
+_timeout_executor = concurrent.futures.ThreadPoolExecutor(max_workers=6, thread_name_prefix="ak-timeout")
 
 # ---------- Circuit breaker for akshare/EM ----------
 _EM_TIMEOUT = 8.0
@@ -72,6 +73,23 @@ def _em_record_failure():
 def _em_record_success():
     global _em_fail_count
     _em_fail_count = 0
+
+
+_AK_CALL_TIMEOUT = 10  # seconds, hard limit for any single akshare call
+
+
+def _call_with_timeout(fn, *args, timeout=_AK_CALL_TIMEOUT, **kwargs):
+    """Run fn in a separate thread with a hard timeout. Returns None on timeout."""
+    fut = _timeout_executor.submit(fn, *args, **kwargs)
+    try:
+        return fut.result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+        logger.warning("akshare call timed out after %ss: %s", timeout, fn.__name__)
+        fut.cancel()
+        return None
+    except Exception as e:
+        logger.debug("akshare call failed: %s: %s", fn.__name__, e)
+        return None
 
 
 async def _run_in_net_executor(fn, *args, timeout: float = _EM_TIMEOUT):
@@ -253,37 +271,34 @@ def _fetch_candles_sync(code: str, days: int = 240) -> list[Candle]:
 
     # --- Source 1: Tencent (via akshare wrapper, more reliable connectivity) ---
     if _HAS_AK:
-        try:
-            df = ak.stock_zh_a_hist_tx(
-                symbol=_tx_symbol(code),
-                start_date=start,
-                end_date=end,
-                adjust="qfq",
-                timeout=_EM_TIMEOUT,
-            )
-            df = _normalize_candle_df(df)
-            if df is not None and not df.empty:
-                result = _df_to_candles(df)
-                if result:
-                    return result[-days:]
-        except Exception as e:
-            logger.debug("tencent candles failed for %s: %s", code, e)
+        df = _call_with_timeout(
+            ak.stock_zh_a_hist_tx,
+            symbol=_tx_symbol(code),
+            start_date=start,
+            end_date=end,
+            adjust="qfq",
+            timeout=_EM_TIMEOUT,
+        )
+        df = _normalize_candle_df(df)
+        if df is not None and not df.empty:
+            result = _df_to_candles(df)
+            if result:
+                return result[-days:]
 
     # --- Source 2: East Money (with circuit breaker) ---
     if _HAS_AK and _em_is_available():
-        try:
-            df = ak.stock_zh_a_hist(
-                symbol=code, period="daily",
-                start_date=start, end_date=end, adjust="qfq",
-            )
-            if df is not None and not df.empty:
-                _em_record_success()
-                result = _df_to_candles(df)
-                if result:
-                    return result[-days:]
-        except Exception as e:
+        df = _call_with_timeout(
+            ak.stock_zh_a_hist,
+            symbol=code, period="daily",
+            start_date=start, end_date=end, adjust="qfq",
+        )
+        if df is not None and not df.empty:
+            _em_record_success()
+            result = _df_to_candles(df)
+            if result:
+                return result[-days:]
+        else:
             _em_record_failure()
-            logger.debug("EM candles failed for %s: %s", code, e)
 
     return []
 
@@ -388,7 +403,9 @@ def _refresh_quote_snapshot() -> None:
     # --- Source 2: akshare/EM fallback ---
     if not snap and _HAS_AK and _em_is_available():
         try:
-            df = ak.stock_zh_a_spot_em()
+            df = _call_with_timeout(ak.stock_zh_a_spot_em)
+            if df is None:
+                raise RuntimeError("timeout")
             _em_record_success()
             for _, r in df.iterrows():
                 code = str(r.get("代码"))
@@ -436,7 +453,8 @@ def get_candles(code: str, period: str = "daily", days: int = 240) -> list[Candl
             try:
                 tx_period = {"weekly": "week", "monthly": "month"}.get(period)
                 if tx_period:
-                    df = ak.stock_zh_a_hist_tx(
+                    df = _call_with_timeout(
+                        ak.stock_zh_a_hist_tx,
                         symbol=_tx_symbol(code),
                         start_date=start,
                         end_date=end,
@@ -457,7 +475,8 @@ def get_candles(code: str, period: str = "daily", days: int = 240) -> list[Candl
         # Fallback: EM natively supports weekly/monthly
         if _HAS_AK and _em_is_available():
             try:
-                df = ak.stock_zh_a_hist(
+                df = _call_with_timeout(
+                    ak.stock_zh_a_hist,
                     symbol=code, period=period,
                     start_date=start, end_date=end, adjust="qfq",
                 )
@@ -466,6 +485,8 @@ def get_candles(code: str, period: str = "daily", days: int = 240) -> list[Candl
                     result = _df_to_candles(df)
                     if result:
                         return result[-days:]
+                else:
+                    _em_record_failure()
             except Exception as e:
                 _em_record_failure()
                 logger.debug("EM %s candles failed for %s: %s", period, code, e)
@@ -622,7 +643,9 @@ def get_indices() -> list[IndexQuote]:
     # --- Source 2: akshare fallback ---
     if _HAS_AK and _em_is_available():
         try:
-            df = ak.stock_zh_index_spot_em(symbol="沪深重要指数")
+            df = _call_with_timeout(ak.stock_zh_index_spot_em, symbol="沪深重要指数")
+            if df is None:
+                raise RuntimeError("timeout")
             _em_record_success()
             results: list[IndexQuote] = []
             for code, name in items:

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { ScreenerItem, ScreenerResponse } from "../types";
 import { api } from "../services/api";
 
@@ -17,29 +17,28 @@ export function ScreenerTable({ onSelect, onResults }: Props) {
   const [data, setData] = useState<Record<string, ScreenerResponse>>({});
   const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      setLoading(true);
-      try {
+  async function runScan() {
+    setLoading(true);
+    try {
+      // Trigger scan in subprocess
+      await api.triggerScan();
+      // Poll for results (subprocess writes cache files)
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 2000));
         const [bp, bs] = await Promise.all([
           api.screener("breakout_pullback"),
           api.screener("bottom_stabilize"),
         ]);
-        if (!cancelled) {
+        if (bp.total > 0 || bs.total > 0 || i >= 29) {
           setData({ breakout_pullback: bp, bottom_stabilize: bs });
           onResults?.({ breakout: bp.items, bottom: bs.items });
+          break;
         }
-      } finally {
-        if (!cancelled) setLoading(false);
       }
+    } finally {
+      setLoading(false);
     }
-    load();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }
 
   const items = data[pattern]?.items ?? [];
   const isResistance = pattern === "breakout_pullback";
@@ -72,6 +71,17 @@ export function ScreenerTable({ onSelect, onResults }: Props) {
             <i className="far fa-file-excel mr-1" />
             导出
           </button>
+          <button
+            className="px-3 py-1 text-[12px] rounded-md bg-sky-700 hover:bg-sky-600 text-white disabled:opacity-50"
+            onClick={runScan}
+            disabled={loading}
+          >
+            {loading ? (
+              <><i className="fas fa-circle-notch fa-spin mr-1" />扫描中...</>
+            ) : (
+              <><i className="fas fa-search mr-1" />开始扫描</>
+            )}
+          </button>
         </div>
       </div>
 
@@ -101,7 +111,9 @@ export function ScreenerTable({ onSelect, onResults }: Props) {
             {!loading && items.length === 0 && (
               <tr>
                 <td colSpan={9} className="text-center text-ink-500 py-6">
-                  当前没有符合条件的标的
+                  {Object.keys(data).length === 0
+                    ? "点击「开始扫描」运行形态筛选"
+                    : "当前没有符合条件的标的"}
                 </td>
               </tr>
             )}

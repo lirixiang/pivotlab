@@ -1,8 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../services/api";
-import type { WatchlistItem } from "../types";
+import type { WatchlistItem, WatchlistScore } from "../types";
 
-type UnivItem = { code: string; name: string; industry: string };
+type SortKey = "default" | "decision" | "change" | "price";
+type SortDir = "asc" | "desc";
+
+const SORT_OPTIONS: { key: SortKey; label: string; defaultDir: SortDir }[] = [
+  { key: "default", label: "默认", defaultDir: "desc" },
+  { key: "decision", label: "决策分", defaultDir: "desc" },
+  { key: "change", label: "涨跌", defaultDir: "desc" },
+  { key: "price", label: "现价", defaultDir: "desc" },
+];
 
 export function WatchlistPanel({
   activeCode,
@@ -16,61 +24,77 @@ export function WatchlistPanel({
   refreshKey?: number;
 }) {
   const [items, setItems] = useState<WatchlistItem[]>([]);
-  const [showAdd, setShowAdd] = useState(false);
-  const [addQuery, setAddQuery] = useState("");
-  const [addResults, setAddResults] = useState<UnivItem[]>([]);
-  const addRef = useRef<HTMLDivElement>(null);
-  const addTimer = useRef<ReturnType<typeof setTimeout>>();
+  const [scores, setScores] = useState<Record<string, WatchlistScore>>({});
+  const [sortKey, setSortKey] = useState<SortKey>("default");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
 
   // Load watchlist from DB
   const loadWatchlist = useCallback(() => {
     api.watchlist().then(setItems).catch(() => {});
   }, []);
 
+  // Load decision scores
+  const loadScores = useCallback(() => {
+    api.watchlistScores().then((list) => {
+      const map: Record<string, WatchlistScore> = {};
+      for (const s of list) map[s.code] = s;
+      setScores(map);
+    }).catch(() => {});
+  }, []);
+
   useEffect(() => {
     loadWatchlist();
-  }, [loadWatchlist, refreshKey]);
+    loadScores();
+  }, [loadWatchlist, loadScores, refreshKey]);
 
-  // Auto-refresh watchlist every 30s for price updates
+  // Auto-refresh watchlist every 30s, scores every 5min
   useEffect(() => {
-    const t = setInterval(loadWatchlist, 30_000);
-    return () => clearInterval(t);
-  }, [loadWatchlist]);
-
-  // Debounced remote search for add panel
-  useEffect(() => {
-    const q = addQuery.trim();
-    if (!q) { setAddResults([]); return; }
-    clearTimeout(addTimer.current);
-    addTimer.current = setTimeout(() => {
-      api.searchStocks(q, 10).then(setAddResults).catch(() => {});
-    }, 250);
-    return () => clearTimeout(addTimer.current);
-  }, [addQuery]);
-
-  // Close add popover on outside click
-  useEffect(() => {
-    if (!showAdd) return;
-    const handler = (e: MouseEvent) => {
-      if (addRef.current && !addRef.current.contains(e.target as Node)) setShowAdd(false);
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [showAdd]);
-
-  const watchedCodes = new Set(items.map((i) => i.code));
-
-  const handleAdd = async (code: string, name: string) => {
-    await api.addWatch(code, name);
-    loadWatchlist();
-    setShowAdd(false);
-    setAddQuery("");
-  };
+    const t1 = setInterval(loadWatchlist, 30_000);
+    const t2 = setInterval(loadScores, 300_000);
+    return () => { clearInterval(t1); clearInterval(t2); };
+  }, [loadWatchlist, loadScores]);
 
   const handleRemove = async (code: string) => {
     await api.removeWatch(code);
     setItems((prev) => prev.filter((i) => i.code !== code));
   };
+
+  const handleSort = (key: SortKey) => {
+    if (key === sortKey) {
+      setSortDir((d) => (d === "desc" ? "asc" : "desc"));
+    } else {
+      const opt = SORT_OPTIONS.find((o) => o.key === key)!;
+      setSortKey(key);
+      setSortDir(opt.defaultDir);
+    }
+  };
+
+  const sortedItems = useMemo(() => {
+    if (sortKey === "default") return items;
+    const arr = [...items];
+    const mul = sortDir === "desc" ? -1 : 1;
+    arr.sort((a, b) => {
+      let va: number, vb: number;
+      switch (sortKey) {
+        case "decision":
+          va = scores[a.code]?.decision_score ?? -1;
+          vb = scores[b.code]?.decision_score ?? -1;
+          break;
+        case "change":
+          va = a.change_pct;
+          vb = b.change_pct;
+          break;
+        case "price":
+          va = a.price;
+          vb = b.price;
+          break;
+        default:
+          return 0;
+      }
+      return (va - vb) * mul;
+    });
+    return arr;
+  }, [items, scores, sortKey, sortDir]);
 
 
 
@@ -82,47 +106,30 @@ export function WatchlistPanel({
             <span className="tag text-ink-500">自选 · WATCHLIST</span>
             <span className="text-[11px] text-ink-500">{items.length}</span>
           </div>
-          <div className="relative" ref={addRef}>
-            <button
-              className="w-6 h-6 flex items-center justify-center rounded bg-ink-800 hover:bg-gold/20 text-ink-400 hover:text-gold text-sm transition"
-              onClick={() => setShowAdd(!showAdd)}
-              title="添加自选"
-            >
-              +
-            </button>
-            {showAdd && (
-              <div className="absolute right-0 top-full mt-1 w-64 bg-ink-900 border border-ink-700 rounded-lg shadow-2xl z-50 overflow-hidden">
-                <div className="p-2 border-b border-ink-800">
-                  <input
-                    autoFocus
-                    className="w-full bg-ink-850 border border-ink-700 rounded px-3 py-1.5 text-[12px] placeholder:text-ink-500 focus:outline-none focus:border-gold/60"
-                    placeholder="搜索代码/名称/行业"
-                    value={addQuery}
-                    onChange={(e) => setAddQuery(e.target.value)}
-                  />
-                </div>
-                <div className="max-h-[240px] overflow-y-auto">
-                  {addResults.map((s) => (
-                    <button
-                      key={s.code}
-                      className="w-full flex items-center gap-2 px-3 py-2 text-left text-[12px] hover:bg-ink-800 transition"
-                      onClick={() => handleAdd(s.code, s.name)}
-                    >
-                      <span className="num text-ink-500 w-14">{s.code}</span>
-                      <span className="flex-1 text-ink-200">{s.name}</span>
-                      {watchedCodes.has(s.code) ? (
-                        <span className="text-[10px] text-gold">已添加</span>
-                      ) : (
-                        <span className="text-[10px] text-ink-500">{s.industry}</span>
-                      )}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
         </div>
-
+        {/* Sort bar */}
+        <div className="flex items-center gap-1">
+          {SORT_OPTIONS.map((opt) => {
+            const active = sortKey === opt.key;
+            return (
+              <button
+                key={opt.key}
+                onClick={() => handleSort(opt.key)}
+                className={
+                  "px-2 py-0.5 rounded text-[10px] transition " +
+                  (active
+                    ? "bg-ink-750 text-white"
+                    : "text-ink-500 hover:text-ink-300")
+                }
+              >
+                {opt.label}
+                {active && sortKey !== "default" && (
+                  <i className={"fas fa-caret-" + (sortDir === "desc" ? "down" : "up") + " ml-0.5 text-[9px]"} />
+                )}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       <div className="overflow-y-auto scrollbar flex-1">
@@ -130,12 +137,22 @@ export function WatchlistPanel({
           <div className="p-6 text-center text-ink-500 text-[12px]">
             <i className="fas fa-star text-2xl text-ink-700 mb-3 block" />
             <div>还没有自选股</div>
-            <div className="mt-1 text-[11px]">点击右上角 + 或在K线图点 ☆加自选</div>
+            <div className="mt-1 text-[11px]">在K线图点 ☆ 添加自选</div>
           </div>
         )}
-        {items.map((it) => {
+        {sortedItems.map((it) => {
           const active = it.code === activeCode;
           const up = it.change_pct >= 0;
+          const sc = scores[it.code];
+          const dscore = sc?.decision_score ?? null;
+          const dlabel = sc?.decision_label ?? "";
+          const scoreColor =
+            dscore === null ? "text-ink-600"
+            : dscore >= 80 ? "text-cn-up"
+            : dscore >= 60 ? "text-green-400"
+            : dscore >= 40 ? "text-ink-400"
+            : dscore >= 20 ? "text-orange-400"
+            : "text-cn-dn";
           return (
             <div
               key={it.code}
@@ -155,19 +172,33 @@ export function WatchlistPanel({
                     {it.industry ? ` · ${it.industry}` : ""}
                   </div>
                 </div>
-                <div className="text-right num">
-                  {it.price > 0 ? (
-                    <>
-                      <div className={"text-[13px] " + (up ? "text-cn-up" : "text-cn-dn")}>
-                        {it.price.toFixed(2)}
-                      </div>
-                      <div className={"text-[10px] " + (up ? "text-cn-up" : "text-cn-dn")}>
-                        {up ? "+" : ""}{it.change_pct.toFixed(2)}%
-                      </div>
-                    </>
-                  ) : (
-                    <div className="text-[11px] text-ink-600">待同步</div>
-                  )}
+                <div className="flex items-baseline gap-3">
+                  {/* Decision score */}
+                  <div className="text-center" title="决策分">
+                    {dscore !== null ? (
+                      <>
+                        <div className={"text-[13px] font-medium num " + scoreColor}>{dscore}</div>
+                        <div className={"text-[9px] " + scoreColor}>{dlabel}</div>
+                      </>
+                    ) : (
+                      <div className="text-[10px] text-ink-700">···</div>
+                    )}
+                  </div>
+                  {/* Price */}
+                  <div className="text-right num">
+                    {it.price > 0 ? (
+                      <>
+                        <div className={"text-[13px] " + (up ? "text-cn-up" : "text-cn-dn")}>
+                          {it.price.toFixed(2)}
+                        </div>
+                        <div className={"text-[10px] " + (up ? "text-cn-up" : "text-cn-dn")}>
+                          {up ? "+" : ""}{it.change_pct.toFixed(2)}%
+                        </div>
+                      </>
+                    ) : (
+                      <div className="text-[11px] text-ink-600">待同步</div>
+                    )}
+                  </div>
                 </div>
               </div>
               {/* Remove button */}

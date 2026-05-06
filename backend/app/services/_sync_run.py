@@ -29,6 +29,7 @@ TASK_REGISTRY = {
     "industry":           "sync_industry",
     "daily_candles":      "sync_candles",
     "analyst_consensus":  "sync_analyst_consensus",
+    "screener":           "run_screener",
 }
 
 

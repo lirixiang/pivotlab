@@ -20,14 +20,9 @@ export function BacktestPage({ defaultCode }: { defaultCode: string }) {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    Promise.all([
-      api.stock(code, { lookback: 240 }),
-      api.screener(strategy, 50).then((r) => r.items),
-    ])
-      .then(([d, s]) => {
-        if (cancelled) return;
-        setData(d);
-        setSignals(s);
+    api.stock(code, { lookback: 240 })
+      .then((d) => {
+        if (!cancelled) setData(d);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -35,7 +30,7 @@ export function BacktestPage({ defaultCode }: { defaultCode: string }) {
     return () => {
       cancelled = true;
     };
-  }, [code, strategy]);
+  }, [code]);
 
   const stats = useMemo(() => {
     // Synthesized backtest stats anchored on detected levels & sample candles.

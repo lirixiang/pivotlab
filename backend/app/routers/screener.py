@@ -1,57 +1,64 @@
+"""Screener endpoints — scan runs in subprocess, results cached to JSON files."""
+import json
+import os
 from datetime import datetime
 
 from fastapi import APIRouter, Query
 
-from ..schemas import ScreenerResponse
-from ..services.data_provider import get_candles, list_universe
-from ..services.screener import PATTERN_DETECTORS
+from ..schemas import ScreenerResponse, ScreenerItem
+from ..services.sync_worker import spawn_sync
 
 router = APIRouter(prefix="/api/screener", tags=["screener"])
 
+_CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".screener_cache")
+
+
+def _read_cache(pattern: str, limit: int, min_score: float) -> ScreenerResponse:
+    path = os.path.join(_CACHE_DIR, f"{pattern}.json")
+    if not os.path.exists(path):
+        return ScreenerResponse(pattern=pattern, total=0, scanned=0, scanned_at=datetime.now(), items=[])
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        items = [ScreenerItem(**it) for it in data.get("items", []) if it.get("score", 0) >= min_score]
+        return ScreenerResponse(
+            pattern=pattern,
+            total=data.get("total", len(items)),
+            scanned=data.get("scanned", 0),
+            scanned_at=datetime.fromisoformat(data["scanned_at"]) if data.get("scanned_at") else datetime.now(),
+            items=items[:limit],
+        )
+    except Exception:
+        return ScreenerResponse(pattern=pattern, total=0, scanned=0, scanned_at=datetime.now(), items=[])
+
+
+@router.post("/scan")
+async def trigger_scan():
+    """Trigger screener scan in a separate process."""
+    spawn_sync("screener")
+    return {"status": "started", "message": "筛选扫描已启动，请稍后刷新查看结果"}
+
 
 @router.get("/{pattern}", response_model=ScreenerResponse)
-async def run_screener(
+async def get_results(
     pattern: str,
     limit: int = Query(50, ge=1, le=200),
     min_score: float = Query(0, ge=0, le=100),
 ):
-    detector = PATTERN_DETECTORS.get(pattern)
-    if not detector:
-        return ScreenerResponse(
-            pattern=pattern, total=0, scanned=0,
-            scanned_at=datetime.now(), items=[],
-        )
-    universe = list_universe()
-    items = []
-    for code, name, _ind in universe:
-        try:
-            candles = get_candles(code, days=180)
-            r = detector(code, name, candles)
-            if r and r.score >= min_score:
-                items.append(r)
-        except Exception:
-            continue
-    items.sort(key=lambda x: x.score, reverse=True)
-    return ScreenerResponse(
-        pattern=pattern,
-        total=len(items),
-        scanned=len(universe),
-        scanned_at=datetime.now(),
-        items=items[:limit],
-    )
+    """Return cached screener results (from last scan)."""
+    return _read_cache(pattern, limit, min_score)
 
 
 @router.get("/")
 async def summary():
-    """Counts per pattern (uses default thresholds)."""
-    universe = list_universe()
-    counts: dict[str, int] = {}
-    for pattern, detector in PATTERN_DETECTORS.items():
-        n = 0
-        for code, name, _ in universe:
-            candles = get_candles(code, days=180)
-            r = detector(code, name, candles)
-            if r:
-                n += 1
-        counts[pattern] = n
-    return {"scanned": len(universe), "counts": counts, "scanned_at": datetime.now()}
+    """Counts per pattern from cache."""
+    bp = _read_cache("breakout_pullback", 9999, 0)
+    bs = _read_cache("bottom_stabilize", 9999, 0)
+    return {
+        "scanned": max(bp.scanned, bs.scanned),
+        "counts": {
+            "breakout_pullback": bp.total,
+            "bottom_stabilize": bs.total,
+        },
+        "scanned_at": max(bp.scanned_at, bs.scanned_at),
+    }

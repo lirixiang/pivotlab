@@ -154,3 +154,9 @@ export type WatchlistItem = {
   amount: number;
   created_at: string;
 };
+
+export type WatchlistScore = {
+  code: string;
+  decision_score: number;
+  decision_label: string;
+};

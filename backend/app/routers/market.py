@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 
 from fastapi import APIRouter
@@ -10,7 +11,12 @@ router = APIRouter(prefix="/api/market", tags=["market"])
 
 @router.get("/overview", response_model=MarketOverview)
 async def overview() -> MarketOverview:
-    indices = get_indices()
+    try:
+        indices = await asyncio.wait_for(
+            asyncio.to_thread(get_indices), timeout=10.0,
+        )
+    except asyncio.TimeoutError:
+        indices = []
     return MarketOverview(
         indices=indices,
         total_amount=8914.0,

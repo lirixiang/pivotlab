@@ -43,7 +43,11 @@ export const api = {
     http<import("../types").SrFactor[]>("/stocks/meta/sr-factors"),
   screener: (pattern: string, limit = 50) =>
     http<ScreenerResponse>(`/screener/${pattern}?limit=${limit}`),
+  triggerScan: () =>
+    http<{ status: string; message: string }>("/screener/scan", { method: "POST" }),
   watchlist: () => http<WatchlistItem[]>("/watchlist"),
+  watchlistScores: () =>
+    http<import("../types").WatchlistScore[]>("/watchlist/scores"),
   addWatch: (code: string, name = "") =>
     http<{ id: number; code: string; name: string; ok: boolean }>("/watchlist", {
       method: "POST",

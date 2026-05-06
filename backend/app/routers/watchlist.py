@@ -1,3 +1,6 @@
+import asyncio
+import logging
+import time
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -7,9 +10,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..database import get_db
 from ..models import WatchlistItem, QuoteCache, Stock
 from ..schemas import WatchlistCreate
-from ..services.data_provider import get_quote
+from ..services.data_provider import get_candles, get_quote
+from ..services.levels_multifactor import (
+    compute_decision_score,
+    detect_levels_multifactor,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/watchlist", tags=["watchlist"])
+
+# In-memory cache for decision scores (code -> (score, label, ts))
+_score_cache: dict[str, tuple[float, str, float]] = {}
+_SCORE_TTL = 300  # 5 min cache
 
 
 @router.get("")
@@ -42,7 +55,7 @@ async def list_watchlist(db: AsyncSession = Depends(get_db)):
         result.append({
             "id": r.id,
             "code": r.code,
-            "name": r.name or (s.name if s else ""),
+            "name": (s.name if s else "") or r.name,
             "note": r.note,
             "industry": s.industry if s else "",
             "price": q.price if q else 0.0,
@@ -92,3 +105,46 @@ async def remove_watchlist(code: str, db: AsyncSession = Depends(get_db)):
     await db.delete(row)
     await db.commit()
     return {"ok": True}
+
+
+def _compute_one(code: str) -> tuple[str, float, str]:
+    """Compute decision score for a single stock (runs in thread)."""
+    try:
+        cached = _score_cache.get(code)
+        if cached and time.time() - cached[2] < _SCORE_TTL:
+            return code, cached[0], cached[1]
+
+        candles = get_candles(code, period="daily", days=240)
+        if not candles:
+            return code, 0.0, "—"
+
+        levels = detect_levels_multifactor(candles)
+        price = candles[-1].close
+        score, label = compute_decision_score(candles, levels, price)
+        _score_cache[code] = (score, label, time.time())
+        return code, score, label
+    except Exception as exc:
+        logger.warning("decision score failed for %s: %s", code, exc)
+        return code, 0.0, "—"
+
+
+@router.get("/scores")
+async def watchlist_scores(db: AsyncSession = Depends(get_db)):
+    """Return decision scores for all watchlist stocks."""
+    rows = (
+        await db.execute(
+            select(WatchlistItem).order_by(WatchlistItem.created_at.desc())
+        )
+    ).scalars().all()
+    if not rows:
+        return []
+
+    codes = [r.code for r in rows]
+    loop = asyncio.get_running_loop()
+    tasks = [loop.run_in_executor(None, _compute_one, c) for c in codes]
+    results = await asyncio.gather(*tasks)
+
+    return [
+        {"code": code, "decision_score": score, "decision_label": label}
+        for code, score, label in results
+    ]

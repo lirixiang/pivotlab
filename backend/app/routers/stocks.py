@@ -69,11 +69,17 @@ async def stock_detail(
     algorithm: str = Query("multifactor", regex="^(classic|multifactor)$"),
     factor_weights: str = Query("", description="JSON dict of factor weights override"),
 ):
-    candles, quote = await asyncio.gather(
-        asyncio.to_thread(get_candles, code, period,
-                          days * 5 if period == "monthly" else days * 2 if period == "weekly" else days),
-        asyncio.to_thread(get_quote, code),
-    )
+    try:
+        candles, quote = await asyncio.wait_for(
+            asyncio.gather(
+                asyncio.to_thread(get_candles, code, period,
+                                  days * 5 if period == "monthly" else days * 2 if period == "weekly" else days),
+                asyncio.to_thread(get_quote, code),
+            ),
+            timeout=15.0,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(504, "data fetch timeout")
     if not candles:
         raise HTTPException(404, "no candles")
 

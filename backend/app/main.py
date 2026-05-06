@@ -1,4 +1,5 @@
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -12,20 +13,24 @@ from .services.data_provider import preload_candles
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s :: %(message)s")
 
-_scheduler = BackgroundScheduler()
+_scheduler: BackgroundScheduler | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _scheduler
     await init_db()
-    # Pre-fetch candles on startup and refresh every 30 minutes
-    _scheduler.add_job(
-        preload_candles, "interval", minutes=30,
-        next_run_time=datetime.now(), id="preload_candles",
-    )
-    _scheduler.start()
+    # Only start scheduler in one worker (the first one)
+    if os.environ.get("SCHEDULER_DISABLED") != "1":
+        _scheduler = BackgroundScheduler()
+        _scheduler.add_job(
+            preload_candles, "interval", minutes=30,
+            next_run_time=datetime.now(), id="preload_candles",
+        )
+        _scheduler.start()
     yield
-    _scheduler.shutdown(wait=False)
+    if _scheduler:
+        _scheduler.shutdown(wait=False)
 
 
 app = FastAPI(title="PivotLab API", version="0.1.0", lifespan=lifespan)

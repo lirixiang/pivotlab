@@ -241,85 +241,89 @@ def _classify_fundamental(eps: float, roe: float, rev_yoy: float, np_yoy: float)
 
 
 def sync_financials() -> int:
-    """Sync financial snapshots for all stocks via akshare."""
+    """Sync financial snapshots for all stocks via East Money batch API.
+
+    Uses RPT_LICO_FN_CPD with ISNEW=1 to get the latest report per stock
+    in bulk (500 per page), instead of calling akshare per-stock.
+    ~11000 stocks in ~60 seconds.
+    """
+    import requests as _req
+
     task_id = _create_task("financials")
-    if not _HAS_AK:
-        _finish_task(task_id, 0, 0, "akshare unavailable")
-        return task_id
+    url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    page_size = 500
+    columns = "SECURITY_CODE,BASIC_EPS,WEIGHTAVG_ROE,YSTZ,SJLTZ,TOTAL_OPERATE_INCOME,PARENT_NETPROFIT,REPORTDATE"
+
     try:
-        with _get_session() as s:
-            codes = [r[0] for r in s.execute(select(Stock.code)).fetchall()]
-        if not codes:
-            _finish_task(task_id, 0, 0, "no stocks in DB")
-            return task_id
-
-        total = len(codes)
-        logger.info("sync_financials: processing %d stocks", total)
+        page = 1
         processed = 0
-        errors = 0
+        total = 0
 
         with _get_session() as s:
-            for i, code in enumerate(codes):
-                try:
-                    # akshare individual stock financial abstract
-                    symbol = f"{code}"
-                    df = ak.stock_financial_abstract(symbol=symbol)
-                    if df is None or df.empty:
-                        continue
+            while True:
+                params = {
+                    "reportName": "RPT_LICO_FN_CPD",
+                    "columns": columns,
+                    "pageSize": page_size,
+                    "pageNumber": page,
+                    "filter": "(ISNEW=1)",
+                }
+                resp = _req.get(url, params=params, headers=headers, timeout=15)
+                data = resp.json()
+                result = data.get("result")
+                if not result or not result.get("data"):
+                    if page == 1:
+                        _finish_task(task_id, 0, 0, "no data from EM financial API")
+                        return task_id
+                    break
 
-                    # Use the latest row
-                    row = df.iloc[0]
-                    eps = _safe_float(row, "摊薄每股收益")
-                    roe = _safe_float(row, "净资产收益率")
-                    rev_yoy = _safe_float(row, "营业总收入同比增长率")
-                    np_yoy = _safe_float(row, "归属净利润同比增长率")
-                    pe = _safe_float(row, "市盈率")
-                    revenue = _safe_float(row, "营业总收入")
-                    net_profit = _safe_float(row, "归属净利润")
-                    period = str(row.get("报告期", ""))
+                if page == 1:
+                    total = result.get("count", 0)
+                    logger.info("sync_financials: %d stocks from EM batch API", total)
+
+                now = datetime.utcnow()
+                for item in result["data"]:
+                    code = str(item.get("SECURITY_CODE", ""))
+                    if not code:
+                        continue
+                    eps = float(item.get("BASIC_EPS") or 0)
+                    roe = float(item.get("WEIGHTAVG_ROE") or 0)
+                    rev_yoy = float(item.get("YSTZ") or 0)
+                    np_yoy = float(item.get("SJLTZ") or 0)
+                    revenue = float(item.get("TOTAL_OPERATE_INCOME") or 0)
+                    net_profit = float(item.get("PARENT_NETPROFIT") or 0)
+                    period = str(item.get("REPORTDATE") or "")[:10]
 
                     status, summary = _classify_fundamental(eps, roe, rev_yoy, np_yoy)
-                    now = datetime.utcnow()
 
                     existing = s.get(FinancialSnapshot, code)
-                    data = {
+                    row_data = {
                         "code": code, "report_period": period,
                         "eps_ttm": eps, "roe": roe,
                         "revenue_yoy": rev_yoy, "net_profit_yoy": np_yoy,
-                        "pe_ratio_ttm": pe, "total_revenue": revenue,
+                        "pe_ratio_ttm": 0.0, "total_revenue": revenue,
                         "net_profit": net_profit,
                         "fundamental_status": status,
                         "fundamental_summary": summary,
                         "updated_at": now,
                     }
                     if existing:
-                        for k, v in data.items():
+                        for k, v in row_data.items():
                             setattr(existing, k, v)
                     else:
-                        s.add(FinancialSnapshot(**data))
+                        s.add(FinancialSnapshot(**row_data))
                     processed += 1
 
-                    if processed % 50 == 0:
-                        s.commit()
-                        _update_task_progress(task_id, processed, total)
-                        logger.info("sync_financials: %d/%d", processed, total)
-
-                except Exception as e:
-                    errors += 1
-                    if errors <= 5:
-                        logger.warning("sync_financials error for %s: %s", code, e)
-                    continue
-
-                # Throttle to avoid rate limiting
-                if (i + 1) % 20 == 0:
-                    time.sleep(0.5)
-
-            s.commit()
+                s.commit()
+                _update_task_progress(task_id, processed, total)
+                logger.info("sync_financials: %d/%d (page %d)", processed, total, page)
+                page += 1
 
         _finish_task(task_id, processed, total)
-        logger.info("sync_financials: done %d/%d (errors: %d)", processed, total, errors)
+        logger.info("sync_financials: done %d/%d", processed, total)
     except Exception as e:
-        logger.error("sync_financials error: %s", e)
+        logger.error("sync_financials error: %s\n%s", e, traceback.format_exc())
         _finish_task(task_id, 0, 0, str(e))
     return task_id
 
@@ -329,64 +333,68 @@ def sync_financials() -> int:
 # ═══════════════════════════════════════════════════════════════
 
 def sync_concepts() -> int:
-    """Sync stock concepts/themes from akshare."""
+    """Sync stock concepts/themes from East Money datacenter API.
+
+    Uses RPT_WEB_RESPREDICT which provides CONCEPTINDEX_BOARD per stock.
+    Covers ~2700 stocks (those with analyst coverage).
+    """
+    import requests
+
     task_id = _create_task("concepts")
-    if not _HAS_AK:
-        _finish_task(task_id, 0, 0, "akshare unavailable")
-        return task_id
+    url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    page_size = 200
+    page = 1
+    processed = 0
+    concept_count = 0
+
     try:
-        # Get all concept board names
-        boards = ak.stock_board_concept_name_em()
-        if boards is None or boards.empty:
-            _finish_task(task_id, 0, 0, "no concept boards returned")
-            return task_id
-
-        total = len(boards)
-        logger.info("sync_concepts: processing %d concept boards", total)
-        processed = 0
-        concept_count = 0
-
         with _get_session() as s:
-            # Clear old concepts
             s.execute(delete(StockConcept))
             s.commit()
-
             now = datetime.utcnow()
-            for i, (_, board_row) in enumerate(boards.iterrows()):
-                concept_name = str(board_row.get("板块名称", "")).strip()
-                if not concept_name:
-                    continue
-                try:
-                    members = ak.stock_board_concept_cons_em(symbol=concept_name)
-                    if members is None or members.empty:
+
+            while True:
+                params = {
+                    "reportName": "RPT_WEB_RESPREDICT",
+                    "columns": "SECURITY_CODE,CONCEPTINDEX_BOARD",
+                    "pageSize": page_size,
+                    "pageNumber": page,
+                }
+                resp = requests.get(url, params=params, headers=headers, timeout=15)
+                data = resp.json()
+                result = data.get("result")
+                if not result or not result.get("data"):
+                    if page == 1:
+                        _finish_task(task_id, 0, 0, "no data from EM API")
+                        return task_id
+                    break
+
+                total = result.get("count", 0)
+                for item in result["data"]:
+                    code = item.get("SECURITY_CODE", "")
+                    concepts_str = item.get("CONCEPTINDEX_BOARD") or ""
+                    if not code or not concepts_str:
                         continue
-                    for _, m in members.iterrows():
-                        code = str(m.get("代码", "")).strip()
-                        if not code or len(code) != 6:
+                    for concept in concepts_str.split(","):
+                        concept = concept.strip().rstrip("_")
+                        if not concept:
                             continue
-                        s.add(StockConcept(
-                            code=code, concept=concept_name, updated_at=now,
-                        ))
+                        s.add(StockConcept(code=code, concept=concept, updated_at=now))
                         concept_count += 1
                     processed += 1
 
-                    if processed % 10 == 0:
-                        s.commit()
-                        _update_task_progress(task_id, processed, total)
-                        logger.info("sync_concepts: %d/%d boards, %d mappings", processed, total, concept_count)
+                s.commit()
+                _update_task_progress(task_id, processed, total)
+                logger.info("sync_concepts: page %d, %d stocks, %d mappings", page, processed, concept_count)
 
-                except Exception as e:
-                    logger.warning("sync_concepts error for '%s': %s", concept_name, e)
-                    continue
+                if page >= result.get("pages", 1):
+                    break
+                page += 1
+                time.sleep(0.3)
 
-                # Throttle
-                if (i + 1) % 5 == 0:
-                    time.sleep(1.0)
-
-            s.commit()
-
-        _finish_task(task_id, processed, total)
-        logger.info("sync_concepts: done %d boards, %d mappings", processed, concept_count)
+        _finish_task(task_id, processed, concept_count)
+        logger.info("sync_concepts: done %d stocks, %d mappings", processed, concept_count)
     except Exception as e:
         logger.error("sync_concepts error: %s", e)
         _finish_task(task_id, 0, 0, str(e))
@@ -398,84 +406,65 @@ def sync_concepts() -> int:
 # ═══════════════════════════════════════════════════════════════
 
 def sync_industry() -> int:
-    """Fill industry info for all stocks from akshare."""
+    """Fill industry info for all stocks from East Money datacenter API.
+
+    Uses RPT_WEB_RESPREDICT which provides INDUSTRY_BOARD per stock.
+    Covers ~2700 stocks (those with analyst coverage).
+    """
+    import requests
+
     task_id = _create_task("industry")
-    if not _HAS_AK:
-        _finish_task(task_id, 0, 0, "akshare unavailable")
-        return task_id
-    try:
-        df = ak.stock_board_industry_cons_em(symbol="全部")
-        if df is None or df.empty:
-            # Try alternative: iterate over industry boards
-            _finish_task(task_id, 0, 0, "no industry data returned")
-            return task_id
-    except Exception:
-        # Alternative approach: get industry list then members
-        try:
-            return _sync_industry_via_boards(task_id)
-        except Exception as e2:
-            _finish_task(task_id, 0, 0, str(e2))
-            return task_id
-
-    # Direct approach with full table
-    total = len(df)
-    processed = 0
-    with _get_session() as s:
-        for _, row in df.iterrows():
-            code = str(row.get("代码", "")).strip()
-            industry = str(row.get("板块名称", "")).strip()
-            if not code or not industry:
-                continue
-            stock = s.get(Stock, code)
-            if stock:
-                stock.industry = industry
-                processed += 1
-        s.commit()
-
-    _finish_task(task_id, processed, total)
-    logger.info("sync_industry: updated %d stocks", processed)
-    return task_id
-
-
-def _sync_industry_via_boards(task_id: int) -> int:
-    """Fallback: iterate industry boards to fill stock industry."""
-    boards = ak.stock_board_industry_name_em()
-    if boards is None or boards.empty:
-        _finish_task(task_id, 0, 0, "no industry boards")
-        return task_id
-
-    total = len(boards)
+    url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    page_size = 200
+    page = 1
     processed = 0
     stock_updated = 0
 
-    with _get_session() as s:
-        for i, (_, row) in enumerate(boards.iterrows()):
-            name = str(row.get("板块名称", "")).strip()
-            if not name:
-                continue
-            try:
-                members = ak.stock_board_industry_cons_em(symbol=name)
-                if members is None or members.empty:
-                    continue
-                for _, m in members.iterrows():
-                    code = str(m.get("代码", "")).strip()
+    try:
+        with _get_session() as s:
+            while True:
+                params = {
+                    "reportName": "RPT_WEB_RESPREDICT",
+                    "columns": "SECURITY_CODE,INDUSTRY_BOARD",
+                    "pageSize": page_size,
+                    "pageNumber": page,
+                }
+                resp = requests.get(url, params=params, headers=headers, timeout=15)
+                data = resp.json()
+                result = data.get("result")
+                if not result or not result.get("data"):
+                    if page == 1:
+                        _finish_task(task_id, 0, 0, "no data from EM API")
+                        return task_id
+                    break
+
+                total = result.get("count", 0)
+                for item in result["data"]:
+                    code = item.get("SECURITY_CODE", "")
+                    industry = item.get("INDUSTRY_BOARD") or ""
+                    if not code or not industry:
+                        continue
                     stock = s.get(Stock, code)
                     if stock:
-                        stock.industry = name
+                        stock.industry = industry
                         stock_updated += 1
-                processed += 1
-            except Exception:
-                continue
+                    processed += 1
 
-            if (i + 1) % 5 == 0:
                 s.commit()
                 _update_task_progress(task_id, processed, total)
-                time.sleep(0.5)
+                logger.info("sync_industry: page %d, %d/%d, updated %d", page, processed, total, stock_updated)
 
-        s.commit()
+                if page >= result.get("pages", 1):
+                    break
+                page += 1
+                time.sleep(0.3)
 
-    _finish_task(task_id, processed, total)
-    logger.info("sync_industry: %d boards, %d stocks updated", processed, stock_updated)
+        _finish_task(task_id, stock_updated, processed)
+        logger.info("sync_industry: done %d stocks updated out of %d", stock_updated, processed)
+    except Exception as e:
+        logger.error("sync_industry error: %s", e)
+        _finish_task(task_id, 0, 0, str(e))
     return task_id
 
 
@@ -797,3 +786,60 @@ def _safe_float(row, col: str, default: float = 0.0) -> float:
         return float(v)
     except (ValueError, TypeError):
         return default
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Screener (runs in subprocess, saves results to JSON cache)
+# ═══════════════════════════════════════════════════════════════
+
+def run_screener():
+    """Run all pattern detectors and save results to .screener_cache/*.json."""
+    import json as _json
+    import os as _os
+    from .data_provider import get_candles, list_universe
+    from .screener import PATTERN_DETECTORS
+
+    cache_dir = _os.path.join(
+        _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))),
+        ".screener_cache",
+    )
+    _os.makedirs(cache_dir, exist_ok=True)
+
+    universe = list_universe()
+    logger.info("screener: scanning %d stocks", len(universe))
+
+    for pattern, detector in PATTERN_DETECTORS.items():
+        items = []
+        for code, name, _ind in universe:
+            try:
+                candles = get_candles(code, days=180)
+                if not candles:
+                    continue
+                r = detector(code, name, candles)
+                if r:
+                    items.append(r)
+            except Exception:
+                continue
+        items.sort(key=lambda x: x.score, reverse=True)
+        result = {
+            "pattern": pattern,
+            "total": len(items),
+            "scanned": len(universe),
+            "scanned_at": datetime.now().isoformat(),
+            "items": [
+                {
+                    "code": it.code, "name": it.name, "pattern": it.pattern,
+                    "score": it.score, "price": it.price,
+                    "change_pct": it.change_pct, "volume_ratio": it.volume_ratio,
+                    "breakout_price": it.breakout_price,
+                    "pullback_price": it.pullback_price,
+                    "distance_to_support_pct": it.distance_to_support_pct,
+                    "triggers": it.triggers,
+                }
+                for it in items
+            ],
+        }
+        path = _os.path.join(cache_dir, f"{pattern}.json")
+        with open(path, "w") as f:
+            _json.dump(result, f, ensure_ascii=False)
+        logger.info("screener: %s → %d items", pattern, len(items))
