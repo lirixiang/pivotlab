@@ -2,15 +2,15 @@
 
 Data source priority:
   1. Database cache (SQLAlchemy — supports SQLite and PostgreSQL)
-  2. Tencent Finance (qt.gtimg.cn) — reliable real-time source
-  3. akshare / East Money — fallback with circuit breaker
+  2. Tencent Finance (qt.gtimg.cn / web.ifzq.gtimg.cn) — primary source
+  3. East Money direct HTTP — fallback for K-lines
 
-Key design patterns (borrowed from stock-sr-platform):
+Key design patterns:
   - DB-first: return cached data immediately, refresh in background
-  - Circuit breaker: skip akshare after repeated failures
   - Dedicated thread pools: isolate network I/O from API handlers
   - Per-day refresh tracking: avoid redundant fetches
   - Strategy pattern for multi-database support (SQLite / PostgreSQL)
+  - No akshare dependency: all data via direct HTTP
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Iterable, Optional
 
-import pandas as pd
+import requests as _req
 from sqlalchemy import create_engine, select, delete, text
 from sqlalchemy.orm import Session
 
@@ -32,67 +32,33 @@ from . import tencent_provider
 
 logger = logging.getLogger(__name__)
 
-try:
-    import akshare as ak  # type: ignore
-    _HAS_AK = True
-except Exception as e:  # pragma: no cover
-    logger.warning("akshare unavailable: %s", e)
-    ak = None  # type: ignore
-    _HAS_AK = False
-
 
 # ---------- Dedicated thread pools ----------
-# Isolate slow network calls so they can't starve the default asyncio executor
 _net_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="net")
 _sync_executor = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="sync")
-_timeout_executor = concurrent.futures.ThreadPoolExecutor(max_workers=6, thread_name_prefix="ak-timeout")
 
-# ---------- Circuit breaker for akshare/EM ----------
-_EM_TIMEOUT = 8.0
-_em_fail_count = 0
-_em_last_fail_time: Optional[datetime] = None
-_EM_CIRCUIT_BREAK_SECONDS = 300  # 5 min cooldown after 2+ consecutive failures
+_HTTP_TIMEOUT = 10
+_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 
-def _em_is_available() -> bool:
-    global _em_fail_count, _em_last_fail_time
-    if _em_fail_count < 2:
-        return True
-    if _em_last_fail_time and (datetime.utcnow() - _em_last_fail_time).total_seconds() > _EM_CIRCUIT_BREAK_SECONDS:
-        _em_fail_count = 0
-        return True
-    return False
+def _is_trade_hours() -> bool:
+    """Return True if within A-share trading window (weekday 09:15–15:10 CST)."""
+    now = datetime.now()
+    if now.weekday() >= 5:          # Saturday / Sunday
+        return False
+    t = now.hour * 100 + now.minute
+    return 915 <= t <= 1510
 
 
-def _em_record_failure():
-    global _em_fail_count, _em_last_fail_time
-    _em_fail_count += 1
-    _em_last_fail_time = datetime.utcnow()
+def _market_closed_today() -> bool:
+    """Return True if today is a weekday and market already closed (after 15:10)."""
+    now = datetime.now()
+    if now.weekday() >= 5:
+        return False  # weekend — not 'closed today', just non-trading
+    return now.hour * 100 + now.minute > 1510
 
 
-def _em_record_success():
-    global _em_fail_count
-    _em_fail_count = 0
-
-
-_AK_CALL_TIMEOUT = 10  # seconds, hard limit for any single akshare call
-
-
-def _call_with_timeout(fn, *args, timeout=_AK_CALL_TIMEOUT, **kwargs):
-    """Run fn in a separate thread with a hard timeout. Returns None on timeout."""
-    fut = _timeout_executor.submit(fn, *args, **kwargs)
-    try:
-        return fut.result(timeout=timeout)
-    except concurrent.futures.TimeoutError:
-        logger.warning("akshare call timed out after %ss: %s", timeout, fn.__name__)
-        fut.cancel()
-        return None
-    except Exception as e:
-        logger.debug("akshare call failed: %s: %s", fn.__name__, e)
-        return None
-
-
-async def _run_in_net_executor(fn, *args, timeout: float = _EM_TIMEOUT):
+async def _run_in_net_executor(fn, *args, timeout: float = _HTTP_TIMEOUT):
     """Run a sync function in the dedicated network thread pool with timeout."""
     loop = asyncio.get_running_loop()
     fut = loop.run_in_executor(_net_executor, fn, *args)
@@ -182,44 +148,82 @@ def _cache_delete(code: str) -> None:
         session.commit()
 
 
-# ---------- Multi-source candle fetchers ----------
+# ---------- Multi-source candle fetchers (direct HTTP, no akshare) ----------
+
+_TX_KLINE_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+_EM_KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+
 
 def _tx_symbol(code: str) -> str:
-    """Convert 6-digit code to Tencent akshare symbol."""
+    """Convert 6-digit code to Tencent symbol."""
     return f"sh{code}" if code[:1] in ("5", "6", "9") else f"sz{code}"
 
 
-def _normalize_candle_df(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
-    """Normalize Tencent-format columns to standard 日期/开盘/最高/最低/收盘/成交量."""
-    if df is None or df.empty:
-        return df
-    if "日期" in df.columns:
-        return df
-    if "date" not in df.columns:
-        return df
-    normalized = df.copy()
-    normalized["日期"] = pd.to_datetime(normalized["date"]).dt.strftime("%Y-%m-%d")
-    normalized["开盘"] = normalized.get("open", 0)
-    normalized["最高"] = normalized.get("high", 0)
-    normalized["最低"] = normalized.get("low", 0)
-    normalized["收盘"] = normalized.get("close", 0)
-    normalized["成交量"] = normalized.get("volume", normalized.get("amount", 0))
-    return normalized
+def _em_secid(code: str) -> str:
+    """Convert 6-digit code to EM secid (market.code)."""
+    if code.startswith(("6", "5", "9")):
+        return f"1.{code}"
+    return f"0.{code}"
 
 
-def _df_to_candles(df: pd.DataFrame) -> list[Candle]:
-    """Convert a normalized DataFrame to Candle list."""
-    out: list[Candle] = []
-    for _, row in df.iterrows():
-        out.append(Candle(
-            date=str(row.get("日期")),
-            open=float(row.get("开盘", 0)),
-            high=float(row.get("最高", 0)),
-            low=float(row.get("最低", 0)),
-            close=float(row.get("收盘", 0)),
-            volume=float(row.get("成交量", 0)),
-        ))
-    return out
+def _fetch_candles_tencent(code: str, start: str, days: int) -> list[Candle]:
+    """Fetch daily candles from Tencent direct HTTP API."""
+    try:
+        symbol = _tx_symbol(code)
+        beg = f"{start[:4]}-{start[4:6]}-{start[6:]}" if len(start) == 8 else start
+        r = _req.get(
+            _TX_KLINE_URL,
+            params={"param": f"{symbol},day,{beg},2050-12-31,{days * 2},qfq"},
+            headers=_HEADERS, timeout=_HTTP_TIMEOUT,
+        )
+        if r.status_code == 200:
+            data = r.json().get("data", {})
+            stock = data.get(symbol.lower(), data.get(symbol, {}))
+            klines = stock.get("qfqday") or stock.get("day") or []
+            if klines:
+                return [
+                    Candle(date=k[0], open=float(k[1]), close=float(k[2]),
+                           high=float(k[3]), low=float(k[4]),
+                           volume=int(float(k[5])))
+                    for k in klines if len(k) >= 6
+                ]
+    except Exception as e:
+        logger.debug("tencent kline failed for %s: %s", code, e)
+    return []
+
+
+def _fetch_candles_em(code: str, start: str, days: int, period: str = "101") -> list[Candle]:
+    """Fetch candles from East Money direct HTTP API.
+    
+    period: 101=daily, 102=weekly, 103=monthly
+    """
+    try:
+        beg = start.replace("-", "")[:8]
+        r = _req.get(
+            _EM_KLINE_URL,
+            params={
+                "secid": _em_secid(code),
+                "fields1": "f1,f2,f3,f4,f5,f6",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+                "klt": period, "fqt": "1",
+                "beg": beg, "end": "20501231",
+            },
+            headers=_HEADERS, timeout=_HTTP_TIMEOUT,
+        )
+        if r.status_code == 200:
+            data = r.json().get("data")
+            if data and data.get("klines"):
+                return [
+                    Candle(date=parts[0], open=float(parts[1]), close=float(parts[2]),
+                           high=float(parts[3]), low=float(parts[4]),
+                           volume=int(float(parts[5])))
+                    for line in data["klines"]
+                    for parts in [line.split(",")]
+                    if len(parts) >= 6
+                ]
+    except Exception as e:
+        logger.debug("EM kline failed for %s: %s", code, e)
+    return []
 
 
 def _resample_candles(candles: list[Candle], period: str) -> list[Candle]:
@@ -265,40 +269,18 @@ def _resample_candles(candles: list[Candle], period: str) -> list[Candle]:
 
 
 def _fetch_candles_sync(code: str, days: int = 240) -> list[Candle]:
-    """Fetch daily candles: try Tencent first, then East Money. Runs in thread pool."""
+    """Fetch daily candles: try Tencent first, then East Money. Direct HTTP, no akshare."""
     start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y%m%d")
-    end = datetime.now().strftime("%Y%m%d")
 
-    # --- Source 1: Tencent (via akshare wrapper, more reliable connectivity) ---
-    if _HAS_AK:
-        df = _call_with_timeout(
-            ak.stock_zh_a_hist_tx,
-            symbol=_tx_symbol(code),
-            start_date=start,
-            end_date=end,
-            adjust="qfq",
-            timeout=_EM_TIMEOUT,
-        )
-        df = _normalize_candle_df(df)
-        if df is not None and not df.empty:
-            result = _df_to_candles(df)
-            if result:
-                return result[-days:]
+    # --- Source 1: Tencent (fast + stable) ---
+    result = _fetch_candles_tencent(code, start, days)
+    if result:
+        return result[-days:]
 
-    # --- Source 2: East Money (with circuit breaker) ---
-    if _HAS_AK and _em_is_available():
-        df = _call_with_timeout(
-            ak.stock_zh_a_hist,
-            symbol=code, period="daily",
-            start_date=start, end_date=end, adjust="qfq",
-        )
-        if df is not None and not df.empty:
-            _em_record_success()
-            result = _df_to_candles(df)
-            if result:
-                return result[-days:]
-        else:
-            _em_record_failure()
+    # --- Source 2: East Money fallback ---
+    result = _fetch_candles_em(code, start, days)
+    if result:
+        return result[-days:]
 
     return []
 
@@ -336,7 +318,7 @@ def list_universe() -> list[tuple[str, str, str]]:
 
 
 # ---------- TTL snapshot caches ----------
-# Whole-market quote/index calls (akshare) are heavy (1-3s, ~5000 rows each).
+# Whole-market quote/index calls are heavy (1-3s, ~5000 rows each).
 # Cache them in-process so per-stock quote calls reuse the snapshot within `_TTL`.
 _TTL = 60.0  # seconds
 _quote_snapshot: dict[str, StockQuote] = {}
@@ -357,7 +339,7 @@ def _get_watched_codes() -> list[str]:
 
 
 def _refresh_quote_snapshot() -> None:
-    """Populate `_quote_snapshot` from Tencent (primary) or akshare (fallback)."""
+    """Populate `_quote_snapshot` from Tencent Finance."""
     global _quote_snapshot, _quote_snapshot_at
     snap: dict[str, StockQuote] = {}
 
@@ -380,7 +362,7 @@ def _refresh_quote_snapshot() -> None:
     except Exception:
         pass
 
-    # --- Source 1: Tencent Finance (fast, reliable) ---
+    # --- Tencent Finance (fast, reliable, only source needed) ---
     try:
         tencent_quotes = tencent_provider.fetch_quotes(codes)
         for q in tencent_quotes:
@@ -396,40 +378,22 @@ def _refresh_quote_snapshot() -> None:
                 volume_ratio=0.0,
                 turnover=q.get("turnover_rate", 0),
                 industry=industry_by_code.get(code, ""),
+                open=q.get("open", 0),
+                high=q.get("high", 0),
+                low=q.get("low", 0),
+                prev_close=q.get("prev_close", 0),
             )
     except Exception as e:
         logger.info("tencent quotes failed: %s", e)
 
-    # --- Source 2: akshare/EM fallback ---
-    if not snap and _HAS_AK and _em_is_available():
-        try:
-            df = _call_with_timeout(ak.stock_zh_a_spot_em)
-            if df is None:
-                raise RuntimeError("timeout")
-            _em_record_success()
-            for _, r in df.iterrows():
-                code = str(r.get("代码"))
-                if code in set(codes):
-                    snap[code] = StockQuote(
-                        code=code,
-                        name=str(r.get("名称") or name_by_code.get(code, code)),
-                        price=float(r.get("最新价", 0) or 0),
-                        change=float(r.get("涨跌额", 0) or 0),
-                        change_pct=float(r.get("涨跌幅", 0) or 0),
-                        volume=float(r.get("成交量", 0) or 0),
-                        amount=float(r.get("成交额", 0) or 0),
-                        volume_ratio=float(r.get("量比", 0) or 0),
-                        turnover=float(r.get("换手率", 0) or 0),
-                        industry=industry_by_code.get(code, ""),
-                    )
-        except Exception as e:
-            _em_record_failure()
-            logger.info("akshare snapshot failed: %s", e)
     _quote_snapshot = snap
     _quote_snapshot_at = time.time()
 
 
 def _ensure_quote_snapshot() -> None:
+    # Outside trading hours, don't refresh if we already have data
+    if _quote_snapshot and not _is_trade_hours():
+        return
     if not _quote_snapshot or time.time() - _quote_snapshot_at > _TTL:
         _refresh_quote_snapshot()
 
@@ -444,52 +408,22 @@ def get_candles(code: str, period: str = "daily", days: int = 240) -> list[Candl
     """
     code = _normalize_code(code)
 
-    # Non-daily periods bypass cache
+    # Non-daily periods: fetch from network (no DB cache for weekly/monthly)
     if period != "daily":
-        end = datetime.now().strftime("%Y%m%d")
         start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y%m%d")
-        # Try Tencent first (via akshare wrapper, more reliable)
-        if _HAS_AK:
-            try:
-                tx_period = {"weekly": "week", "monthly": "month"}.get(period)
-                if tx_period:
-                    df = _call_with_timeout(
-                        ak.stock_zh_a_hist_tx,
-                        symbol=_tx_symbol(code),
-                        start_date=start,
-                        end_date=end,
-                        adjust="qfq",
-                        timeout=_EM_TIMEOUT,
-                    )
-                    if df is not None and not df.empty:
-                        # Tencent returns daily data; resample to weekly/monthly
-                        df = _normalize_candle_df(df)
-                        if df is not None and not df.empty:
-                            result = _df_to_candles(df)
-                            if result:
-                                resampled = _resample_candles(result, period)
-                                if resampled:
-                                    return resampled[-days:]
-            except Exception as e:
-                logger.debug("tencent %s candles failed for %s: %s", period, code, e)
-        # Fallback: EM natively supports weekly/monthly
-        if _HAS_AK and _em_is_available():
-            try:
-                df = _call_with_timeout(
-                    ak.stock_zh_a_hist,
-                    symbol=code, period=period,
-                    start_date=start, end_date=end, adjust="qfq",
-                )
-                if df is not None and not df.empty:
-                    _em_record_success()
-                    result = _df_to_candles(df)
-                    if result:
-                        return result[-days:]
-                else:
-                    _em_record_failure()
-            except Exception as e:
-                _em_record_failure()
-                logger.debug("EM %s candles failed for %s: %s", period, code, e)
+        # Tencent only supports daily; fetch daily then resample
+        daily = _fetch_candles_tencent(code, start, days * 2)
+        if daily:
+            resampled = _resample_candles(daily, period)
+            if resampled:
+                return resampled[-days:]
+
+        # EM natively supports weekly (102) / monthly (103)
+        em_period = {"weekly": "102", "monthly": "103"}.get(period)
+        if em_period:
+            result = _fetch_candles_em(code, start, days, period=em_period)
+            if result:
+                return result[-days:]
         return []
 
     # --- Daily candles: DB cache + background refresh ---
@@ -501,11 +435,23 @@ def get_candles(code: str, period: str = "daily", days: int = 240) -> list[Candl
         # Already refreshed today, return cached
         return cached[-days:]
 
+    # Outside trading hours with cached data → no refresh needed
+    if cached and not _is_trade_hours():
+        _candle_refresh_done.add(cache_key)
+        return cached[-days:]
+
     if cached:
-        # Have data but may be stale — return immediately, refresh in background
+        # Have data but may be stale — do inline refresh (fast, ~1s)
+        # After market close, only refresh once to get final closing data
         if cache_key not in _candle_refresh_done:
             _candle_refresh_done.add(cache_key)
-            _sync_executor.submit(_bg_refresh_candles, code, days)
+            try:
+                new_candles = _fetch_candles_sync(code, days)
+                if new_candles:
+                    _cache_save(code, new_candles)
+                    return new_candles[-days:]
+            except Exception as e:
+                logger.debug("inline refresh failed for %s: %s, using cache", code, e)
         return cached[-days:]
 
     # No data at all — must wait for network fetch
@@ -577,6 +523,10 @@ def _fetch_single_quote(code: str) -> Optional[StockQuote]:
                 volume_ratio=0.0,
                 turnover=q.get("turnover_rate", 0),
                 industry=industry,
+                open=q.get("open", 0),
+                high=q.get("high", 0),
+                low=q.get("low", 0),
+                prev_close=q.get("prev_close", 0),
             )
     except Exception as e:
         logger.debug("tencent single quote failed for %s: %s", code, e)
@@ -622,7 +572,7 @@ def get_indices() -> list[IndexQuote]:
         ("399006", "创业板指"),
     ]
 
-    # --- Source 1: Tencent Finance ---
+    # --- Tencent Finance (only source needed) ---
     try:
         tq = tencent_provider.fetch_index_quotes()
         if tq:
@@ -640,31 +590,6 @@ def get_indices() -> list[IndexQuote]:
     except Exception as e:
         logger.info("tencent indices failed: %s", e)
 
-    # --- Source 2: akshare fallback ---
-    if _HAS_AK and _em_is_available():
-        try:
-            df = _call_with_timeout(ak.stock_zh_index_spot_em, symbol="沪深重要指数")
-            if df is None:
-                raise RuntimeError("timeout")
-            _em_record_success()
-            results: list[IndexQuote] = []
-            for code, name in items:
-                row = df[df["代码"] == code]
-                if len(row) > 0:
-                    r = row.iloc[0]
-                    results.append(IndexQuote(
-                        code=code, name=name,
-                        price=float(r.get("最新价", 0)),
-                        change_pct=float(r.get("涨跌幅", 0)),
-                    ))
-            if results:
-                _index_snapshot = results
-                _index_snapshot_at = time.time()
-                return results
-        except Exception as e:
-            _em_record_failure()
-            logger.info("akshare indices failed: %s", e)
-    # Return empty list if all sources fail
     return []
 
 

@@ -24,7 +24,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY backend/requirements.txt ./requirements.txt
 RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --upgrade pip \
+    && pip install torch --index-url https://download.pytorch.org/whl/cu128 \
     && pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
+
+# Create NVIDIA lib directory and symlinks (actual .so files mounted at runtime)
+RUN mkdir -p /usr/lib/nvidia \
+    && ln -sf /usr/lib/nvidia/libcuda.so.570.172.08 /usr/lib/nvidia/libcuda.so.1 \
+    && ln -sf /usr/lib/nvidia/libcuda.so.1 /usr/lib/nvidia/libcuda.so \
+    && ln -sf /usr/lib/nvidia/libnvidia-ml.so.570.172.08 /usr/lib/nvidia/libnvidia-ml.so.1 \
+    && ln -sf /usr/lib/nvidia/libnvidia-ptxjitcompiler.so.570.172.08 /usr/lib/nvidia/libnvidia-ptxjitcompiler.so.1 \
+    && echo /usr/lib/nvidia > /etc/ld.so.conf.d/nvidia.conf && ldconfig
 
 COPY backend ./backend
 COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
@@ -36,6 +45,16 @@ RUN rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default
 COPY <<'EOF' /app/start.sh
 #!/bin/sh
 set -e
+
+# Create NVIDIA symlinks and refresh ldconfig at runtime (libs mounted as volumes)
+if [ -f /usr/lib/nvidia/libcuda.so.570.172.08 ]; then
+  ln -sf /usr/lib/nvidia/libcuda.so.570.172.08 /usr/lib/nvidia/libcuda.so.1
+  ln -sf /usr/lib/nvidia/libcuda.so.1 /usr/lib/nvidia/libcuda.so
+  ln -sf /usr/lib/nvidia/libnvidia-ml.so.570.172.08 /usr/lib/nvidia/libnvidia-ml.so.1
+  ln -sf /usr/lib/nvidia/libnvidia-ptxjitcompiler.so.570.172.08 /usr/lib/nvidia/libnvidia-ptxjitcompiler.so.1
+  ldconfig
+  echo "NVIDIA GPU libraries linked"
+fi
 
 uvicorn app.main:app --host 0.0.0.0 --port 18080 --workers 2 &
 exec nginx -g 'daemon off;'

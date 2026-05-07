@@ -104,6 +104,48 @@ body,
   .row-hover:hover {
     background: #11151f;
   }
+  .inp {
+    background: #0e1320;
+    border: 1px solid #1f2535;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 12px;
+    color: #d6dae3;
+    outline: none;
+  }
+  .inp:focus {
+    border-color: #d4a857;
+  }
+  .btn-gold {
+    background: linear-gradient(135deg, #d4a857 0%, #b6873b 100%);
+    color: #07090d;
+    font-weight: 600;
+    font-size: 12px;
+    padding: 6px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .btn-gold:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .btn-outline {
+    background: transparent;
+    border: 1px solid #1f2535;
+    color: #9aa3b8;
+    font-size: 12px;
+    padding: 6px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .btn-outline:hover {
+    color: #e6e9f0;
+    border-color: #3a4255;
+  }
+  .btn-outline:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
   .scrollbar::-webkit-scrollbar {
     width: 6px;
     height: 6px;

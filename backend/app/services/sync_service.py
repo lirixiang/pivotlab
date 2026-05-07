@@ -142,10 +142,25 @@ def _update_task_progress(task_id: int, processed: int, total: int):
 
 
 # ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
 #  1. Stock list sync
 # ═══════════════════════════════════════════════════════════════
 
+def _source_for(task_type: str) -> str:
+    """Get the configured data source id for a task type."""
+    from .source_registry import get_source_for
+    return get_source_for(task_type)
+
+
 def sync_stock_list(_task_id: int = None) -> int:
+    """Sync A-share stock list."""
+    source = _source_for("stocks")
+    if source == "em_api":
+        return _sync_stock_list_em(_task_id)
+    return _sync_stock_list_akshare(_task_id)
+
+
+def _sync_stock_list_akshare(_task_id: int = None) -> int:
     """Sync A-share stock list from akshare."""
     task_id = _get_or_create_task("stocks", _task_id)
     if task_id == -1:
@@ -157,7 +172,7 @@ def sync_stock_list(_task_id: int = None) -> int:
     try:
         df = ak.stock_info_a_code_name()
         total = len(df)
-        logger.info("sync_stock_list: fetched %d stocks", total)
+        logger.info("sync_stock_list[akshare]: fetched %d stocks", total)
 
         with _get_session() as s:
             now = datetime.utcnow()
@@ -199,9 +214,92 @@ def sync_stock_list(_task_id: int = None) -> int:
             processed = len(batch)
 
         _finish_task(task_id, processed, total)
-        logger.info("sync_stock_list: saved %d stocks", processed)
+        logger.info("sync_stock_list[akshare]: saved %d stocks", processed)
     except Exception as e:
-        logger.error("sync_stock_list error: %s", e)
+        logger.error("sync_stock_list[akshare] error: %s", e)
+        _finish_task(task_id, 0, 0, str(e))
+    return task_id
+
+
+def _sync_stock_list_em(_task_id: int = None) -> int:
+    """Sync A-share stock list from East Money datacenter API."""
+    import requests as _req
+
+    task_id = _get_or_create_task("stocks", _task_id)
+    if task_id == -1:
+        logger.info("task already running, skipping")
+        return -1
+    try:
+        url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        page_size = 500
+        page = 1
+        processed = 0
+        total = 0
+
+        with _get_session() as s:
+            now = datetime.utcnow()
+            while True:
+                params = {
+                    "reportName": "RPT_LICO_FN_CPD",
+                    "columns": "SECURITY_CODE,SECURITY_NAME_ABBR",
+                    "pageSize": page_size,
+                    "pageNumber": page,
+                    "filter": '(ISNEW="1")',
+                }
+                resp = _req.get(url, params=params, headers=headers, timeout=15)
+                data = resp.json()
+                result = data.get("result")
+                if not result or not result.get("data"):
+                    if page == 1:
+                        _finish_task(task_id, 0, 0, "no data from EM API")
+                        return task_id
+                    break
+
+                if page == 1:
+                    total = result.get("count", 0)
+
+                for item in result["data"]:
+                    code = item.get("SECURITY_CODE", "").strip()
+                    name = item.get("SECURITY_NAME_ABBR", "").strip()
+                    if not code or len(code) != 6:
+                        continue
+                    market = ""
+                    if code.startswith("60"):
+                        market = "沪A"
+                    elif code.startswith("00"):
+                        market = "深A"
+                    elif code.startswith("30"):
+                        market = "创业板"
+                    elif code.startswith("68"):
+                        market = "科创板"
+                    else:
+                        continue
+                    is_st = "ST" in name.upper()
+
+                    existing = s.get(Stock, code)
+                    if existing:
+                        existing.name = name
+                        existing.market = market
+                        existing.is_st = is_st
+                        existing.updated_at = now
+                    else:
+                        s.add(Stock(code=code, name=name, market=market, is_st=is_st, updated_at=now))
+                    processed += 1
+
+                s.commit()
+                _update_task_progress(task_id, processed, total)
+                logger.info("sync_stock_list[em]: page %d done (%d/%d)", page, processed, total)
+
+                total_pages = result.get("pages", 1)
+                if page >= total_pages:
+                    break
+                page += 1
+
+        _finish_task(task_id, processed, total)
+        logger.info("sync_stock_list[em]: saved %d stocks", processed)
+    except Exception as e:
+        logger.error("sync_stock_list[em] error: %s", e)
         _finish_task(task_id, 0, 0, str(e))
     return task_id
 
@@ -549,9 +647,23 @@ def _tx_kline_symbol(code: str) -> str:
     return f"sz{code}"
 
 
-def _fetch_candles_batch(session, code: str, beg: str, days: int) -> list[dict]:
-    """Fetch daily candles — try Tencent first (fast + stable), fallback to EM."""
-    # --- Tencent ---
+def _fetch_candles_batch(session, code: str, beg: str, days: int, source: str = "dual") -> list[dict]:
+    """Fetch daily candles from configured source.
+
+    source: 'tencent', 'em_push', or 'dual' (tencent first, EM fallback).
+    """
+    if source == "tencent":
+        return _fetch_candles_tencent(session, code, beg, days)
+    elif source == "em_push":
+        return _fetch_candles_em(session, code, beg, days)
+    # dual: try tencent, fallback EM
+    rows = _fetch_candles_tencent(session, code, beg, days)
+    if rows:
+        return rows
+    return _fetch_candles_em(session, code, beg, days)
+
+
+def _fetch_candles_tencent(session, code: str, beg: str, days: int) -> list[dict]:
     try:
         symbol = _tx_kline_symbol(code)
         r = session.get(
@@ -580,8 +692,10 @@ def _fetch_candles_batch(session, code: str, beg: str, days: int) -> list[dict]:
                 return rows
     except Exception:
         pass
+    return []
 
-    # --- EM fallback ---
+
+def _fetch_candles_em(session, code: str, beg: str, days: int) -> list[dict]:
     try:
         params = {
             "secid": _em_secid(code),
@@ -611,20 +725,23 @@ def _fetch_candles_batch(session, code: str, beg: str, days: int) -> list[dict]:
                 return rows
     except Exception:
         pass
-
     return []
 
 
 def sync_candles(days: int = 365, _task_id: int = None) -> int:
-    """Batch-sync historical daily candles for all stocks using EM direct HTTP API.
+    """Batch-sync historical daily candles for all stocks.
 
     Incremental: only fetches data after each stock's latest cached date.
     Uses 4 workers with connection pooling + throttling to avoid rate limits.
+    Source is configurable: tencent / em_push / dual (default).
     """
     import requests
     from requests.adapters import HTTPAdapter
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import threading
+
+    candle_source = _source_for("daily_candles")
+    logger.info("sync_candles: using source '%s'", candle_source)
 
     task_id = _get_or_create_task("daily_candles", _task_id)
     if task_id == -1:
@@ -689,7 +806,7 @@ def sync_candles(days: int = 365, _task_id: int = None) -> int:
                 if elapsed < 0.05:
                     time.sleep(0.05 - elapsed)
                 _last_req_time[0] = time.time()
-            return _fetch_candles_batch(http, code, beg, days)
+            return _fetch_candles_batch(http, code, beg, days, source=candle_source)
 
         processed = 0
         errors = 0

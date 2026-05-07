@@ -86,6 +86,7 @@ async def stock_detail(
     # Append today's live candle from quote if not already in candles
     if quote and quote.price > 0 and period == "daily":
         from datetime import date as _date
+        from ..services.data_provider import _is_trade_hours
         today_str = _date.today().strftime("%Y-%m-%d")
         last_date = candles[-1].date[:10] if candles else ""
         if last_date != today_str and quote.open > 0:
@@ -97,7 +98,7 @@ async def stock_detail(
                 close=quote.price,
                 volume=quote.volume,
             ))
-        elif last_date == today_str:
+        elif last_date == today_str and _is_trade_hours():
             # Update today's candle with latest quote data
             candles[-1] = Candle(
                 date=today_str,

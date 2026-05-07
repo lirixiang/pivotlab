@@ -5,6 +5,8 @@ import { ScreenerPage } from "./pages/ScreenerPage";
 import { BacktestPage } from "./pages/BacktestPage";
 import { MonitorPage } from "./pages/MonitorPage";
 import { SyncPage } from "./pages/SyncPage";
+import { AlgoPage } from "./pages/AlgoPage";
+import { StrategyPage } from "./pages/StrategyPage";
 import type { ScreenerItem } from "./types";
 
 // ── URL ↔ state helpers ──
@@ -12,6 +14,8 @@ const TAB_PATHS: Record<TabKey, string> = {
   workspace: "/",
   screener: "/screener",
   backtest: "/backtest",
+  algo: "/algo",
+  strategy: "/strategy",
   monitor: "/monitor",
   sync: "/sync",
 };
@@ -115,6 +119,8 @@ export default function App() {
 
       {tab === "screener" && <ScreenerPage onPickStock={goWorkspace} />}
       {tab === "backtest" && <BacktestPage defaultCode={code} />}
+      {tab === "algo" && <AlgoPage />}
+      {tab === "strategy" && <StrategyPage defaultCode={code} />}
       {tab === "monitor" && <MonitorPage onPickStock={goWorkspace} />}
       {tab === "sync" && <SyncPage />}
 

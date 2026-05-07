@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../services/api";
-import type { BacktestResponse, BacktestTrade } from "../types";
+import type { BacktestResponse, BacktestTrade, OptimizeResult, TradeSignal } from "../types";
 
 const PERIODS = [
   { k: "1m", l: "近1月" },
@@ -15,13 +15,46 @@ export function BacktestPage({ defaultCode }: { defaultCode: string }) {
   const [strategy, setStrategy] = useState("breakout_pullback");
   const [stopLoss, setStopLoss] = useState(2.5);
   const [target, setTarget] = useState(6);
+  const [maxHold, setMaxHold] = useState(20);
+  const [useAtrStop, setUseAtrStop] = useState(false);
+  const [atrStopMult, setAtrStopMult] = useState(2.0);
   const [volumeFilter, setVolumeFilter] = useState(true);
   const [shrinkFilter, setShrinkFilter] = useState(true);
   const [closeAbove, setCloseAbove] = useState(true);
   const [weeklyConf, setWeeklyConf] = useState(true);
+  const [maTrend, setMaTrend] = useState(false);
+  const [maPeriod, setMaPeriod] = useState(20);
+  const [pullbackMin, setPullbackMin] = useState(0.1);
+  const [pullbackMax, setPullbackMax] = useState(3.0);
+  const [minScore, setMinScore] = useState(30);
+  const [stabilizeBars, setStabilizeBars] = useState(3);
+  const [stabilizeDist, setStabilizeDist] = useState(3.0);
+  const [commission, setCommission] = useState(0.1);
+  const [slippage, setSlippage] = useState(0.05);
+  const [cooldown, setCooldown] = useState(2);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [result, setResult] = useState<BacktestResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [stockName, setStockName] = useState("");
+  const [optimizing, setOptimizing] = useState(false);
+  const [optResult, setOptResult] = useState<OptimizeResult | null>(null);
+  const [optTarget, setOptTarget] = useState<"sharpe" | "return" | "calmar">("sharpe");
+  const [signal, setSignal] = useState<TradeSignal | null>(null);
+  const [sigLoading, setSigLoading] = useState(false);
+
+  // Resolve stock name from code (for initial load & direct code entry)
+  const resolveStockName = useCallback((c: string) => {
+    if (!c) return;
+    api.searchStocks(c, 1).then((r) => {
+      const match = r.find((s) => s.code === c);
+      if (match) setStockName(match.name);
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (defaultCode && !stockName) resolveStockName(defaultCode);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [defaultCode]);
 
   // Stock search
   const [query, setQuery] = useState("");
@@ -58,26 +91,100 @@ export function BacktestPage({ defaultCode }: { defaultCode: string }) {
     setShowDropdown(false);
   };
 
+  // Allow direct code entry via Enter key
+  const handleSearchKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (searchResults.length > 0) {
+        pickStock(searchResults[0].code, searchResults[0].name);
+      } else if (query.trim().match(/^\d{6}$/)) {
+        // Direct 6-digit code entry
+        const c = query.trim();
+        setCode(c);
+        setStockName("");
+        resolveStockName(c);
+        setQuery("");
+        setShowDropdown(false);
+      }
+    } else if (e.key === "Escape") {
+      setShowDropdown(false);
+      setQuery("");
+    }
+  };
+
   const runBacktest = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await api.backtest({
+      const params = {
         code,
         strategy,
         period,
         stop_loss: stopLoss,
         target,
+        max_hold_bars: maxHold,
+        use_atr_stop: useAtrStop,
+        atr_stop_mult: atrStopMult,
         volume_filter: volumeFilter,
         shrink_filter: shrinkFilter,
         close_above_support: closeAbove,
         weekly_confluence: weeklyConf,
-      });
+        ma_trend_filter: maTrend,
+        ma_trend_period: maPeriod,
+        pullback_min_pct: pullbackMin,
+        pullback_max_pct: pullbackMax,
+        min_level_score: minScore,
+        stabilize_bars: stabilizeBars,
+        stabilize_max_dist_pct: stabilizeDist,
+        commission_pct: commission,
+        slippage_pct: slippage,
+        cooldown_bars: cooldown,
+      };
+      const res = await api.backtest(params);
       setResult(res);
-      if (!stockName) setStockName(code);
+      if (!stockName) resolveStockName(code);
+      // Fetch live signal with same params + backtest stats
+      setSigLoading(true);
+      api.signal({ ...params, backtest_stats: res.stats })
+        .then(setSignal)
+        .catch(() => setSignal(null))
+        .finally(() => setSigLoading(false));
     } finally {
       setLoading(false);
     }
-  }, [code, strategy, period, stopLoss, target, volumeFilter, shrinkFilter, closeAbove, weeklyConf, stockName]);
+  }, [code, strategy, period, stopLoss, target, maxHold, useAtrStop, atrStopMult, volumeFilter, shrinkFilter, closeAbove, weeklyConf, maTrend, maPeriod, pullbackMin, pullbackMax, minScore, stabilizeBars, stabilizeDist, commission, slippage, cooldown, stockName]);
+
+  const runOptimize = useCallback(async () => {
+    setOptimizing(true);
+    setOptResult(null);
+    try {
+      const res = await api.optimize({
+        code, strategy, period, target: optTarget, n_trials: 60,
+      });
+      setOptResult(res);
+    } finally {
+      setOptimizing(false);
+    }
+  }, [code, strategy, period, optTarget]);
+
+  const applyOptParams = useCallback(() => {
+    if (!optResult) return;
+    const p = optResult.best_params;
+    if (p.stop_loss_pct != null) setStopLoss(p.stop_loss_pct as number);
+    if (p.target_pct != null) setTarget(p.target_pct as number);
+    if (p.max_hold_bars != null) setMaxHold(p.max_hold_bars as number);
+    if (p.use_atr_stop != null) setUseAtrStop(p.use_atr_stop as boolean);
+    if (p.atr_stop_mult != null) setAtrStopMult(p.atr_stop_mult as number);
+    if (p.volume_filter != null) setVolumeFilter(p.volume_filter as boolean);
+    if (p.shrink_filter != null) setShrinkFilter(p.shrink_filter as boolean);
+    if (p.ma_trend_filter != null) setMaTrend(p.ma_trend_filter as boolean);
+    if (p.ma_trend_period != null) setMaPeriod(p.ma_trend_period as number);
+    if (p.pullback_min_pct != null) setPullbackMin(p.pullback_min_pct as number);
+    if (p.pullback_max_pct != null) setPullbackMax(p.pullback_max_pct as number);
+    if (p.min_level_score != null) setMinScore(p.min_level_score as number);
+    if (p.stabilize_bars != null) setStabilizeBars(p.stabilize_bars as number);
+    if (p.stabilize_max_dist_pct != null) setStabilizeDist(p.stabilize_max_dist_pct as number);
+    if (p.cooldown_bars != null) setCooldown(p.cooldown_bars as number);
+  }, [optResult]);
 
   // Auto-run on first mount
   useEffect(() => {
@@ -97,15 +204,25 @@ export function BacktestPage({ defaultCode }: { defaultCode: string }) {
 
         <Block label="标的">
           <div ref={wrapRef} className="relative">
-            <div className="flex gap-1.5">
-              <input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                onFocus={() => query.trim() && setShowDropdown(true)}
-                placeholder={code ? `${code} ${stockName}` : "输入代码或名称搜索"}
-                className="flex-1 bg-ink-850 border border-ink-700 rounded-md px-3 py-2 text-[12px] focus:outline-none focus:border-gold/60 placeholder:text-ink-500"
-              />
-            </div>
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={handleSearchKeyDown}
+              onFocus={() => {
+                if (!query.trim() && code) {
+                  // Pre-fill with code so user can see what's selected, then type to search
+                  setQuery(code);
+                  // Select all text so typing replaces it
+                  setTimeout(() => {
+                    const el = wrapRef.current?.querySelector("input");
+                    el?.select();
+                  }, 0);
+                }
+                if (query.trim()) setShowDropdown(true);
+              }}
+              placeholder="输入代码 / 名称搜索"
+              className="w-full bg-ink-850 border border-ink-700 rounded-md px-3 py-2 text-[12px] focus:outline-none focus:border-gold/60 placeholder:text-ink-500"
+            />
             {code && !query && (
               <div className="mt-1.5 flex items-center gap-1.5">
                 <span className="text-[12px] text-gold num">{code}</span>
@@ -175,25 +292,10 @@ export function BacktestPage({ defaultCode }: { defaultCode: string }) {
         </Block>
 
         <Block label="止损 / 目标">
-          <div className="grid grid-cols-2 gap-2 text-[12px]">
-            <label className="bg-ink-850 ring-soft rounded-md px-2 py-1.5 flex flex-col">
-              <span className="text-[10px] text-ink-500">止损 %</span>
-              <input
-                value={stopLoss}
-                onChange={(e) => setStopLoss(Number(e.target.value) || 2.5)}
-                type="number" step="0.5"
-                className="bg-transparent num text-[13px] text-ink-100 focus:outline-none w-full"
-              />
-            </label>
-            <label className="bg-ink-850 ring-soft rounded-md px-2 py-1.5 flex flex-col">
-              <span className="text-[10px] text-ink-500">目标 %</span>
-              <input
-                value={target}
-                onChange={(e) => setTarget(Number(e.target.value) || 6)}
-                type="number" step="0.5"
-                className="bg-transparent num text-[13px] text-ink-100 focus:outline-none w-full"
-              />
-            </label>
+          <div className="grid grid-cols-3 gap-2 text-[12px]">
+            <NumInput label="止损 %" value={stopLoss} onChange={setStopLoss} step={0.5} />
+            <NumInput label="目标 %" value={target} onChange={setTarget} step={0.5} />
+            <NumInput label="最大持仓" value={maxHold} onChange={setMaxHold} step={1} suffix="天" />
           </div>
         </Block>
 
@@ -203,8 +305,64 @@ export function BacktestPage({ defaultCode }: { defaultCode: string }) {
             <Toggle label="缩量回踩 ≤ 突破量 50%" value={shrinkFilter} onChange={setShrinkFilter} />
             <Toggle label="收盘价站稳支撑位" value={closeAbove} onChange={setCloseAbove} />
             <Toggle label="多周期共振（日+周）" value={weeklyConf} onChange={setWeeklyConf} />
+            <Toggle label={"均线趋势过滤（MA" + maPeriod + "）"} value={maTrend} onChange={setMaTrend} />
+            <Toggle label="ATR 跟踪止损" value={useAtrStop} onChange={setUseAtrStop} />
           </div>
         </Block>
+
+        {/* Advanced toggle */}
+        <button
+          className="w-full text-[11px] text-ink-500 hover:text-ink-300 mb-3 flex items-center justify-center gap-1"
+          onClick={() => setShowAdvanced(!showAdvanced)}
+        >
+          <i className={"fas fa-chevron-" + (showAdvanced ? "up" : "down") + " text-[9px]"} />
+          {showAdvanced ? "收起高级参数" : "展开高级参数"}
+        </button>
+
+        {showAdvanced && (
+          <>
+            <Block label="策略阈值">
+              <div className="grid grid-cols-2 gap-2 text-[12px]">
+                <NumInput label="最低评分" value={minScore} onChange={setMinScore} step={5} />
+                <NumInput label="冷却期" value={cooldown} onChange={setCooldown} step={1} suffix="天" />
+                {strategy === "breakout_pullback" ? (
+                  <>
+                    <NumInput label="回踩下限 %" value={pullbackMin} onChange={setPullbackMin} step={0.1} />
+                    <NumInput label="回踩上限 %" value={pullbackMax} onChange={setPullbackMax} step={0.5} />
+                  </>
+                ) : (
+                  <>
+                    <NumInput label="企稳K线" value={stabilizeBars} onChange={setStabilizeBars} step={1} suffix="根" />
+                    <NumInput label="最大距离 %" value={stabilizeDist} onChange={setStabilizeDist} step={0.5} />
+                  </>
+                )}
+              </div>
+            </Block>
+
+            {maTrend && (
+              <Block label="均线参数">
+                <div className="grid grid-cols-2 gap-2 text-[12px]">
+                  <NumInput label="MA 周期" value={maPeriod} onChange={setMaPeriod} step={5} />
+                </div>
+              </Block>
+            )}
+
+            {useAtrStop && (
+              <Block label="ATR 止损">
+                <div className="grid grid-cols-2 gap-2 text-[12px]">
+                  <NumInput label="ATR 倍数" value={atrStopMult} onChange={setAtrStopMult} step={0.5} />
+                </div>
+              </Block>
+            )}
+
+            <Block label="交易成本">
+              <div className="grid grid-cols-2 gap-2 text-[12px]">
+                <NumInput label="手续费 %" value={commission} onChange={setCommission} step={0.01} />
+                <NumInput label="滑点 %" value={slippage} onChange={setSlippage} step={0.01} />
+              </div>
+            </Block>
+          </>
+        )}
 
         <button
           className="w-full grad-gold text-ink-950 font-semibold py-2 rounded-md text-[13px] disabled:opacity-50"
@@ -217,6 +375,88 @@ export function BacktestPage({ defaultCode }: { defaultCode: string }) {
             <><i className="fas fa-flask-vial mr-1" /> 运行回测</>
           )}
         </button>
+
+        {/* ── Optimizer section ── */}
+        <div className="mt-4 pt-4 border-t border-ink-800">
+          <div className="tag text-ink-500 mb-2">
+            <i className="fas fa-sliders-h mr-1" /> 智能调参 (Optuna)
+          </div>
+          <div className="flex items-center gap-1.5 mb-2">
+            {(["sharpe", "return", "calmar"] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setOptTarget(t)}
+                className={
+                  "px-2 py-1 rounded text-[11px] " +
+                  (optTarget === t ? "bg-ink-800 text-white ring-soft" : "text-ink-400 hover:text-white")
+                }
+              >
+                {t === "sharpe" ? "Sharpe" : t === "return" ? "收益率" : "Calmar"}
+              </button>
+            ))}
+          </div>
+          <button
+            className="w-full bg-ink-800 ring-soft text-ink-200 hover:text-white font-medium py-2 rounded-md text-[12px] disabled:opacity-50"
+            onClick={runOptimize}
+            disabled={optimizing || !code}
+          >
+            {optimizing ? (
+              <><i className="fas fa-circle-notch fa-spin mr-1" /> 搜索最优参数...</>
+            ) : (
+              <><i className="fas fa-wand-magic-sparkles mr-1" /> 自动搜索最优参数</>
+            )}
+          </button>
+          {optResult && (
+            <div className="mt-3 bg-ink-850 rounded-md p-3 ring-soft text-[11px]">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-ink-400">优化结果</span>
+                <span className="text-ink-500 num">{optResult.trials_count} 次试验</span>
+              </div>
+              <div className="grid grid-cols-2 gap-2 mb-2">
+                <div className="text-center">
+                  <div className="text-[9px] text-ink-500">默认参数</div>
+                  <div className="num text-ink-300">{optResult.default_value.toFixed(2)}</div>
+                </div>
+                <div className="text-center">
+                  <div className="text-[9px] text-ink-500">最优参数</div>
+                  <div className={"num font-semibold " + (optResult.best_value > optResult.default_value ? "text-cn-up" : "text-cn-dn")}>
+                    {optResult.best_value.toFixed(2)}
+                  </div>
+                </div>
+              </div>
+              <div className="grid grid-cols-3 gap-1 mb-2 text-[10px]">
+                <div className="text-center">
+                  <div className="text-ink-500">胜率</div>
+                  <div className="num text-ink-200">{(optResult.best_stats.win_rate * 100).toFixed(0)}%</div>
+                </div>
+                <div className="text-center">
+                  <div className="text-ink-500">收益</div>
+                  <div className={"num " + (optResult.best_stats.total_return >= 0 ? "text-cn-up" : "text-cn-dn")}>
+                    {optResult.best_stats.total_return.toFixed(1)}%
+                  </div>
+                </div>
+                <div className="text-center">
+                  <div className="text-ink-500">回撤</div>
+                  <div className="num text-cn-dn">{optResult.best_stats.max_drawdown.toFixed(1)}%</div>
+                </div>
+              </div>
+              <div className="flex gap-1.5">
+                <button
+                  className="flex-1 bg-gold/20 text-gold hover:bg-gold/30 py-1.5 rounded text-[11px] font-medium"
+                  onClick={() => { applyOptParams(); setOptResult(null); }}
+                >
+                  <i className="fas fa-check mr-1" />应用参数
+                </button>
+                <button
+                  className="flex-1 bg-ink-800 text-ink-300 hover:text-white py-1.5 rounded text-[11px]"
+                  onClick={() => { applyOptParams(); setOptResult(null); setTimeout(runBacktest, 100); }}
+                >
+                  应用并回测
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
       </aside>
 
       {/* ── Center: Results ── */}
@@ -242,7 +482,7 @@ export function BacktestPage({ defaultCode }: { defaultCode: string }) {
         </div>
 
         {stats && (
-          <div className="grid grid-cols-5 gap-3 p-5 border-b border-ink-800">
+          <div className="grid grid-cols-4 gap-3 p-5 border-b border-ink-800">
             <Metric
               label="累计收益率"
               value={(stats.total_return >= 0 ? "+" : "") + stats.total_return.toFixed(1) + "%"}
@@ -258,11 +498,6 @@ export function BacktestPage({ defaultCode }: { defaultCode: string }) {
               label="最大回撤"
               value={stats.max_drawdown.toFixed(1) + "%"}
               color="text-cn-dn"
-            />
-            <Metric
-              label="交易次数"
-              value={String(stats.total_trades)}
-              color="text-ink-100"
             />
           </div>
         )}
@@ -300,7 +535,8 @@ export function BacktestPage({ defaultCode }: { defaultCode: string }) {
           </div>
 
           {stats && (
-            <div className="grid grid-cols-3 gap-3 mt-4">
+            <div className="grid grid-cols-4 gap-3 mt-4">
+              <Stat2 label="交易次数" value={String(stats.total_trades)} />
               <Stat2
                 label="平均盈利"
                 value={`+${stats.avg_win.toFixed(2)}%`}
@@ -312,17 +548,34 @@ export function BacktestPage({ defaultCode }: { defaultCode: string }) {
                 color="text-cn-dn"
               />
               <Stat2
-                label="胜 / 负"
-                value={`${stats.win_count} / ${stats.loss_count}`}
-                color="text-ink-100"
+                label="夏普比率"
+                value={String(stats.sharpe)}
+                color={stats.sharpe >= 1 ? "text-cn-up" : stats.sharpe >= 0 ? "text-ink-100" : "text-cn-dn"}
               />
             </div>
           )}
         </div>
       </section>
 
-      {/* ── Right sidebar: Trade list ── */}
+      {/* ── Right sidebar: Signal + Trade list ── */}
       <aside className="border-l border-ink-700 bg-ink-900 overflow-y-auto scrollbar flex flex-col">
+        {/* ── Signal Panel ── */}
+        {(signal || sigLoading) && (
+          <div className="p-4 border-b border-ink-800">
+            <div className="tag text-ink-500 mb-2">
+              <i className="fas fa-crosshairs mr-1" /> 实时交易信号
+            </div>
+            {sigLoading ? (
+              <div className="text-[12px] text-ink-500 py-4 text-center">
+                <i className="fas fa-circle-notch fa-spin mr-1" /> 分析中...
+              </div>
+            ) : signal && !signal.error ? (
+              <SignalCard signal={signal} />
+            ) : (
+              <div className="text-[12px] text-ink-500 py-2">无法获取信号</div>
+            )}
+          </div>
+        )}
         <div className="p-4 border-b border-ink-800">
           <div className="tag text-ink-500 mb-1">交易明细</div>
           <div className="text-[11px] text-ink-500">
@@ -363,10 +616,11 @@ export function BacktestPage({ defaultCode }: { defaultCode: string }) {
 
 /* ── TradeRow ── */
 function TradeRow({ trade: t, index }: { trade: BacktestTrade; index: number }) {
-  const win = t.pnl_pct > 0;
+  const win = t.pnl_net > 0;
   const exitLabel: Record<string, string> = {
     target: "止盈",
     stop: "止损",
+    trail_stop: "跟踪止损",
     timeout: "超时",
     open: "持仓中",
   };
@@ -374,11 +628,18 @@ function TradeRow({ trade: t, index }: { trade: BacktestTrade; index: number }) 
     <div className="px-4 py-2.5 border-b border-ink-850/60 row-hover">
       <div className="flex justify-between items-baseline mb-1">
         <span className="text-[11px] text-ink-500">#{index}</span>
-        <span className={
-          "num text-[13px] font-medium " + (win ? "text-cn-up" : "text-cn-dn")
-        }>
-          {win ? "+" : ""}{t.pnl_pct.toFixed(2)}%
-        </span>
+        <div className="text-right">
+          <span className={
+            "num text-[13px] font-medium " + (win ? "text-cn-up" : "text-cn-dn")
+          }>
+            {win ? "+" : ""}{t.pnl_net.toFixed(2)}%
+          </span>
+          {t.pnl_pct !== t.pnl_net && (
+            <span className="text-[9px] text-ink-500 ml-1">
+              (毛{t.pnl_pct > 0 ? "+" : ""}{t.pnl_pct.toFixed(1)}%)
+            </span>
+          )}
+        </div>
       </div>
       <div className="grid grid-cols-2 gap-x-3 text-[11px]">
         <div>
@@ -399,7 +660,7 @@ function TradeRow({ trade: t, index }: { trade: BacktestTrade; index: number }) 
           <span className={
             "px-1.5 py-0.5 rounded text-[9px] " +
             (t.reason_exit === "target" ? "bg-cn-up/20 text-cn-up" :
-             t.reason_exit === "stop" ? "bg-cn-dn/20 text-cn-dn" :
+             t.reason_exit === "stop" || t.reason_exit === "trail_stop" ? "bg-cn-dn/20 text-cn-dn" :
              "bg-ink-750 text-ink-400")
           }>
             {exitLabel[t.reason_exit] || t.reason_exit}
@@ -522,6 +783,113 @@ function EquityChart({
   );
 }
 
+/* ── Signal Card ── */
+function SignalCard({ signal: s }: { signal: TradeSignal }) {
+  const actionMap: Record<string, { label: string; bg: string; text: string; icon: string }> = {
+    buy: { label: "建议买入", bg: "bg-cn-up/15", text: "text-cn-up", icon: "fa-arrow-trend-up" },
+    near_signal: { label: "接近信号", bg: "bg-gold/15", text: "text-gold", icon: "fa-bell" },
+    wait: { label: "等待观望", bg: "bg-ink-800", text: "text-ink-400", icon: "fa-hourglass-half" },
+  };
+  const a = actionMap[s.action] || actionMap.wait;
+  const trendMap: Record<string, { l: string; c: string }> = {
+    up: { l: "↑ 上升", c: "text-cn-up" },
+    down: { l: "↓ 下降", c: "text-cn-dn" },
+    neutral: { l: "→ 震荡", c: "text-ink-400" },
+  };
+  const t = trendMap[s.trend] || trendMap.neutral;
+
+  return (
+    <div className="space-y-2.5">
+      {/* Action badge + confidence */}
+      <div className="flex items-center justify-between">
+        <div className={`${a.bg} ${a.text} px-3 py-1.5 rounded-md text-[13px] font-semibold flex items-center gap-1.5`}>
+          <i className={`fas ${a.icon} text-[11px]`} />
+          {a.label}
+        </div>
+        <div className="text-right">
+          <div className="text-[10px] text-ink-500">置信度</div>
+          <div className="flex items-center gap-1">
+            <div className="w-12 h-1.5 bg-ink-800 rounded-full overflow-hidden">
+              <div
+                className={"h-full rounded-full " + (s.confidence >= 60 ? "bg-cn-up" : s.confidence >= 30 ? "bg-gold" : "bg-ink-600")}
+                style={{ width: `${s.confidence}%` }}
+              />
+            </div>
+            <span className="num text-[12px] text-ink-200">{s.confidence}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Reason */}
+      <div className="text-[12px] text-ink-300 bg-ink-850 rounded-md px-3 py-2">
+        {s.reason}
+      </div>
+
+      {/* Price grid */}
+      {s.action !== "wait" && (
+        <div className="grid grid-cols-3 gap-1.5">
+          <PriceBox label="入场价" value={s.entry_price} color="text-white" />
+          <PriceBox label="止损价" value={s.stop_loss} color="text-cn-dn" sub={`-${s.risk_pct}%`} />
+          <PriceBox label="目标价" value={s.target_price} color="text-cn-up" sub={`+${s.reward_pct}%`} />
+        </div>
+      )}
+
+      {/* Risk/Reward + Position */}
+      {s.action !== "wait" && (
+        <div className="grid grid-cols-3 gap-1.5">
+          <div className="bg-ink-850 rounded-md px-2 py-1.5 text-center">
+            <div className="text-[9px] text-ink-500">盈亏比</div>
+            <div className={"num text-[13px] font-semibold " + (s.risk_reward >= 2 ? "text-cn-up" : s.risk_reward >= 1 ? "text-gold" : "text-cn-dn")}>
+              1:{s.risk_reward.toFixed(1)}
+            </div>
+          </div>
+          <div className="bg-ink-850 rounded-md px-2 py-1.5 text-center">
+            <div className="text-[9px] text-ink-500">建议仓位</div>
+            <div className="num text-[13px] text-ink-100">{s.suggested_position_pct}%</div>
+          </div>
+          <div className="bg-ink-850 rounded-md px-2 py-1.5 text-center">
+            <div className="text-[9px] text-ink-500">趋势</div>
+            <div className={`text-[12px] ${t.c}`}>{t.l}</div>
+          </div>
+        </div>
+      )}
+
+      {/* Context row */}
+      <div className="flex items-center justify-between text-[10px] text-ink-500">
+        <span>支撑 <span className="num text-ink-300">{s.nearest_support}</span></span>
+        <span>现价 <span className="num text-white">{s.current_price}</span></span>
+        <span>压力 <span className="num text-ink-300">{s.nearest_resistance}</span></span>
+      </div>
+
+      {/* ATR */}
+      <div className="text-[10px] text-ink-500 flex items-center gap-2">
+        <span>ATR <span className="num text-ink-400">{s.atr}</span></span>
+        <span>·</span>
+        <span>策略 <span className="text-ink-400">{s.strategy === "breakout_pullback" ? "突破回踩" : "下跌企稳"}</span></span>
+      </div>
+
+      {/* Factors */}
+      {s.factors.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {s.factors.map((f, i) => (
+            <span key={i} className="chip text-[10px]">{f}</span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PriceBox({ label, value, color, sub }: { label: string; value: number; color: string; sub?: string }) {
+  return (
+    <div className="bg-ink-850 rounded-md px-2 py-1.5 text-center">
+      <div className="text-[9px] text-ink-500">{label}</div>
+      <div className={`num text-[14px] font-semibold ${color}`}>{value.toFixed(2)}</div>
+      {sub && <div className="text-[9px] text-ink-500 num">{sub}</div>}
+    </div>
+  );
+}
+
 /* ── Helpers ── */
 function Block({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -529,6 +897,25 @@ function Block({ label, children }: { label: string; children: React.ReactNode }
       <div className="text-[11px] text-ink-400 mb-2">{label}</div>
       {children}
     </div>
+  );
+}
+
+function NumInput({ label, value, onChange, step = 1, suffix }: {
+  label: string; value: number; onChange: (v: number) => void; step?: number; suffix?: string;
+}) {
+  return (
+    <label className="bg-ink-850 ring-soft rounded-md px-2 py-1.5 flex flex-col">
+      <span className="text-[10px] text-ink-500">{label}</span>
+      <div className="flex items-baseline gap-0.5">
+        <input
+          value={value}
+          onChange={(e) => onChange(Number(e.target.value))}
+          type="number" step={step}
+          className="bg-transparent num text-[13px] text-ink-100 focus:outline-none w-full"
+        />
+        {suffix && <span className="text-[10px] text-ink-500">{suffix}</span>}
+      </div>
+    </label>
   );
 }
 

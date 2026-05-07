@@ -2,6 +2,7 @@ import type {
   DbStats,
   MarketOverview,
   ScreenerResponse,
+  SourceConfig,
   StockDetail,
   SyncTask,
   WatchlistItem,
@@ -82,15 +83,132 @@ export const api = {
     ),
   syncTasks: () => http<SyncTask[]>("/sync/tasks"),
   dbStats: () => http<DbStats>("/sync/db-stats"),
+  // Data sources
+  getSources: () => http<SourceConfig>("/sync/sources"),
+  putSources: (sources: Record<string, string>) =>
+    http<{ ok: boolean; error?: string }>("/sync/sources", {
+      method: "PUT",
+      body: JSON.stringify({ sources }),
+    }),
+  // Schedule config
+  getSchedule: () => http<Record<string, { enabled: boolean; cron: string; label: string; desc: string; next_run?: string }>>("/sync/schedule"),
+  putSchedule: (schedules: Record<string, { enabled: boolean; cron: string }>) =>
+    http<{ ok: boolean; error?: string }>("/sync/schedule", {
+      method: "PUT",
+      body: JSON.stringify({ schedules }),
+    }),
   // Backtest
-  backtest: (params: {
-    code: string; strategy: string; period: string;
-    stop_loss: number; target: number;
-    volume_filter: boolean; shrink_filter: boolean;
-    close_above_support: boolean; weekly_confluence: boolean;
-  }) =>
+  backtest: (params: Record<string, string | number | boolean>) =>
     http<import("../types").BacktestResponse>("/backtest", {
       method: "POST",
       body: JSON.stringify(params),
     }),
+  // Algo modules
+  algoStatus: () =>
+    http<{ modules: import("../types").AlgoModule[] }>("/algo/status"),
+  optimize: (params: Record<string, string | number>) =>
+    http<import("../types").OptimizeResult>("/algo/optimize", {
+      method: "POST",
+      body: JSON.stringify(params),
+    }),
+  mlTrain: (params: Record<string, unknown>) =>
+    http<import("../types").MlTrainResult>("/algo/ml/train", {
+      method: "POST",
+      body: JSON.stringify(params),
+    }),
+  mlScore: (code: string) =>
+    http<{ code: string; ml_score: number; error?: string }>(`/algo/ml/score/${code}`),
+  rlTrain: (params: Record<string, unknown>) =>
+    http<Record<string, unknown>>("/algo/rl/train", {
+      method: "POST",
+      body: JSON.stringify(params),
+    }),
+  rlPosition: (code: string) =>
+    http<{ code: string; allocation: number; action: number; error?: string }>(`/algo/rl/position/${code}`),
+  regimeFit: (params: Record<string, unknown>) =>
+    http<import("../types").RegimeFitResult>("/algo/regime/fit", {
+      method: "POST",
+      body: JSON.stringify(params),
+    }),
+  regimePredict: (code: string) =>
+    http<Record<string, unknown>>(`/algo/regime/${code}`),
+  patternDtw: (code: string) =>
+    http<import("../types").PatternResult>(`/algo/pattern/dtw/${code}`),
+  patternCnnTrain: (params: Record<string, unknown>) =>
+    http<Record<string, unknown>>("/algo/pattern/cnn/train", {
+      method: "POST",
+      body: JSON.stringify(params),
+    }),
+  patternCnn: (code: string) =>
+    http<import("../types").PatternResult>(`/algo/pattern/cnn/${code}`),
+  // Signal
+  signal: (params: Record<string, unknown>) =>
+    http<import("../types").TradeSignal>("/backtest/signal", {
+      method: "POST",
+      body: JSON.stringify(params),
+    }),
+  // AI Strategy
+  aiStatus: () =>
+    http<import("../types").AiModelStatus>("/strategy/status"),
+  aiIndustryStocks: (code: string, limit = 20) =>
+    http<{ code: string; industry: string; stocks: { code: string; name: string }[] }>(
+      `/strategy/industry_stocks/${code}?limit=${limit}`,
+    ),
+  aiLabels: (code: string, params?: Record<string, unknown>) =>
+    http<{ code: string; method: string; points: import("../types").LabeledPoint[]; candles: import("../types").Candle[] }>(
+      `/strategy/labels/${code}`,
+      { method: "POST", body: JSON.stringify(params || {}) },
+    ),
+  aiTrain: (params: Record<string, unknown>) =>
+    http<import("../types").AiTrainResult>("/strategy/train", {
+      method: "POST",
+      body: JSON.stringify(params),
+    }),
+  aiPredict: (code: string, modelType = "lightgbm") =>
+    http<import("../types").AiPrediction>(`/strategy/predict/${code}?model_type=${modelType}`),
+  aiSignal: (code: string, params?: Record<string, unknown>) =>
+    http<import("../types").AiSignal>(`/strategy/signal/${code}`, {
+      method: "POST",
+      body: JSON.stringify(params || {}),
+    }),
+  aiBacktest: (params: Record<string, unknown>) =>
+    http<import("../types").AiBacktestResult>("/strategy/backtest", {
+      method: "POST",
+      body: JSON.stringify(params),
+    }),
+  aiTrainMarket: (params: Record<string, unknown>) =>
+    http<{ task_id: string; status: string; message: string }>("/strategy/train_market", {
+      method: "POST",
+      body: JSON.stringify(params),
+    }),
+  aiTrainProgress: () =>
+    http<Array<{
+      task_id: string; model_type: string; max_stocks: number; epochs: number;
+      status: string; progress: number; message: string;
+      started_at: number; ended_at: number | null;
+      result: Record<string, unknown> | null;
+      codes_used: number; total_codes: number;
+    }>>("/strategy/train_progress"),
+  // AI Scanner
+  aiScan: (params: Record<string, unknown>) =>
+    http<{ task_id: string; status: string; message: string }>("/strategy/scan", {
+      method: "POST",
+      body: JSON.stringify(params),
+    }),
+  aiScanProgress: () =>
+    http<Array<{
+      task_id: string; scope: string; status: string; progress: number;
+      message: string; total: number; scanned: number;
+      started_at: number; ended_at: number | null;
+      results: Array<{
+        code: string; name: string; model: string; action: string;
+        confidence: number; current_price: number; entry_price: number;
+        stop_loss: number; target_price: number; risk_reward: number;
+        trend: string; reason: string;
+      }>;
+    }>>("/strategy/scan_progress"),
+  aiScanCancel: (taskId: string) =>
+    http<{ status: string }>(`/strategy/scan_progress/${taskId}`, { method: "DELETE" }),
+  aiScanClear: () =>
+    http<{ removed: number }>("/strategy/scan_progress", { method: "DELETE" }),
 };

@@ -1,6 +1,25 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../services/api";
-import type { DbStats, SyncTask } from "../types";
+import type { DbStats, SourceConfig, SyncTask } from "../types";
+
+type ScheduleItem = { enabled: boolean; cron: string; label: string; desc: string; next_run?: string };
+type ScheduleConfig = Record<string, ScheduleItem>;
+
+// Map SYNC_ACTIONS key → source_registry task_type
+const SOURCE_TASK_MAP: Record<string, string> = {
+  stocks: "stocks",
+  quotes: "quotes",
+  financials: "financials",
+  concepts: "concepts",
+  industry: "industry",
+  analyst: "analyst_consensus",
+};
+
+const STATUS_LABEL: Record<string, { label: string; color: string }> = {
+  ok: { label: "可用", color: "text-emerald-400" },
+  blocked: { label: "已封锁", color: "text-red-400" },
+  deprecated: { label: "已弃用", color: "text-amber-400" },
+};
 
 const SYNC_ACTIONS: {
   key: string;
@@ -45,22 +64,62 @@ function fmtCount(n: number) {
   return n.toLocaleString("zh-CN");
 }
 
+function cronHint(cron: string): string {
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length !== 5) return "";
+  const [min, hour, , , dow] = parts;
+  const dowMap: Record<string, string> = { "1-5": "工作日", "*": "每天", "1": "周一", "0,6": "周末" };
+  const dowStr = dowMap[dow] || `周${dow}`;
+  return `${dowStr} ${hour}:${min.padStart(2, "0")}`;
+}
+
 export function SyncPage() {
   const [tasks, setTasks] = useState<SyncTask[]>([]);
   const [stats, setStats] = useState<DbStats | null>(null);
   const [running, setRunning] = useState<Set<string>>(new Set());
   const [candleDays, setCandleDays] = useState(365);
+  const [schedule, setSchedule] = useState<ScheduleConfig>({});
+  const [schedDirty, setSchedDirty] = useState(false);
+  const [schedSaving, setSchedSaving] = useState(false);
+  const [sources, setSources] = useState<SourceConfig>({});
+  const [openSourceMenu, setOpenSourceMenu] = useState<string | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   const refresh = useCallback(() => {
     api.syncTasks().then(setTasks).catch(() => {});
     api.dbStats().then(setStats).catch(() => {});
   }, []);
 
+  const loadSources = useCallback(() => {
+    api.getSources().then(setSources).catch(() => {});
+  }, []);
+
   useEffect(() => {
     refresh();
+    loadSources();
+    api.getSchedule().then(setSchedule).catch(() => {});
     const t = setInterval(refresh, 3000);
     return () => clearInterval(t);
-  }, [refresh]);
+  }, [refresh, loadSources]);
+
+  // Close source menu on outside click
+  useEffect(() => {
+    if (!openSourceMenu) return;
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setOpenSourceMenu(null);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [openSourceMenu]);
+
+  const switchSource = async (taskType: string, sourceId: string) => {
+    setOpenSourceMenu(null);
+    try {
+      const res = await api.putSources({ [taskType]: sourceId });
+      if (res.ok) loadSources();
+      else alert(res.error || "切换失败");
+    } catch { alert("切换失败"); }
+  };
 
   const handleSync = async (key: string, fn: () => Promise<unknown>) => {
     setRunning((s) => new Set(s).add(key));
@@ -133,6 +192,10 @@ export function SyncPage() {
             const latest = latestByType.get(a.key);
             const isRunning = running.has(a.key) || latest?.status === "running";
             const progress = latest && latest.total > 0 ? latest.processed / latest.total : 0;
+            const taskType = SOURCE_TASK_MAP[a.key];
+            const srcCfg = taskType ? sources[taskType] : undefined;
+            const activeSrc = srcCfg?.sources.find((s) => s.selected);
+            const hasMultiple = srcCfg && srcCfg.sources.filter((s) => s.status !== "blocked").length > 1;
             return (
               <div key={a.key} className="bg-ink-900 border border-ink-800 rounded-lg px-5 py-4">
                 <div className="flex items-center justify-between">
@@ -141,7 +204,67 @@ export function SyncPage() {
                       <i className={`fas ${a.icon}`} />
                     </div>
                     <div>
-                      <div className="text-white text-[13px] font-medium">{a.label}</div>
+                      <div className="text-white text-[13px] font-medium flex items-center gap-2">
+                        {a.label}
+                        {/* Source badge */}
+                        {activeSrc && (
+                          <div className="relative" ref={openSourceMenu === a.key ? menuRef : undefined}>
+                            <button
+                              className={
+                                "inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] transition " +
+                                (hasMultiple
+                                  ? "bg-ink-800 text-ink-300 hover:text-white hover:bg-ink-700 cursor-pointer"
+                                  : "bg-ink-800/50 text-ink-500 cursor-default")
+                              }
+                              onClick={() => hasMultiple && setOpenSourceMenu(openSourceMenu === a.key ? null : a.key)}
+                              title={activeSrc.desc}
+                            >
+                              <i className="fas fa-database text-[8px]" />
+                              {activeSrc.name}
+                              {hasMultiple && <i className="fas fa-chevron-down text-[7px] ml-0.5" />}
+                            </button>
+                            {/* Dropdown */}
+                            {openSourceMenu === a.key && srcCfg && (
+                              <div className="absolute left-0 top-full mt-1 z-50 w-64 bg-ink-850 border border-ink-700 rounded-lg shadow-xl py-1 animate-in fade-in slide-in-from-top-1 duration-150">
+                                <div className="px-3 py-1.5 text-[10px] text-ink-500 font-medium border-b border-ink-700">
+                                  选择数据源
+                                </div>
+                                {srcCfg.sources.map((src) => {
+                                  const st = STATUS_LABEL[src.status] || STATUS_LABEL.ok;
+                                  const disabled = src.status === "blocked";
+                                  return (
+                                    <button
+                                      key={src.id}
+                                      className={
+                                        "w-full text-left px-3 py-2 flex items-start gap-2 transition " +
+                                        (disabled
+                                          ? "opacity-40 cursor-not-allowed"
+                                          : src.selected
+                                            ? "bg-blue-500/10"
+                                            : "hover:bg-ink-800")
+                                      }
+                                      disabled={disabled}
+                                      onClick={() => !disabled && taskType && switchSource(taskType, src.id)}
+                                    >
+                                      <div className="flex-1 min-w-0">
+                                        <div className="flex items-center gap-1.5">
+                                          {src.selected && <i className="fas fa-check text-blue-400 text-[9px]" />}
+                                          <span className={`text-[11px] font-medium ${src.selected ? "text-blue-400" : "text-ink-200"}`}>
+                                            {src.name}
+                                          </span>
+                                          <span className={`text-[9px] ${st.color}`}>{st.label}</span>
+                                        </div>
+                                        <div className="text-[10px] text-ink-500 mt-0.5">{src.desc}</div>
+                                        <div className="text-[9px] text-ink-600 mt-0.5 font-mono truncate">{src.url}</div>
+                                      </div>
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
                       <div className="text-ink-500 text-[11px] mt-0.5">{a.desc}</div>
                     </div>
                   </div>
@@ -194,6 +317,9 @@ export function SyncPage() {
             { label: "近3年", value: 1095 },
             { label: "近5年", value: 1825 },
           ];
+          const candleSrcCfg = sources["daily_candles"];
+          const candleActiveSrc = candleSrcCfg?.sources.find((s) => s.selected);
+          const candleHasMultiple = candleSrcCfg && candleSrcCfg.sources.filter((s) => s.status !== "blocked").length > 1;
           return (
             <div className="bg-ink-900 border border-ink-800 rounded-lg px-5 py-4 mt-3">
               <div className="flex items-center justify-between">
@@ -202,8 +328,63 @@ export function SyncPage() {
                     <i className="fas fa-chart-bar" />
                   </div>
                   <div>
-                    <div className="text-white text-[13px] font-medium">
+                    <div className="text-white text-[13px] font-medium flex items-center gap-2">
                       历史日线 <span className="text-ink-500 text-[11px] font-normal">(耗时较长)</span>
+                      {candleActiveSrc && (
+                        <div className="relative" ref={openSourceMenu === "daily_candles" ? menuRef : undefined}>
+                          <button
+                            className={
+                              "inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] transition " +
+                              (candleHasMultiple
+                                ? "bg-ink-800 text-ink-300 hover:text-white hover:bg-ink-700 cursor-pointer"
+                                : "bg-ink-800/50 text-ink-500 cursor-default")
+                            }
+                            onClick={() => candleHasMultiple && setOpenSourceMenu(openSourceMenu === "daily_candles" ? null : "daily_candles")}
+                            title={candleActiveSrc.desc}
+                          >
+                            <i className="fas fa-database text-[8px]" />
+                            {candleActiveSrc.name}
+                            {candleHasMultiple && <i className="fas fa-chevron-down text-[7px] ml-0.5" />}
+                          </button>
+                          {openSourceMenu === "daily_candles" && candleSrcCfg && (
+                            <div className="absolute left-0 top-full mt-1 z-50 w-64 bg-ink-850 border border-ink-700 rounded-lg shadow-xl py-1 animate-in fade-in slide-in-from-top-1 duration-150">
+                              <div className="px-3 py-1.5 text-[10px] text-ink-500 font-medium border-b border-ink-700">
+                                选择数据源
+                              </div>
+                              {candleSrcCfg.sources.map((src) => {
+                                const st = STATUS_LABEL[src.status] || STATUS_LABEL.ok;
+                                const disabled = src.status === "blocked";
+                                return (
+                                  <button
+                                    key={src.id}
+                                    className={
+                                      "w-full text-left px-3 py-2 flex items-start gap-2 transition " +
+                                      (disabled
+                                        ? "opacity-40 cursor-not-allowed"
+                                        : src.selected
+                                          ? "bg-blue-500/10"
+                                          : "hover:bg-ink-800")
+                                    }
+                                    disabled={disabled}
+                                    onClick={() => !disabled && switchSource("daily_candles", src.id)}
+                                  >
+                                    <div className="flex-1 min-w-0">
+                                      <div className="flex items-center gap-1.5">
+                                        {src.selected && <i className="fas fa-check text-blue-400 text-[9px]" />}
+                                        <span className={`text-[11px] font-medium ${src.selected ? "text-blue-400" : "text-ink-200"}`}>
+                                          {src.name}
+                                        </span>
+                                        <span className={`text-[9px] ${st.color}`}>{st.label}</span>
+                                      </div>
+                                      <div className="text-[10px] text-ink-500 mt-0.5">{src.desc}</div>
+                                    </div>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                     <div className="text-ink-500 text-[11px] mt-0.5">
                       批量拉取全市场股票历史K线，用于形态筛选和回测分析
@@ -264,6 +445,85 @@ export function SyncPage() {
             </div>
           );
         })()}
+      </div>
+
+      {/* ── Schedule config ── */}
+      <div className="px-6 py-4 border-t border-ink-800">
+        <div className="flex items-center justify-between mb-3">
+          <div className="text-ink-400 text-[12px] font-medium">
+            <i className="fas fa-clock mr-1.5" />
+            定时同步
+            <span className="text-ink-600 font-normal ml-2">配置自动同步任务（cron 格式）</span>
+          </div>
+          {schedDirty && (
+            <button
+              className="px-3 py-1 rounded-md text-[12px] font-medium bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition"
+              disabled={schedSaving}
+              onClick={async () => {
+                setSchedSaving(true);
+                const payload: Record<string, { enabled: boolean; cron: string }> = {};
+                for (const [k, v] of Object.entries(schedule)) {
+                  payload[k] = { enabled: v.enabled, cron: v.cron };
+                }
+                try {
+                  const res = await api.putSchedule(payload);
+                  if (res.ok) {
+                    setSchedDirty(false);
+                    api.getSchedule().then(setSchedule).catch(() => {});
+                  } else {
+                    alert(res.error || "保存失败");
+                  }
+                } catch { alert("保存失败"); }
+                setSchedSaving(false);
+              }}
+            >
+              {schedSaving ? <><i className="fas fa-circle-notch fa-spin mr-1" />保存中</> : <><i className="fas fa-save mr-1" />保存配置</>}
+            </button>
+          )}
+        </div>
+        <div className="space-y-2">
+          {Object.entries(schedule).map(([key, cfg]) => (
+            <div key={key} className="flex items-center gap-3 bg-ink-900 border border-ink-800 rounded-lg px-4 py-3">
+              {/* Toggle */}
+              <button
+                type="button"
+                className={`w-10 h-[22px] rounded-full transition-colors duration-200 relative flex-shrink-0 p-0 border-0 outline-none cursor-pointer ${cfg.enabled ? "bg-blue-500" : "bg-ink-700"}`}
+                onClick={() => {
+                  setSchedule((s) => ({ ...s, [key]: { ...s[key], enabled: !s[key].enabled } }));
+                  setSchedDirty(true);
+                }}
+              >
+                <span className={`absolute left-0 top-[3px] w-4 h-4 rounded-full bg-white shadow-sm transition-transform duration-200 ${cfg.enabled ? "translate-x-[22px]" : "translate-x-[3px]"}`} />
+              </button>
+              {/* Label */}
+              <div className="w-28 flex-shrink-0">
+                <div className="text-white text-[12px] font-medium">{cfg.label || key}</div>
+                <div className="text-ink-600 text-[10px]">{cfg.desc}</div>
+              </div>
+              {/* Cron input */}
+              <input
+                className="bg-ink-800 border border-ink-700 rounded px-2 py-1 text-[12px] text-ink-200 w-36 font-mono focus:outline-none focus:border-blue-500/50"
+                value={cfg.cron}
+                placeholder="分 时 日 月 周"
+                onChange={(e) => {
+                  setSchedule((s) => ({ ...s, [key]: { ...s[key], cron: e.target.value } }));
+                  setSchedDirty(true);
+                }}
+              />
+              {/* Cron human-readable hint */}
+              <span className="text-ink-600 text-[10px] flex-shrink-0">
+                {cronHint(cfg.cron)}
+              </span>
+              {/* Next run */}
+              {cfg.enabled && cfg.next_run && (
+                <span className="text-ink-500 text-[10px] ml-auto flex-shrink-0">
+                  <i className="fas fa-clock text-[8px] mr-1" />
+                  下次: {cfg.next_run}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
       </div>
 
       {/* Task history */}
