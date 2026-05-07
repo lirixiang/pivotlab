@@ -13,47 +13,47 @@ from ..services.sync_worker import spawn_sync
 router = APIRouter(prefix="/api/sync", tags=["sync"])
 
 
+def _trigger(task_type: str, **kwargs):
+    started = spawn_sync(task_type, **kwargs)
+    if started:
+        return {"task_type": task_type, "status": "started"}
+    return {"task_type": task_type, "status": "already_running", "message": "该任务已在运行中"}
+
+
 @router.post("/stocks")
 async def trigger_sync_stocks():
-    spawn_sync("stocks")
-    return {"task_type": "stocks", "status": "started"}
+    return _trigger("stocks")
 
 
 @router.post("/quotes")
 async def trigger_sync_quotes():
-    spawn_sync("quotes")
-    return {"task_type": "quotes", "status": "started"}
+    return _trigger("quotes")
 
 
 @router.post("/financials")
 async def trigger_sync_financials():
-    spawn_sync("financials")
-    return {"task_type": "financials", "status": "started"}
+    return _trigger("financials")
 
 
 @router.post("/concepts")
 async def trigger_sync_concepts():
-    spawn_sync("concepts")
-    return {"task_type": "concepts", "status": "started"}
+    return _trigger("concepts")
 
 
 @router.post("/industry")
 async def trigger_sync_industry():
-    spawn_sync("industry")
-    return {"task_type": "industry", "status": "started"}
+    return _trigger("industry")
 
 
 @router.post("/candles")
 async def trigger_sync_candles(days: int = Query(365, ge=30, le=3650)):
     """Start historical daily candles batch sync in a separate process."""
-    spawn_sync("daily_candles", days=days)
-    return {"task_type": "daily_candles", "status": "started", "days": days}
+    return _trigger("daily_candles", days=days)
 
 
 @router.post("/analyst")
 async def trigger_sync_analyst():
-    spawn_sync("analyst_consensus")
-    return {"task_type": "analyst_consensus", "status": "started"}
+    return _trigger("analyst_consensus")
 
 
 @router.get("/tasks")

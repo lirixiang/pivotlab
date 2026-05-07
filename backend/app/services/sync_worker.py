@@ -24,30 +24,38 @@ logger = logging.getLogger(__name__)
 _WORKER_SCRIPT = os.path.join(os.path.dirname(__file__), "_sync_run.py")
 
 
-def spawn_sync(task_type: str, **kwargs) -> None:
+def spawn_sync(task_type: str, **kwargs) -> bool:
     """Spawn a sync task in a separate OS process (fire-and-forget).
 
-    The child process will:
-      1. Import sync_service (with its own DB connections)
-      2. Run the appropriate sync function
-      3. Write progress/results to the sync_tasks table
-      4. Exit cleanly
+    Returns False if same task_type is already running.
+    Creates the task record in the main process first to prevent races,
+    then passes SYNC_TASK_ID to the child process.
     """
+    from .sync_service import _create_task
+    task_id = _create_task(task_type)
+    if task_id == -1:
+        logger.info("Skipping %s: already running", task_type)
+        return False
+
     env = os.environ.copy()
     env["SYNC_TASK_TYPE"] = task_type
+    env["SYNC_TASK_ID"] = str(task_id)
     if kwargs:
         env["SYNC_TASK_KWARGS"] = json.dumps(kwargs)
 
     # Run from the backend directory so relative imports work
     backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+    log_file = os.path.join(backend_dir, f".sync_{task_type}.log")
+    log_fh = open(log_file, "w")
     p = subprocess.Popen(
         [sys.executable, _WORKER_SCRIPT],
         env=env,
         cwd=backend_dir,
-        stdout=subprocess.DEVNULL,
+        stdout=log_fh,
         stderr=subprocess.STDOUT,
         start_new_session=True,  # fully detached from parent
     )
-    logger.info("Spawned sync process %s (pid=%s)", task_type, p.pid)
+    logger.info("Spawned sync process %s (pid=%s, task_id=%s)", task_type, p.pid, task_id)
+    return True
 

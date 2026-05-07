@@ -35,8 +35,10 @@ def _read_cache(pattern: str, limit: int, min_score: float) -> ScreenerResponse:
 @router.post("/scan")
 async def trigger_scan():
     """Trigger screener scan in a separate process."""
-    spawn_sync("screener")
-    return {"status": "started", "message": "筛选扫描已启动，请稍后刷新查看结果"}
+    started = spawn_sync("screener")
+    if started:
+        return {"status": "started", "message": "筛选扫描已启动，请稍后刷新查看结果"}
+    return {"status": "already_running", "message": "筛选正在进行中，请稍后查看结果"}
 
 
 @router.get("/{pattern}", response_model=ScreenerResponse)

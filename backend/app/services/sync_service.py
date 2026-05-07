@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from sqlalchemy import select, delete, text
@@ -64,16 +64,60 @@ def _get_session() -> Session:
 #  Task tracking helpers
 # ═══════════════════════════════════════════════════════════════
 
+def _is_task_running(task_type: str) -> bool:
+    """Check if a task of this type is already running."""
+    with _get_session() as s:
+        existing = s.execute(
+            select(SyncTask).where(
+                SyncTask.task_type == task_type,
+                SyncTask.status == "running",
+            )
+        ).scalar_one_or_none()
+        return existing is not None
+
+
 def _create_task(task_type: str) -> int:
     with _get_session() as s:
+        # Abort stale running tasks (>2 hours) for this type
+        stale = s.execute(
+            select(SyncTask).where(
+                SyncTask.task_type == task_type,
+                SyncTask.status == "running",
+            )
+        ).scalars().all()
+        now = datetime.utcnow()
+        for old in stale:
+            if old.started_at and (now - old.started_at).total_seconds() > 7200:
+                old.status = "error"
+                old.error_msg = "stale: timed out after 2h"
+                old.finished_at = now
+        s.commit()
+
+        # Check if there's still a running task
+        running = s.execute(
+            select(SyncTask).where(
+                SyncTask.task_type == task_type,
+                SyncTask.status == "running",
+            )
+        ).scalar_one_or_none()
+        if running:
+            return -1  # signal: already running
+
         t = SyncTask(
             task_type=task_type,
             status="running",
-            started_at=datetime.utcnow(),
+            started_at=now,
         )
         s.add(t)
         s.commit()
         return t.id
+
+
+def _get_or_create_task(task_type: str, _task_id: int | None = None) -> int:
+    """Use pre-created task_id from spawn_sync, or create new one."""
+    if _task_id is not None and _task_id > 0:
+        return _task_id
+    return _create_task(task_type)
 
 
 def _finish_task(task_id: int, processed: int, total: int, error: str = ""):
@@ -101,9 +145,12 @@ def _update_task_progress(task_id: int, processed: int, total: int):
 #  1. Stock list sync
 # ═══════════════════════════════════════════════════════════════
 
-def sync_stock_list() -> int:
+def sync_stock_list(_task_id: int = None) -> int:
     """Sync A-share stock list from akshare."""
-    task_id = _create_task("stocks")
+    task_id = _get_or_create_task("stocks", _task_id)
+    if task_id == -1:
+        logger.info("task already running, skipping")
+        return -1
     if not _HAS_AK:
         _finish_task(task_id, 0, 0, "akshare unavailable")
         return task_id
@@ -163,9 +210,12 @@ def sync_stock_list() -> int:
 #  2. Real-time quote sync (Tencent batch)
 # ═══════════════════════════════════════════════════════════════
 
-def sync_quotes() -> int:
+def sync_quotes(_task_id: int = None) -> int:
     """Sync real-time quotes for all stocks in DB via Tencent."""
-    task_id = _create_task("quotes")
+    task_id = _get_or_create_task("quotes", _task_id)
+    if task_id == -1:
+        logger.info("task already running, skipping")
+        return -1
     try:
         with _get_session() as s:
             codes = [r[0] for r in s.execute(select(Stock.code)).fetchall()]
@@ -240,7 +290,7 @@ def _classify_fundamental(eps: float, roe: float, rev_yoy: float, np_yoy: float)
     return "neutral", f"ROE {roe:.1f}% 基本面中性"
 
 
-def sync_financials() -> int:
+def sync_financials(_task_id: int = None) -> int:
     """Sync financial snapshots for all stocks via East Money batch API.
 
     Uses RPT_LICO_FN_CPD with ISNEW=1 to get the latest report per stock
@@ -249,7 +299,10 @@ def sync_financials() -> int:
     """
     import requests as _req
 
-    task_id = _create_task("financials")
+    task_id = _get_or_create_task("financials", _task_id)
+    if task_id == -1:
+        logger.info("task already running, skipping")
+        return -1
     url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     page_size = 500
@@ -332,7 +385,7 @@ def sync_financials() -> int:
 #  4. Concept / theme sync
 # ═══════════════════════════════════════════════════════════════
 
-def sync_concepts() -> int:
+def sync_concepts(_task_id: int = None) -> int:
     """Sync stock concepts/themes from East Money datacenter API.
 
     Uses RPT_WEB_RESPREDICT which provides CONCEPTINDEX_BOARD per stock.
@@ -340,7 +393,10 @@ def sync_concepts() -> int:
     """
     import requests
 
-    task_id = _create_task("concepts")
+    task_id = _get_or_create_task("concepts", _task_id)
+    if task_id == -1:
+        logger.info("task already running, skipping")
+        return -1
     url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     page_size = 200
@@ -405,7 +461,7 @@ def sync_concepts() -> int:
 #  5. Industry data sync (fill industry column in stocks table)
 # ═══════════════════════════════════════════════════════════════
 
-def sync_industry() -> int:
+def sync_industry(_task_id: int = None) -> int:
     """Fill industry info for all stocks from East Money datacenter API.
 
     Uses RPT_WEB_RESPREDICT which provides INDUSTRY_BOARD per stock.
@@ -413,7 +469,10 @@ def sync_industry() -> int:
     """
     import requests
 
-    task_id = _create_task("industry")
+    task_id = _get_or_create_task("industry", _task_id)
+    if task_id == -1:
+        logger.info("task already running, skipping")
+        return -1
     url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     page_size = 200
@@ -472,16 +531,105 @@ def sync_industry() -> int:
 #  6. Historical daily candles batch sync
 # ═══════════════════════════════════════════════════════════════
 
-def sync_candles(days: int = 365) -> int:
-    """Batch-sync historical daily candles for all stocks in DB.
+_EM_KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+_TX_KLINE_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
 
-    days controls how far back to fetch (default 1 year).
-    Uses akshare Tencent / East Money sources with throttling.
+
+def _em_secid(code: str) -> str:
+    """Convert 6-digit code to EM secid (market.code)."""
+    if code.startswith(("6", "5", "9")):
+        return f"1.{code}"  # 上海
+    return f"0.{code}"  # 深圳
+
+
+def _tx_kline_symbol(code: str) -> str:
+    """Convert 6-digit code to Tencent symbol."""
+    if code.startswith(("6", "5", "9")):
+        return f"sh{code}"
+    return f"sz{code}"
+
+
+def _fetch_candles_batch(session, code: str, beg: str, days: int) -> list[dict]:
+    """Fetch daily candles — try Tencent first (fast + stable), fallback to EM."""
+    # --- Tencent ---
+    try:
+        symbol = _tx_kline_symbol(code)
+        r = session.get(
+            _TX_KLINE_URL,
+            params={"param": f"{symbol},day,{beg[:4]}-{beg[4:6]}-{beg[6:]},2050-12-31,{days*2},qfq"},
+            timeout=8,
+        )
+        if r.status_code == 200:
+            data = r.json().get("data", {})
+            stock = data.get(symbol.lower(), data.get(symbol, {}))
+            klines = stock.get("qfqday") or stock.get("day") or []
+            if klines:
+                rows = []
+                for k in klines:
+                    if len(k) < 6:
+                        continue
+                    rows.append({
+                        "code": code,
+                        "trade_date": k[0],
+                        "open": float(k[1]),
+                        "close": float(k[2]),
+                        "high": float(k[3]),
+                        "low": float(k[4]),
+                        "volume": int(float(k[5])),
+                    })
+                return rows
+    except Exception:
+        pass
+
+    # --- EM fallback ---
+    try:
+        params = {
+            "secid": _em_secid(code),
+            "fields1": "f1,f2,f3,f4,f5,f6",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+            "klt": "101", "fqt": "1",
+            "beg": beg, "end": "20501231",
+        }
+        r = session.get(_EM_KLINE_URL, params=params, timeout=8)
+        if r.status_code == 200:
+            data = r.json().get("data")
+            if data and data.get("klines"):
+                rows = []
+                for line in data["klines"]:
+                    parts = line.split(",")
+                    if len(parts) < 6:
+                        continue
+                    rows.append({
+                        "code": code,
+                        "trade_date": parts[0],
+                        "open": float(parts[1]),
+                        "close": float(parts[2]),
+                        "high": float(parts[3]),
+                        "low": float(parts[4]),
+                        "volume": int(float(parts[5])),
+                    })
+                return rows
+    except Exception:
+        pass
+
+    return []
+
+
+def sync_candles(days: int = 365, _task_id: int = None) -> int:
+    """Batch-sync historical daily candles for all stocks using EM direct HTTP API.
+
+    Incremental: only fetches data after each stock's latest cached date.
+    Uses 4 workers with connection pooling + throttling to avoid rate limits.
     """
-    task_id = _create_task("daily_candles")
-    if not _HAS_AK:
-        _finish_task(task_id, 0, 0, "akshare unavailable")
-        return task_id
+    import requests
+    from requests.adapters import HTTPAdapter
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+
+    task_id = _get_or_create_task("daily_candles", _task_id)
+    if task_id == -1:
+        logger.info("task already running, skipping")
+        return -1
     try:
         with _get_session() as s:
             codes = [r[0] for r in s.execute(select(Stock.code)).fetchall()]
@@ -489,46 +637,124 @@ def sync_candles(days: int = 365) -> int:
             _finish_task(task_id, 0, 0, "no stocks in DB — run stock list sync first")
             return task_id
 
-        total = len(codes)
-        logger.info("sync_candles: fetching %d stocks, days=%d", total, days)
+        # Query latest cached date per stock for incremental sync
+        with _get_session() as s:
+            from sqlalchemy import func as sa_func
+            latest_rows = s.execute(
+                select(DailyCandle.code, sa_func.max(DailyCandle.trade_date))
+                .group_by(DailyCandle.code)
+            ).fetchall()
+        latest_map = {r[0]: r[1] for r in latest_rows}
+
+        from datetime import date as _date
+        cutoff = (_date.today() - timedelta(days=3)).strftime("%Y-%m-%d")
+        default_beg = (_date.today() - timedelta(days=days * 2)).strftime("%Y%m%d")
+
+        need_sync: list[tuple[str, str]] = []  # (code, beg_date)
+        skip_count = 0
+        for code in codes:
+            last = latest_map.get(code)
+            if last and last >= cutoff:
+                skip_count += 1
+            else:
+                if last:
+                    beg = (datetime.strptime(last, "%Y-%m-%d") - timedelta(days=3)).strftime("%Y%m%d")
+                else:
+                    beg = default_beg
+                need_sync.append((code, beg))
+
+        total = len(need_sync)
+        logger.info(
+            "sync_candles: %d stocks need sync, %d skipped (up-to-date), days=%d",
+            total, skip_count, days,
+        )
+        if total == 0:
+            _finish_task(task_id, skip_count, len(codes))
+            return task_id
+
+        # requests.Session with connection pool matching worker count
+        _WORKERS = 4
+        http = requests.Session()
+        http.headers["User-Agent"] = "Mozilla/5.0"
+        adapter = HTTPAdapter(pool_connections=_WORKERS, pool_maxsize=_WORKERS)
+        http.mount("https://", adapter)
+
+        # Throttle: use a lock to enforce minimum 50ms between requests
+        _req_lock = threading.Lock()
+        _last_req_time = [0.0]
+
+        def _throttled_fetch(code, beg):
+            with _req_lock:
+                elapsed = time.time() - _last_req_time[0]
+                if elapsed < 0.05:
+                    time.sleep(0.05 - elapsed)
+                _last_req_time[0] = time.time()
+            return _fetch_candles_batch(http, code, beg, days)
+
         processed = 0
         errors = 0
+        no_data = 0  # stocks that legitimately have no kline data
 
-        from .data_provider import _fetch_candles_sync, _cache_save
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+        # Build upsert SQL once
+        upsert_sql = text(
+            "INSERT INTO daily_candles (code, trade_date, open, high, low, close, volume) "
+            "VALUES (:code, :trade_date, :open, :high, :low, :close, :volume) "
+            "ON CONFLICT (code, trade_date) DO UPDATE SET "
+            "open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low, "
+            "close=EXCLUDED.close, volume=EXCLUDED.volume"
+        )
 
-        # Use a separate thread with timeout per stock to prevent hanging
-        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="candle-fetch") as executor:
-            for i, code in enumerate(codes):
+        all_rows: list[dict] = []
+
+        with ThreadPoolExecutor(max_workers=_WORKERS, thread_name_prefix="kline") as executor:
+            futures = {
+                executor.submit(_throttled_fetch, code, beg): code
+                for code, beg in need_sync
+            }
+            for i, future in enumerate(as_completed(futures)):
+                code = futures[future]
                 try:
-                    future = executor.submit(_fetch_candles_sync, code, days)
-                    candles = future.result(timeout=15)  # 15s timeout per stock
-                    if candles:
-                        _cache_save(code, candles)
+                    rows = future.result(timeout=30)
+                    if rows:
+                        all_rows.extend(rows)
                         processed += 1
                     else:
-                        errors += 1
-                except (FuturesTimeout, TimeoutError):
-                    errors += 1
-                    if errors <= 10:
-                        logger.warning("sync_candles timeout for %s", code)
+                        no_data += 1
                 except Exception as e:
                     errors += 1
-                    if errors <= 10:
+                    if errors <= 20:
                         logger.warning("sync_candles error for %s: %s", code, e)
 
-                if (i + 1) % 20 == 0:
+                # Flush to DB in batches
+                if len(all_rows) >= 10000:
+                    with _get_session() as s:
+                        s.execute(upsert_sql, all_rows)
+                        s.commit()
+                    logger.info("sync_candles: flushed %d rows to DB", len(all_rows))
+                    all_rows = []
+
+                # Update progress periodically
+                done = i + 1
+                if done % 200 == 0 or done == total:
                     _update_task_progress(task_id, processed, total)
-                    logger.info("sync_candles: %d/%d (errors: %d)", processed, total, errors)
+                    logger.info(
+                        "sync_candles: %d/%d fetched (ok=%d, nodata=%d, err=%d)",
+                        done, total, processed, no_data, errors,
+                    )
 
-                # Throttle to avoid rate limiting
-                if (i + 1) % 10 == 0:
-                    time.sleep(0.3)
+        # Final flush
+        if all_rows:
+            with _get_session() as s:
+                s.execute(upsert_sql, all_rows)
+                s.commit()
+            logger.info("sync_candles: flushed final %d rows to DB", len(all_rows))
 
-        _finish_task(task_id, processed, total)
-        logger.info("sync_candles: done %d/%d (errors: %d)", processed, total, errors)
+        http.close()
+        _finish_task(task_id, processed + skip_count, len(codes))
+        logger.info("sync_candles: done %d/%d (nodata=%d, errors=%d, skipped=%d)",
+                     processed, total, no_data, errors, skip_count)
     except Exception as e:
-        logger.error("sync_candles error: %s", e)
+        logger.error("sync_candles error: %s", e, exc_info=True)
         _finish_task(task_id, 0, 0, str(e))
     return task_id
 
@@ -537,18 +763,21 @@ def sync_candles(days: int = 365) -> int:
 
 _EM_CONSENSUS_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
 
-def sync_analyst_consensus() -> int:
+def sync_analyst_consensus(_task_id: int = None) -> int:
     """Sync analyst consensus (target price / ratings) from East Money.
 
     Uses RPT_WEB_RESPREDICT for all stocks with analyst coverage (~2700).
     """
     import requests
 
-    task_id = _create_task("analyst_consensus")
+    task_id = _get_or_create_task("analyst_consensus", _task_id)
+    if task_id == -1:
+        logger.info("task already running, skipping")
+        return -1
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         page = 1
-        page_size = 200
+        page_size = 500
         processed = 0
         errors = 0
         total_count = 0
@@ -613,17 +842,17 @@ def sync_analyst_consensus() -> int:
                         logger.debug("analyst_consensus item error: %s", e)
 
                 s.commit()
-                logger.info("sync_analyst_consensus: page %d done (%d so far)", page, processed)
+                _update_task_progress(task_id, processed, total_count)
+                logger.info("sync_analyst_consensus: page %d done (%d/%d)", page, processed, total_count)
 
                 # Check if we've fetched all pages
                 total_pages = result.get("pages", 1)
                 if page >= total_pages:
                     break
                 page += 1
-                time.sleep(0.3)  # rate limit
 
-        _finish_task(task_id, processed, errors)
-        logger.info("sync_analyst_consensus: done %d stocks (errors: %d)", processed, errors)
+        _finish_task(task_id, processed, total_count)
+        logger.info("sync_analyst_consensus: done %d/%d (errors: %d)", processed, total_count, errors)
     except Exception as e:
         logger.error("sync_analyst_consensus error: %s", e)
         _finish_task(task_id, 0, 0, str(e))
@@ -792,12 +1021,80 @@ def _safe_float(row, col: str, default: float = 0.0) -> float:
 #  Screener (runs in subprocess, saves results to JSON cache)
 # ═══════════════════════════════════════════════════════════════
 
-def run_screener():
-    """Run all pattern detectors and save results to .screener_cache/*.json."""
+def _candles_are_stale() -> bool:
+    """Check if daily candles are stale (latest date is not today).
+    Only considers trading hours — before 9:30 uses yesterday's date."""
+    from datetime import date as _date
+    from sqlalchemy import func as sa_func
+    now = datetime.now()
+    # Before 9:30 AM, don't consider candles stale (market hasn't opened)
+    if now.hour < 9 or (now.hour == 9 and now.minute < 30):
+        return False
+    today = _date.today().strftime("%Y-%m-%d")
+    try:
+        with _get_session() as s:
+            latest = s.execute(
+                select(sa_func.max(DailyCandle.trade_date))
+            ).scalar()
+        if not latest:
+            return True
+        return latest < today
+    except Exception:
+        return False
+
+
+def _is_market_hours() -> bool:
+    """Return True if current time is during A-share trading hours (9:30-15:00 weekdays)."""
+    now = datetime.now()
+    if now.weekday() >= 5:  # Saturday/Sunday
+        return False
+    t = now.hour * 100 + now.minute
+    return 930 <= t <= 1500
+
+
+def run_screener(_task_id: int = None):
+    """Run all pattern detectors and save results to .screener_cache/*.json.
+
+    Automatically syncs daily candles first if data is stale.
+    During market hours, also syncs quotes and appends live candles.
+    """
     import json as _json
     import os as _os
     from .data_provider import get_candles, list_universe
+    from ..schemas import Candle
     from .screener import PATTERN_DETECTORS
+
+    task_id = _get_or_create_task("screener", _task_id)
+    if task_id == -1:
+        logger.info("task already running, skipping")
+        return -1
+
+    # Auto-sync candles if stale
+    if _candles_are_stale():
+        logger.info("screener: candles are stale, syncing first...")
+        sync_candles(days=365)
+        logger.info("screener: candle sync done")
+
+    # During market hours, sync quotes and build live candle map
+    intraday = _is_market_hours()
+    quote_map: dict[str, dict] = {}
+    if intraday:
+        logger.info("screener: market hours — syncing quotes for live candles...")
+        sync_quotes()
+        # Batch load all quotes into memory
+        with _get_session() as s:
+            rows = s.execute(select(QuoteCache)).scalars().all()
+            for q in rows:
+                if q.price and q.price > 0 and q.open and q.open > 0:
+                    quote_map[q.code] = {
+                        "open": q.open, "high": q.high, "low": q.low,
+                        "close": q.price, "volume": q.volume or 0,
+                    }
+        logger.info("screener: loaded %d live quotes, starting scan", len(quote_map))
+    else:
+        logger.info("screener: after hours, using cached candles")
+
+    today_str = datetime.now().strftime("%Y-%m-%d")
 
     cache_dir = _os.path.join(
         _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))),
@@ -808,11 +1105,39 @@ def run_screener():
     universe = list_universe()
     logger.info("screener: scanning %d stocks", len(universe))
 
+    def _get_candles_with_live(code: str) -> list[Candle]:
+        candles = get_candles(code, days=180)
+        if not candles:
+            return []
+        # Append/update today's live candle from quote_map
+        live = quote_map.get(code)
+        if live:
+            last_date = candles[-1].date[:10] if candles else ""
+            if last_date != today_str:
+                candles.append(Candle(
+                    date=today_str,
+                    open=live["open"],
+                    high=live["high"] if live["high"] > 0 else live["close"],
+                    low=live["low"] if live["low"] > 0 else live["close"],
+                    close=live["close"],
+                    volume=live["volume"],
+                ))
+            elif last_date == today_str:
+                candles[-1] = Candle(
+                    date=today_str,
+                    open=live["open"],
+                    high=max(candles[-1].high, live["high"]) if live["high"] > 0 else candles[-1].high,
+                    low=min(candles[-1].low, live["low"]) if live["low"] > 0 else candles[-1].low,
+                    close=live["close"],
+                    volume=live["volume"] if live["volume"] > 0 else candles[-1].volume,
+                )
+        return candles
+
     for pattern, detector in PATTERN_DETECTORS.items():
         items = []
         for code, name, _ind in universe:
             try:
-                candles = get_candles(code, days=180)
+                candles = _get_candles_with_live(code)
                 if not candles:
                     continue
                 r = detector(code, name, candles)
@@ -843,3 +1168,5 @@ def run_screener():
         with open(path, "w") as f:
             _json.dump(result, f, ensure_ascii=False)
         logger.info("screener: %s → %d items", pattern, len(items))
+
+    _finish_task(task_id, len(universe), len(universe))

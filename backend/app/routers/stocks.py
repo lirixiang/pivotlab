@@ -3,7 +3,7 @@ import json
 
 from fastapi import APIRouter, HTTPException, Query, Body
 
-from ..schemas import StockDetail
+from ..schemas import StockDetail, Candle
 from ..services.data_provider import (
     get_candles, get_quote, list_universe,
     refresh_candles_full, refresh_candles_latest, _run_in_net_executor,
@@ -82,6 +82,31 @@ async def stock_detail(
         raise HTTPException(504, "data fetch timeout")
     if not candles:
         raise HTTPException(404, "no candles")
+
+    # Append today's live candle from quote if not already in candles
+    if quote and quote.price > 0 and period == "daily":
+        from datetime import date as _date
+        today_str = _date.today().strftime("%Y-%m-%d")
+        last_date = candles[-1].date[:10] if candles else ""
+        if last_date != today_str and quote.open > 0:
+            candles.append(Candle(
+                date=today_str,
+                open=quote.open,
+                high=quote.high if quote.high > 0 else quote.price,
+                low=quote.low if quote.low > 0 else quote.price,
+                close=quote.price,
+                volume=quote.volume,
+            ))
+        elif last_date == today_str:
+            # Update today's candle with latest quote data
+            candles[-1] = Candle(
+                date=today_str,
+                open=quote.open if quote.open > 0 else candles[-1].open,
+                high=max(candles[-1].high, quote.high if quote.high > 0 else quote.price),
+                low=min(candles[-1].low, quote.low if quote.low > 0 else quote.price) if candles[-1].low > 0 else quote.price,
+                close=quote.price,
+                volume=quote.volume if quote.volume > 0 else candles[-1].volume,
+            )
 
     if algorithm == "multifactor":
         weights = None

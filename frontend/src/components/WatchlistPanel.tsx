@@ -12,6 +12,27 @@ const SORT_OPTIONS: { key: SortKey; label: string; defaultDir: SortDir }[] = [
   { key: "price", label: "现价", defaultDir: "desc" },
 ];
 
+function SortBtn({ k, label, cur, dir, onClick }: {
+  k: SortKey; label: string; cur: SortKey; dir: SortDir;
+  onClick: (k: SortKey) => void;
+}) {
+  const active = cur === k;
+  return (
+    <button
+      onClick={() => onClick(k)}
+      className={
+        "px-1 py-0.5 rounded text-[10px] tracking-wide transition cursor-pointer " +
+        (active ? "text-ink-200" : "text-ink-500 hover:text-ink-300")
+      }
+    >
+      {label}
+      {active && k !== "default" && (
+        <i className={"fas fa-caret-" + (dir === "desc" ? "down" : "up") + " ml-0.5 text-[9px]"} />
+      )}
+    </button>
+  );
+}
+
 export function WatchlistPanel({
   activeCode,
   onSelect,
@@ -100,35 +121,27 @@ export function WatchlistPanel({
 
   return (
     <aside className="border-r border-ink-700 bg-ink-900 flex flex-col h-full">
-      <div className="p-3 border-b border-ink-800">
+      <div className="p-3 pb-0 border-b border-ink-800">
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2">
             <span className="tag text-ink-500">自选 · WATCHLIST</span>
             <span className="text-[11px] text-ink-500">{items.length}</span>
           </div>
         </div>
-        {/* Sort bar */}
-        <div className="flex items-center gap-1">
-          {SORT_OPTIONS.map((opt) => {
-            const active = sortKey === opt.key;
-            return (
-              <button
-                key={opt.key}
-                onClick={() => handleSort(opt.key)}
-                className={
-                  "px-2 py-0.5 rounded text-[10px] transition " +
-                  (active
-                    ? "bg-ink-750 text-white"
-                    : "text-ink-500 hover:text-ink-300")
-                }
-              >
-                {opt.label}
-                {active && sortKey !== "default" && (
-                  <i className={"fas fa-caret-" + (sortDir === "desc" ? "down" : "up") + " ml-0.5 text-[9px]"} />
-                )}
-              </button>
-            );
-          })}
+        {/* Column headers with sort */}
+        <div className="flex items-center justify-between px-0 pb-2 text-[10px]">
+          <SortBtn k="default" label="名称" cur={sortKey} dir={sortDir} onClick={handleSort} />
+          <div className="flex items-center gap-3">
+            <div className="w-[40px] text-center">
+              <SortBtn k="decision" label="决策分" cur={sortKey} dir={sortDir} onClick={handleSort} />
+            </div>
+            <div className="w-[50px] text-right">
+              <SortBtn k="price" label="现价" cur={sortKey} dir={sortDir} onClick={handleSort} />
+            </div>
+            <div className="w-[52px] text-right">
+              <SortBtn k="change" label="涨跌" cur={sortKey} dir={sortDir} onClick={handleSort} />
+            </div>
+          </div>
         </div>
       </div>
 
@@ -174,7 +187,7 @@ export function WatchlistPanel({
                 </div>
                 <div className="flex items-baseline gap-3">
                   {/* Decision score */}
-                  <div className="text-center" title="决策分">
+                  <div className="w-[40px] text-center" title="决策分">
                     {dscore !== null ? (
                       <>
                         <div className={"text-[13px] font-medium num " + scoreColor}>{dscore}</div>
@@ -185,18 +198,23 @@ export function WatchlistPanel({
                     )}
                   </div>
                   {/* Price */}
-                  <div className="text-right num">
+                  <div className="w-[50px] text-right num">
                     {it.price > 0 ? (
-                      <>
-                        <div className={"text-[13px] " + (up ? "text-cn-up" : "text-cn-dn")}>
-                          {it.price.toFixed(2)}
-                        </div>
-                        <div className={"text-[10px] " + (up ? "text-cn-up" : "text-cn-dn")}>
-                          {up ? "+" : ""}{it.change_pct.toFixed(2)}%
-                        </div>
-                      </>
+                      <div className={"text-[13px] " + (up ? "text-cn-up" : "text-cn-dn")}>
+                        {it.price.toFixed(2)}
+                      </div>
                     ) : (
-                      <div className="text-[11px] text-ink-600">待同步</div>
+                      <div className="text-[11px] text-ink-600">—</div>
+                    )}
+                  </div>
+                  {/* Change */}
+                  <div className="w-[52px] text-right num">
+                    {it.price > 0 ? (
+                      <div className={"text-[13px] " + (up ? "text-cn-up" : "text-cn-dn")}>
+                        {up ? "+" : ""}{it.change_pct.toFixed(2)}%
+                      </div>
+                    ) : (
+                      <div className="text-[11px] text-ink-600">—</div>
                     )}
                   </div>
                 </div>

@@ -160,3 +160,35 @@ export type WatchlistScore = {
   decision_score: number;
   decision_label: string;
 };
+
+export type BacktestTrade = {
+  entry_date: string;
+  entry_price: number;
+  exit_date: string;
+  exit_price: number;
+  pnl_pct: number;
+  side: string;
+  reason_entry: string;
+  reason_exit: string;
+  holding_bars: number;
+};
+
+export type BacktestResponse = {
+  code: string;
+  strategy: string;
+  period: string;
+  trades: BacktestTrade[];
+  equity_curve: { date: string; equity: number; benchmark: number }[];
+  stats: {
+    total_trades: number;
+    win_count: number;
+    loss_count: number;
+    win_rate: number;
+    avg_win: number;
+    avg_loss: number;
+    profit_factor: number;
+    max_drawdown: number;
+    total_return: number;
+  };
+  levels_used: { price: number; kind: string; score: number; label: string }[];
+};

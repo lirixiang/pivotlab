@@ -82,4 +82,15 @@ export const api = {
     ),
   syncTasks: () => http<SyncTask[]>("/sync/tasks"),
   dbStats: () => http<DbStats>("/sync/db-stats"),
+  // Backtest
+  backtest: (params: {
+    code: string; strategy: string; period: string;
+    stop_loss: number; target: number;
+    volume_filter: boolean; shrink_filter: boolean;
+    close_above_support: boolean; weekly_confluence: boolean;
+  }) =>
+    http<import("../types").BacktestResponse>("/backtest", {
+      method: "POST",
+      body: JSON.stringify(params),
+    }),
 };

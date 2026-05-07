@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import init_db
-from .routers import market, screener, stocks, watchlist, sync, settings
+from .routers import market, screener, stocks, watchlist, sync, settings, backtest
 from .services.data_provider import preload_candles
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s :: %(message)s")
@@ -49,6 +49,7 @@ app.include_router(screener.router)
 app.include_router(watchlist.router)
 app.include_router(sync.router)
 app.include_router(settings.router)
+app.include_router(backtest.router)
 
 
 @app.get("/api/health")
