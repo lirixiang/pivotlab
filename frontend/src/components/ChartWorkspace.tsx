@@ -1,5 +1,6 @@
 import type { StockDetail } from "../types";
 import { ChartCanvas } from "./ChartCanvas";
+import { FinancialHistoryPanel } from "./FinancialHistoryPanel";
 
 type Props = {
   data: StockDetail | null;
@@ -260,6 +261,9 @@ export function ChartWorkspace({ data, loading, period, onPeriodChange, refreshi
                 </div>
               </>
             )}
+
+            {/* Historical financials chart */}
+            {q && <FinancialHistoryPanel code={q.code} />}
 
             {/* Analyst consensus */}
             {ac && ac.consensus_target && (

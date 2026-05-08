@@ -20,6 +20,7 @@ import numpy as np
 
 from ..schemas import Candle
 from .labeler import label_candles, get_labeled_points
+from .levels_multifactor import detect_levels_multifactor
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +48,65 @@ FEATURE_NAMES = [
     # Trend
     "adx",
     "ma5_slope", "ma20_slope",
+    # Support / Resistance (from levels_multifactor)
+    "sr_dist_support",       # distance to nearest support (%)
+    "sr_dist_resistance",    # distance to nearest resistance (%)
+    "sr_support_score",      # S1 confidence score (0-100)
+    "sr_resistance_score",   # R1 confidence score (0-100)
+    "sr_squeeze",            # R1-S1 gap as % of price (congestion indicator)
 ]
 
-NUM_FEATURES = len(FEATURE_NAMES)  # 31
+NUM_FEATURES = len(FEATURE_NAMES)  # 37
 SEQ_LEN = 30  # lookback window for transformer
+
+
+# ─────────────────────────── SR level cache ────────────────────────────────
+# Recompute levels every _SR_REFRESH bars (same strategy as backtester).
+
+_SR_REFRESH = 20
+_sr_cache: dict[int, tuple[float, float, float, float, float]] = {}
+_sr_cache_candle_id: int | None = None  # id(candles) to invalidate on new stock
+
+
+def _get_sr_features(
+    candles: list[Candle], idx: int, price: float,
+) -> tuple[float, float, float, float, float]:
+    """Return (dist_support%, dist_resistance%, support_score, resistance_score, squeeze%).
+
+    Cached per _SR_REFRESH bars. Uses only candles[:idx+1] — no future leak.
+    """
+    global _sr_cache, _sr_cache_candle_id
+    cid = id(candles)
+    if _sr_cache_candle_id != cid:
+        _sr_cache = {}
+        _sr_cache_candle_id = cid
+
+    # Find nearest cached bar
+    cache_key = (idx // _SR_REFRESH) * _SR_REFRESH
+    if cache_key not in _sr_cache:
+        subset = candles[: idx + 1]
+        lookback = min(len(subset), 120)
+        try:
+            levels = detect_levels_multifactor(subset, lookback=lookback)
+        except Exception:
+            levels = []
+
+        s1_dist, r1_dist = 0.0, 0.0
+        s1_score, r1_score = 0.0, 0.0
+        supports = [lv for lv in levels if lv.kind == "support"]
+        resistances = [lv for lv in levels if lv.kind == "resistance"]
+        if supports:
+            s1 = min(supports, key=lambda lv: abs(lv.price - price))
+            s1_dist = (price - s1.price) / price * 100
+            s1_score = s1.score
+        if resistances:
+            r1 = min(resistances, key=lambda lv: abs(lv.price - price))
+            r1_dist = (r1.price - price) / price * 100
+            r1_score = r1.score
+        squeeze = s1_dist + r1_dist  # total gap between S1 and R1 as %
+        _sr_cache[cache_key] = (s1_dist, r1_dist, s1_score, r1_score, squeeze)
+
+    return _sr_cache[cache_key]
 
 
 # ─────────────────────────── Feature Engineering ───────────────────────────
@@ -60,7 +116,7 @@ def _safe_div(a: float, b: float) -> float:
 
 
 def extract_features(candles: list[Candle], idx: int) -> dict[str, float] | None:
-    """Extract 31-dim feature vector at bar *idx*."""
+    """Extract 37-dim feature vector at bar *idx*."""
     if idx < 60 or idx >= len(candles):
         return None
     c = candles[idx]
@@ -172,6 +228,9 @@ def extract_features(candles: list[Candle], idx: int) -> dict[str, float] | None
     ma5_slope = _safe_div(ma5 - ma5_prev, ma5_prev) * 100
     ma20_slope = _safe_div(ma20 - ma20_prev, ma20_prev) * 100
 
+    # Support / Resistance features (cached every 20 bars)
+    sr_dist_sup, sr_dist_res, sr_sup_score, sr_res_score, sr_squeeze = _get_sr_features(candles, idx, c.close)
+
     return {
         "ma5_dist": _safe_div(c.close - ma5, ma5) * 100,
         "ma10_dist": _safe_div(c.close - ma10, ma10) * 100,
@@ -205,6 +264,12 @@ def extract_features(candles: list[Candle], idx: int) -> dict[str, float] | None
         "adx": adx,
         "ma5_slope": ma5_slope,
         "ma20_slope": ma20_slope,
+        # SR features
+        "sr_dist_support": sr_dist_sup,
+        "sr_dist_resistance": sr_dist_res,
+        "sr_support_score": sr_sup_score,
+        "sr_resistance_score": sr_res_score,
+        "sr_squeeze": sr_squeeze,
     }
 
 

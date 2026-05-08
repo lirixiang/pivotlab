@@ -19,6 +19,7 @@ from typing import Any
 import numpy as np
 
 from ..schemas import Candle
+from .levels_multifactor import detect_levels_multifactor
 
 logger = logging.getLogger(__name__)
 
@@ -94,13 +95,61 @@ def extract_features(candles: list[Candle], idx: int) -> dict[str, float] | None
         "bb_bandwidth": bb_bw,
         "price_position": price_pos,
         "body_ratio": body_ratio,
+        **_get_sr_features_ml(candles, idx, c.close),
     }
+
+
+_SR_REFRESH_ML = 20
+_sr_cache_ml: dict[int, dict[str, float]] = {}
+_sr_cache_ml_cid: int | None = None
+
+
+def _get_sr_features_ml(
+    candles: list[Candle], idx: int, price: float,
+) -> dict[str, float]:
+    """SR features for ml_scorer, cached every 20 bars."""
+    global _sr_cache_ml, _sr_cache_ml_cid
+    cid = id(candles)
+    if _sr_cache_ml_cid != cid:
+        _sr_cache_ml = {}
+        _sr_cache_ml_cid = cid
+
+    cache_key = (idx // _SR_REFRESH_ML) * _SR_REFRESH_ML
+    if cache_key not in _sr_cache_ml:
+        subset = candles[: idx + 1]
+        lookback = min(len(subset), 120)
+        try:
+            levels = detect_levels_multifactor(subset, lookback=lookback)
+        except Exception:
+            levels = []
+        s1_dist, r1_dist = 0.0, 0.0
+        s1_score, r1_score = 0.0, 0.0
+        supports = [lv for lv in levels if lv.kind == "support"]
+        resistances = [lv for lv in levels if lv.kind == "resistance"]
+        if supports:
+            s1 = min(supports, key=lambda lv: abs(lv.price - price))
+            s1_dist = (price - s1.price) / price * 100
+            s1_score = s1.score
+        if resistances:
+            r1 = min(resistances, key=lambda lv: abs(lv.price - price))
+            r1_dist = (r1.price - price) / price * 100
+            r1_score = r1.score
+        _sr_cache_ml[cache_key] = {
+            "sr_dist_support": s1_dist,
+            "sr_dist_resistance": r1_dist,
+            "sr_support_score": s1_score,
+            "sr_resistance_score": r1_score,
+            "sr_squeeze": s1_dist + r1_dist,
+        }
+    return _sr_cache_ml[cache_key]
 
 
 FEATURE_NAMES = [
     "ma5_dist", "ma10_dist", "ma20_dist", "rsi", "atr_pct",
     "vol_ratio", "ret_5d", "ret_10d", "ret_20d",
     "bb_bandwidth", "price_position", "body_ratio",
+    "sr_dist_support", "sr_dist_resistance", "sr_support_score",
+    "sr_resistance_score", "sr_squeeze",
 ]
 
 

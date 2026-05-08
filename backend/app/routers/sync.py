@@ -37,6 +37,12 @@ async def trigger_sync_financials():
     return _trigger("financials")
 
 
+@router.post("/financial_history")
+async def trigger_sync_financial_history(years: int = Query(5, ge=1, le=10)):
+    """Sync historical quarterly financial reports (default 5 years)."""
+    return _trigger("financial_history", years=years)
+
+
 @router.post("/concepts")
 async def trigger_sync_concepts():
     return _trigger("concepts")

@@ -8,6 +8,7 @@ import time as _time
 import uuid
 from pathlib import Path
 
+import ray
 from fastapi import APIRouter
 from sqlalchemy import select, func
 
@@ -19,87 +20,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/strategy", tags=["strategy"])
 
-# ─── Training Task Manager (subprocess-based, multi-GPU) ───
-_PROGRESS_DIR = Path("/app/backend/models/.train_progress")
-_PROGRESS_DIR.mkdir(parents=True, exist_ok=True)
-
-# GPU assignment: 6x RTX 3080 Ti
+# ─── Ray Distributed Training Manager ───
 _NUM_GPUS = int(os.environ.get("NUM_GPUS", "6"))
-_active_workers: dict[str, subprocess.Popen] = {}  # task_id -> Popen
-
-
-def _cleanup_stale_tasks():
-    """Mark any 'loading'/'training' tasks as 'failed' on startup.
-
-    These are leftover from a previous container run where workers were killed.
-    """
-    for p in _PROGRESS_DIR.glob("*.json"):
-        if p.name.endswith(".tmp") or "_task.json" in p.name:
-            continue
-        try:
-            data = json.loads(p.read_text())
-            if data.get("status") in ("loading", "training", "pending"):
-                data["status"] = "failed"
-                data["message"] = "容器重启，任务中断"
-                data["ended_at"] = _time.time()
-                p.write_text(json.dumps(data))
-                logger.info("Cleaned stale task: %s (%s)", data.get("task_id"), data.get("model_type"))
-        except Exception:
-            pass
-
-
-_cleanup_stale_tasks()
-
-
-def _progress_file(task_id: str) -> Path:
-    return _PROGRESS_DIR / f"{task_id}.json"
-
-
-def _read_progress(task_id: str) -> dict | None:
-    p = _progress_file(task_id)
-    if p.exists():
-        try:
-            return json.loads(p.read_text())
-        except (json.JSONDecodeError, OSError):
-            return None
-    return None
-
-
-def _all_tasks() -> list[dict]:
-    """Read all progress files."""
-    tasks = []
-    for p in sorted(_PROGRESS_DIR.glob("*.json")):
-        if p.name.endswith(".tmp") or "_task.json" in p.name:
-            continue
-        try:
-            tasks.append(json.loads(p.read_text()))
-        except (json.JSONDecodeError, OSError):
-            pass
-    # Clean up dead workers
-    for tid in list(_active_workers):
-        proc = _active_workers[tid]
-        if proc.poll() is not None:
-            del _active_workers[tid]
-    return tasks
-
-
-def _get_busy_gpus() -> set[int]:
-    """Check which GPUs have active training workers."""
-    busy = set()
-    for task in _all_tasks():
-        if task.get("status") in ("loading", "training"):
-            gpu = task.get("gpu_id")
-            if gpu is not None:
-                busy.add(gpu)
-    return busy
-
-
-def _next_free_gpu() -> int | None:
-    busy = _get_busy_gpus()
-    for i in range(_NUM_GPUS):
-        if i not in busy:
-            return i
-    return None
 
 
 @router.get("/status")
@@ -332,116 +254,56 @@ def _fetch_market_candles(max_stocks: int, min_days: int) -> tuple[list, int]:
 
 @router.post("/train_market")
 async def train_market(body: dict):
-    """Launch training as subprocess on a free GPU.
+    """Launch distributed training via Ray.
 
-    Supports parallel training: each model type gets its own GPU.
-    Body: { model_type, max_stocks, epochs, min_days, label_method, pct_threshold }
+    Body: { model_type, max_stocks, epochs, min_days, label_method, pct_threshold, num_gpus }
 
-    Special: model_type="all" trains all 5 models in parallel across GPUs.
+    Features:
+      - model_type="all" → 5 models in parallel across GPUs
+      - num_gpus > 1 → DDP multi-GPU training for PyTorch models
+      - Ray manages GPU allocation, no manual CUDA_VISIBLE_DEVICES
     """
+    from ..services.ray_trainer import submit_training
+
     model_type = body.get("model_type", "rl_ppo")
     max_stocks = min(int(body.get("max_stocks", 200)), 5000)
     epochs = min(int(body.get("epochs", 100)), 500)
     min_days = int(body.get("min_days", 200))
     label_method = body.get("label_method", "zigzag")
     pct_threshold = float(body.get("pct_threshold", 5.0))
+    num_gpus = min(int(body.get("num_gpus", 1)), _NUM_GPUS)
 
-    # "all" → launch all 5 model types in parallel
-    if model_type == "all":
-        all_types = ["lightgbm", "transformer", "lstm", "cnn_lstm", "rl_ppo"]
-        launched = []
-        for i, mt in enumerate(all_types):
-            gpu = i % _NUM_GPUS
-            # Check if same model already training
-            skip = False
-            for task in _all_tasks():
-                if task.get("model_type") == mt and task.get("status") in ("loading", "training"):
-                    launched.append({"model_type": mt, "error": f"{mt} 已在训练中"})
-                    skip = True
-                    break
-            if skip:
-                continue
-            result = _launch_worker(mt, max_stocks, min_days, epochs,
-                                    label_method, pct_threshold, gpu)
-            launched.append(result)
-        return {"tasks": launched, "message": f"已启动 {sum(1 for r in launched if 'task_id' in r)}/{len(all_types)} 个训练任务"}
-
-    # Single model
-    # Check if same model already training
-    for task in _all_tasks():
-        if task.get("model_type") == model_type and task.get("status") in ("loading", "training"):
-            return {"error": f"{model_type} 已在训练中", "task": task}
-
-    gpu = _next_free_gpu()
-    if gpu is None:
-        return {"error": "所有GPU都在训练中，请稍后再试",
-                "busy_gpus": list(_get_busy_gpus())}
-
-    return _launch_worker(model_type, max_stocks, min_days, epochs,
-                          label_method, pct_threshold, gpu)
-
-
-def _launch_worker(model_type: str, max_stocks: int, min_days: int,
-                    epochs: int, label_method: str, pct_threshold: float,
-                    gpu_id: int) -> dict:
-    """Spawn a training subprocess on a specific GPU."""
-    task_id = uuid.uuid4().hex[:8]
-    progress_path = str(_progress_file(task_id))
-
-    # Write initial progress
-    init = {
-        "task_id": task_id, "model_type": model_type,
-        "gpu_id": gpu_id, "max_stocks": max_stocks, "epochs": epochs,
-        "status": "pending", "progress": 0,
-        "message": f"启动中... (GPU {gpu_id})",
-        "started_at": _time.time(), "ended_at": None, "result": None,
-        "codes_used": 0, "total_codes": 0,
-    }
-    Path(progress_path).write_text(json.dumps(init))
-
-    # Write task config
-    task_config = {
-        "task_id": task_id, "model_type": model_type,
-        "max_stocks": max_stocks, "min_days": min_days,
-        "epochs": epochs, "label_method": label_method,
-        "pct_threshold": pct_threshold,
-        "gpu_id": gpu_id, "progress_file": progress_path,
-    }
-    task_file = str(_PROGRESS_DIR / f"{task_id}_task.json")
-    Path(task_file).write_text(json.dumps(task_config))
-
-    # Spawn worker subprocess with specific GPU
-    env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-
-    log_file = open(str(_PROGRESS_DIR / f"{task_id}.log"), "w")
-    proc = subprocess.Popen(
-        ["python", "/app/backend/train_worker.py", task_file],
-        cwd="/app/backend",
-        env=env,
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-    )
-    _active_workers[task_id] = proc
-
-    logger.info("Launched worker: task=%s model=%s gpu=%d pid=%d",
-                task_id, model_type, gpu_id, proc.pid)
-
-    return {"task_id": task_id, "model_type": model_type,
-            "gpu_id": gpu_id, "status": "pending",
-            "message": f"训练任务已启动 (GPU {gpu_id})"}
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, lambda: submit_training(
+        model_type=model_type,
+        max_stocks=max_stocks,
+        epochs=epochs,
+        min_days=min_days,
+        label_method=label_method,
+        pct_threshold=pct_threshold,
+        num_gpus=num_gpus,
+    ))
+    return result
 
 
 @router.get("/train_progress")
 async def train_progress():
-    """Get all training task statuses."""
-    return _all_tasks()
+    """Get all training task statuses from Ray ProgressActor."""
+    from ..services.ray_trainer import get_progress_actor
+    progress = get_progress_actor()
+    return await asyncio.get_running_loop().run_in_executor(
+        None, lambda: ray.get(progress.get_all.remote())
+    )
 
 
 @router.get("/train_progress/{task_id}")
 async def train_progress_by_id(task_id: str):
     """Get progress of a specific training task."""
-    task = _read_progress(task_id)
+    from ..services.ray_trainer import get_progress_actor
+    progress = get_progress_actor()
+    task = await asyncio.get_running_loop().run_in_executor(
+        None, lambda: ray.get(progress.get.remote(task_id))
+    )
     if not task:
         return {"error": "task not found"}
     return task
@@ -450,42 +312,24 @@ async def train_progress_by_id(task_id: str):
 @router.delete("/train_progress/{task_id}")
 async def cancel_training(task_id: str):
     """Cancel a running training task."""
-    proc = _active_workers.get(task_id)
-    if proc and proc.poll() is None:
-        proc.terminate()
-        del _active_workers[task_id]
-    # Update progress file
-    p = _progress_file(task_id)
-    if p.exists():
-        try:
-            data = json.loads(p.read_text())
-            data["status"] = "cancelled"
-            data["message"] = "已取消"
-            data["ended_at"] = _time.time()
-            p.write_text(json.dumps(data))
-        except Exception:
-            pass
+    from ..services.ray_trainer import get_progress_actor
+    progress = get_progress_actor()
+    task = ray.get(progress.get.remote(task_id))
+    if task:
+        ray.get(progress.update.remote(
+            task_id, status="cancelled", message="已取消", ended_at=_time.time(),
+        ))
     return {"status": "cancelled", "task_id": task_id}
 
 
 @router.delete("/train_progress")
 async def clear_history():
     """Clear completed/failed task history."""
-    removed = 0
-    for p in _PROGRESS_DIR.glob("*.json"):
-        if p.name.endswith(".tmp"):
-            p.unlink(missing_ok=True)
-            continue
-        try:
-            data = json.loads(p.read_text())
-            if data.get("status") in ("completed", "failed", "cancelled"):
-                p.unlink()
-                # Also remove task config
-                task_cfg = _PROGRESS_DIR / f"{data.get('task_id', '')}_task.json"
-                task_cfg.unlink(missing_ok=True)
-                removed += 1
-        except Exception:
-            pass
+    from ..services.ray_trainer import get_progress_actor
+    progress = get_progress_actor()
+    removed = await asyncio.get_running_loop().run_in_executor(
+        None, lambda: ray.get(progress.clear_finished.remote())
+    )
     return {"removed": removed}
 
 

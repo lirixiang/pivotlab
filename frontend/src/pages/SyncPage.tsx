@@ -31,6 +31,7 @@ const SYNC_ACTIONS: {
   { key: "stocks", label: "股票列表", desc: "同步全市场A股代码、名称、市场", icon: "fa-list", fn: () => api.syncStocks() },
   { key: "quotes", label: "实时行情", desc: "Tencent批量抓取全量行情快照", icon: "fa-chart-line", fn: () => api.syncQuotes() },
   { key: "financials", label: "基本面快照", desc: "EPS/ROE/营收增长/净利润 (后台)", icon: "fa-chart-pie", fn: () => api.syncFinancials() },
+  { key: "financial_history", label: "历史业绩", desc: "5年季度财报 EPS/ROE/营收/净利润", icon: "fa-chart-bar", fn: () => api.syncFinancialHistory() },
   { key: "concepts", label: "题材与概念", desc: "股票→概念板块映射 (后台)", icon: "fa-tags", fn: () => api.syncConcepts() },
   { key: "industry", label: "行业数据", desc: "行业归属与板块分类 (后台)", icon: "fa-industry", fn: () => api.syncIndustry() },
   { key: "analyst", label: "机构一致预期", desc: "目标价/评级/EPS预测 (后台)", icon: "fa-bullseye", fn: () => api.syncAnalyst() },

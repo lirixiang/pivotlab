@@ -1,11 +1,12 @@
 # PivotLab 智线
 
-> **自动支撑压力位 · 形态筛选 · 入场信号** —— 面向 A 股技术分析散户的开源辅助决策终端。
+> **自动支撑压力位 · 形态筛选 · AI 策略训练 · 多 GPU DDP** —— 面向 A 股技术分析散户的开源辅助决策终端。
 
 ## ✨ 核心能力
 
 - **自动画线**：基于 `scipy` 局部极值 + 价位聚类 + 均线动态，自动识别 R1/R2/R3 / S1/S2/S3 多档支撑压力位，附强度星级（1-5）和触及次数。
 - **形态筛选**：内置「**突破回踩**」「**下跌企稳**」两大量化形态扫描器，每只股票计算 0-100 综合评分（突破力度 / 回踩缩量 / 压力强度 / 多周期共振）。
+- **AI 策略训练**：5 种模型（Transformer / LSTM / CNN-LSTM / LightGBM / RL-PPO），支持单 GPU 和多 GPU DDP 分布式训练，Ray 统一调度。
 - **专业终端 UI**：深色三栏布局（自选 + 主图 + 信号面板），金色压力位 / 天青蓝支撑位双色体系，对标 Bloomberg / TradingView 视觉规范。
 - **开源数据**：使用 `akshare` 公开行情；网络不可用时自动回退到确定性 mock 数据，保证开发与演示永远可跑。
 
@@ -13,28 +14,63 @@
 
 ```
 pivotlab/
-├── backend/                FastAPI + scipy + akshare
-│   └── app/
-│       ├── routers/        market / stocks / screener / watchlist
-│       ├── services/
-│       │   ├── data_provider.py  akshare 适配 + mock 回退
-│       │   ├── levels.py          支撑压力位识别算法
-│       │   └── screener.py        形态扫描器
-│       └── main.py
-├── frontend/               Vite + React 18 + TS + Tailwind 3
+├── backend/                    FastAPI + Ray + PyTorch + scipy + akshare
+│   ├── app/
+│   │   ├── routers/            market / stocks / screener / watchlist / strategy
+│   │   ├── services/
+│   │   │   ├── data_provider.py    akshare 适配 + mock 回退 + DB 缓存
+│   │   │   ├── levels.py           支撑压力位识别算法
+│   │   │   ├── screener.py         形态扫描器
+│   │   │   ├── ai_strategy.py      5 种 AI 模型定义 & 训练逻辑
+│   │   │   ├── ray_trainer.py      Ray 分布式训练调度 (单 GPU / DDP)
+│   │   │   └── rl_strategy.py      RL-PPO 强化学习策略
+│   │   └── main.py                 Ray 初始化 (6 GPU)
+│   ├── train_cli.py                独立 CLI 训练脚本 (支持 DDP)
+│   └── models/                     训练产物 (.pt / .pkl)
+├── frontend/                   Vite + React 18 + TS + Tailwind 3
 │   └── src/
-│       ├── components/     TopBar / Watchlist / Chart / Signal / Screener
+│       ├── components/         TopBar / Watchlist / Chart / Signal / Screener
+│       ├── pages/StrategyPage  AI 策略训练界面 (GPU 选择 / 进度)
 │       ├── services/api.ts
 │       └── App.tsx
-├── prototype/              静态 HTML 原型（设计基线）
-├── Dockerfile              单镜像：前端构建 + nginx + FastAPI
-├── docker-compose.yml      单容器运行
-└── Makefile                常用命令
+├── prototype/                  静态 HTML 原型（设计基线）
+├── Dockerfile                  单镜像：前端构建 + nginx + uvicorn
+├── docker-compose.yml          app + PostgreSQL，支持 NVIDIA GPU
+└── Makefile                    常用命令
 ```
+
+## 🖥️ 硬件要求
+
+| 组件 | 最低要求 | 推荐配置 |
+|---|---|---|
+| GPU | 1× NVIDIA GPU (≥8GB) | 多卡 (如 6× RTX 3080 Ti) |
+| 显存 | 8 GB | 11 GB × N |
+| 内存 | 16 GB | 64 GB+ |
+| Docker | 20.10+ (nvidia-container-toolkit) | 27.x + nvidia runtime |
+| CUDA | 12.0+ | 12.8+ |
 
 ## 🚀 快速开始
 
-### 本地开发（推荐）
+### Docker 部署（推荐）
+
+```bash
+cd pivotlab
+
+# 启动 (自动构建镜像，挂载 GPU)
+docker-compose up -d
+
+# 查看日志
+docker-compose logs -f app
+
+# 停止
+docker-compose down
+```
+
+启动后：
+- `http://localhost:9173` — 前端页面（nginx 反代 `/api`）
+- `http://localhost:8001/api/health` — 直连 FastAPI 后端
+
+### 本地开发
 
 ```bash
 # 1. 后端
@@ -48,18 +84,114 @@ npm install
 npm run dev              # http://localhost:5173
 ```
 
-### Docker 一键启动
+## 🤖 AI 策略训练
+
+### 支持的模型
+
+| 模型 | 类型 | 设备 | 说明 |
+|---|---|---|---|
+| `transformer` | 时序分类 | GPU | 多头自注意力，捕捉长周期特征 |
+| `lstm` | 时序分类 | GPU | 双层 LSTM + 全连接 |
+| `cnn_lstm` | 时序分类 | GPU | 1D 卷积提取局部特征 + LSTM 时序建模 |
+| `lightgbm` | 梯度提升树 | CPU | 高效基线模型，特征工程驱动 |
+| `rl_ppo` | 强化学习 | GPU | PPO 策略优化，直接学习交易动作 |
+
+### Web 界面训练
+
+通过前端 **策略页面** 提交训练任务：
+- 选择模型类型、股票数量、训练轮数
+- 选择 GPU 数量（1 = 单卡，2-6 = DDP 多卡并行）
+- 实时查看训练进度、loss、accuracy
+
+### API 训练
 
 ```bash
-make up                  # 前端+反代 :5173 / 直连后端 :8001
-make logs
-make down
+# 单 GPU 训练
+curl -X POST http://localhost:8001/api/strategy/train_market \
+  -H "Content-Type: application/json" \
+  -d '{"model_type":"transformer","max_stocks":200,"epochs":50,"num_gpus":1}'
+
+# 多 GPU DDP 训练 (3 卡)
+curl -X POST http://localhost:8001/api/strategy/train_market \
+  -H "Content-Type: application/json" \
+  -d '{"model_type":"transformer","max_stocks":200,"epochs":50,"num_gpus":3}'
+
+# 查看进度
+curl http://localhost:8001/api/strategy/train_progress
+
+# 全部 5 个模型并行训练
+curl -X POST http://localhost:8001/api/strategy/train_market \
+  -H "Content-Type: application/json" \
+  -d '{"model_type":"all","max_stocks":200,"epochs":50,"num_gpus":1}'
 ```
 
-Docker 模式下只启动一个容器：
+### CLI 独立训练
 
-- `http://localhost:5173`：前端页面，同时通过 nginx 反代 `/api`
-- `http://localhost:8001/api/health`：直连 FastAPI，便于调试接口
+不依赖 Web 服务，直接在容器内执行：
+
+```bash
+# 单 GPU — 指定 GPU 编号
+docker exec pivotlab python /app/backend/train_cli.py \
+  --model transformer --stocks 200 --epochs 50 --gpu 0
+
+# 多 GPU DDP — 自动连接 Ray 集群
+docker exec pivotlab python /app/backend/train_cli.py \
+  --model transformer --stocks 200 --epochs 50 --num-gpus 3
+
+# 6 卡满载 DDP
+docker exec pivotlab python /app/backend/train_cli.py \
+  --model lstm --stocks 500 --epochs 30 --num-gpus 6
+
+# 全部模型 (PyTorch 模型走 DDP, LightGBM 走 CPU)
+docker exec pivotlab python /app/backend/train_cli.py \
+  --model all --stocks 200 --epochs 50 --num-gpus 3
+
+# 仅 CPU (LightGBM)
+docker exec pivotlab python /app/backend/train_cli.py \
+  --model lightgbm --stocks 500
+
+# 导出结果到 JSON
+docker exec pivotlab python /app/backend/train_cli.py \
+  --model transformer --stocks 100 --epochs 20 --gpu 0 --output /app/backend/models/result.json
+```
+
+**CLI 参数说明：**
+
+| 参数 | 简写 | 默认值 | 说明 |
+|---|---|---|---|
+| `--model` | `-m` | 必填 | 模型类型: transformer / lstm / cnn_lstm / lightgbm / rl_ppo / all |
+| `--stocks` | `-s` | 200 | 最大股票数量 |
+| `--epochs` | `-e` | 50 | 训练轮数 |
+| `--gpu` | `-g` | auto | 单 GPU 模式下的 GPU 编号，-1 强制 CPU |
+| `--num-gpus` | `-n` | 1 | GPU 数量，>1 启用 DDP 分布式训练 |
+| `--min-days` | — | 200 | 每只股票最少 K 线天数 |
+| `--label-method` | — | zigzag | 标注方法 |
+| `--pct-threshold` | — | 5.0 | 涨跌幅标注阈值 (%) |
+| `--output` | `-o` | — | 将结果保存为 JSON 文件 |
+
+## 🔧 DDP 分布式训练原理
+
+```
+submit_training(num_gpus=3)
+    │
+    ├── 1. 在主进程构建数据集 (一次性，避免 ORDER BY random() 导致各 worker 数据不一致)
+    ├── 2. ray.put(dataset) → 放入 Ray Object Store
+    ├── 3. TorchTrainer(scaling_config=3 workers, 1 GPU each)
+    │
+    └── 每个 Worker (rank 0/1/2):
+         ├── ray.get(dataset_ref) → 取出相同数据
+         ├── prepare_data_loader() → DistributedSampler 自动分片
+         ├── prepare_model() → DistributedDataParallel 包装
+         ├── 训练循环: forward → backward → NCCL all-reduce 梯度同步
+         ├── rt.report() → 所有 rank 同步 barrier (每个 epoch)
+         └── rank 0: 保存最优模型 + 汇报进度
+```
+
+**关键设计：**
+- 数据集预构建：避免 `ORDER BY random()` 导致各 worker 数据不一致
+- `drop_last=True`：保证所有 worker 的 batch 数量相同
+- `rt.report()` 每个 epoch 所有 rank 都调用：避免 barrier 死锁
+- 最终评估使用非分布式 DataLoader：确保指标准确
 
 ## 📡 主要 API
 
@@ -71,6 +203,8 @@ Docker 模式下只启动一个容器：
 | `GET /api/screener/breakout_pullback` | 突破回踩形态扫描 |
 | `GET /api/screener/bottom_stabilize` | 下跌企稳形态扫描 |
 | `GET /api/watchlist` / `POST` / `DELETE /{code}` | 自选股管理 |
+| `POST /api/strategy/train_market` | 提交 AI 训练任务 |
+| `GET /api/strategy/train_progress` | 查询训练进度 |
 
 ## ⚙️ 算法配置
 

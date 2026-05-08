@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
-from ..models import WatchlistItem, QuoteCache, Stock
+from ..models import WatchlistItem, DailyCandle, Stock
 from ..schemas import WatchlistCreate
 from ..services.data_provider import get_candles, get_quote
 from ..services.levels_multifactor import (
@@ -37,9 +37,13 @@ async def list_watchlist(db: AsyncSession = Depends(get_db)):
         return []
 
     codes = [r.code for r in rows]
-    # Batch-load quotes and stock info
+    # Batch-load today's candle data (replaces quote_cache)
+    from datetime import date as _date
+    today = _date.today().strftime("%Y-%m-%d")
     quotes = {}
-    qrows = (await db.execute(select(QuoteCache).where(QuoteCache.code.in_(codes)))).scalars().all()
+    qrows = (await db.execute(
+        select(DailyCandle).where(DailyCandle.code.in_(codes), DailyCandle.trade_date == today)
+    )).scalars().all()
     for q in qrows:
         quotes[q.code] = q
 
@@ -58,7 +62,7 @@ async def list_watchlist(db: AsyncSession = Depends(get_db)):
             "name": (s.name if s else "") or r.name,
             "note": r.note,
             "industry": s.industry if s else "",
-            "price": q.price if q else 0.0,
+            "price": q.close if q else 0.0,
             "change_pct": q.change_pct if q else 0.0,
             "volume": q.volume if q else 0.0,
             "amount": q.amount if q else 0.0,

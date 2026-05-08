@@ -18,27 +18,6 @@ class Stock(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
-# --------------- Real-time quote cache ---------------
-class QuoteCache(Base):
-    __tablename__ = "quote_cache"
-
-    code: Mapped[str] = mapped_column(String(10), primary_key=True)
-    name: Mapped[str] = mapped_column(String(50), default="")
-    price: Mapped[float] = mapped_column(Float, default=0.0)
-    change_pct: Mapped[float] = mapped_column(Float, default=0.0)
-    change_amt: Mapped[float] = mapped_column(Float, default=0.0)
-    volume: Mapped[float] = mapped_column(Float, default=0.0)
-    amount: Mapped[float] = mapped_column(Float, default=0.0)
-    open: Mapped[float] = mapped_column(Float, default=0.0)
-    high: Mapped[float] = mapped_column(Float, default=0.0)
-    low: Mapped[float] = mapped_column(Float, default=0.0)
-    prev_close: Mapped[float] = mapped_column(Float, default=0.0)
-    turnover_rate: Mapped[float] = mapped_column(Float, default=0.0)
-    pe_ratio: Mapped[float] = mapped_column(Float, default=0.0)
-    market_cap: Mapped[float] = mapped_column(Float, default=0.0)
-    cached_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-
-
 # --------------- Fundamental snapshot ---------------
 class FinancialSnapshot(Base):
     __tablename__ = "financial_snapshots"
@@ -69,6 +48,28 @@ class StockConcept(Base):
     __table_args__ = (
         UniqueConstraint("code", "concept"),
         Index("idx_stock_concepts_code", "code"),
+    )
+
+
+# --------------- Historical financial reports ---------------
+class FinancialHistory(Base):
+    __tablename__ = "financial_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(10), nullable=False)
+    report_period: Mapped[str] = mapped_column(String(10), nullable=False)  # YYYY-MM-DD (quarter end)
+    eps: Mapped[float] = mapped_column(Float, default=0.0)
+    roe: Mapped[float] = mapped_column(Float, default=0.0)
+    revenue: Mapped[float] = mapped_column(Float, default=0.0)       # total revenue (yuan)
+    net_profit: Mapped[float] = mapped_column(Float, default=0.0)    # net profit (yuan)
+    revenue_yoy: Mapped[float] = mapped_column(Float, default=0.0)   # revenue yoy growth %
+    net_profit_yoy: Mapped[float] = mapped_column(Float, default=0.0)  # net profit yoy growth %
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("code", "report_period"),
+        Index("idx_fin_history_code", "code"),
+        Index("idx_fin_history_period", "report_period"),
     )
 
 
@@ -108,6 +109,15 @@ class DailyCandle(Base):
     low: Mapped[float] = mapped_column(Float)
     close: Mapped[float] = mapped_column(Float)
     volume: Mapped[float] = mapped_column(Float)
+    # -- Quote fields (populated for today's row by sync_quotes) --
+    amount: Mapped[float] = mapped_column(Float, nullable=True)
+    change_pct: Mapped[float] = mapped_column(Float, nullable=True)
+    change_amt: Mapped[float] = mapped_column(Float, nullable=True)
+    prev_close: Mapped[float] = mapped_column(Float, nullable=True)
+    turnover_rate: Mapped[float] = mapped_column(Float, nullable=True)
+    pe_ratio: Mapped[float] = mapped_column(Float, nullable=True)
+    market_cap: Mapped[float] = mapped_column(Float, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("code", "trade_date"),

@@ -1053,6 +1053,7 @@ const MODEL_LABELS: Record<string, string> = {
 function MarketTrainPanel({ modelType, onTrained }: { modelType: ModelType; onTrained: () => void }) {
   const [maxStocks, setMaxStocks] = useState(200);
   const [epochs, setEpochs] = useState(100);
+  const [numGpus, setNumGpus] = useState(1);
   const [tasks, setTasks] = useState<TrainTask[]>([]);
   const [launching, setLaunching] = useState(false);
 
@@ -1076,7 +1077,7 @@ function MarketTrainPanel({ modelType, onTrained }: { modelType: ModelType; onTr
 
   const launch = (type: string) => {
     setLaunching(true);
-    api.aiTrainMarket({ model_type: type, max_stocks: maxStocks, epochs })
+    api.aiTrainMarket({ model_type: type, max_stocks: maxStocks, epochs, num_gpus: numGpus })
       .then(() => api.aiTrainProgress().then(setTasks))
       .catch(() => {})
       .finally(() => setLaunching(false));
@@ -1095,12 +1096,12 @@ function MarketTrainPanel({ modelType, onTrained }: { modelType: ModelType; onTr
   return (
     <div className="bg-ink-900 rounded-xl border border-ink-800 p-4 space-y-3">
       <h3 className="text-xs font-semibold text-ink-300 flex items-center gap-2">
-        <i className="fas fa-server text-[10px]" /> 全市场分布式训练
-        <span className="text-[10px] text-ink-600 font-normal">6x RTX 3080 Ti</span>
+        <i className="fas fa-server text-[10px]" /> Ray 分布式训练
+        <span className="text-[10px] text-ink-600 font-normal">6x RTX 3080 Ti · Ray DDP</span>
       </h3>
 
       {/* Config */}
-      <div className="grid grid-cols-2 gap-2">
+      <div className="grid grid-cols-3 gap-2">
         <div>
           <label className="text-[10px] text-ink-500 mb-0.5 block">样本股数</label>
           <input type="number" className="inp w-full text-xs" value={maxStocks}
@@ -1111,12 +1112,21 @@ function MarketTrainPanel({ modelType, onTrained }: { modelType: ModelType; onTr
           <input type="number" className="inp w-full text-xs" value={epochs}
                  onChange={(e) => setEpochs(Number(e.target.value))} min={10} max={500} />
         </div>
+        <div>
+          <label className="text-[10px] text-ink-500 mb-0.5 block">GPU</label>
+          <select className="inp w-full text-xs" value={numGpus}
+                  onChange={(e) => setNumGpus(Number(e.target.value))}>
+            {[1, 2, 3, 4, 5, 6].map((n) => (
+              <option key={n} value={n}>{n} GPU{n > 1 ? " DDP" : ""}</option>
+            ))}
+          </select>
+        </div>
       </div>
 
       {/* Launch buttons */}
       <div className="flex gap-1.5 flex-wrap">
         <button className="btn-gold text-[11px] px-3 py-1.5" onClick={() => launch("all")} disabled={launching}>
-          <i className="fas fa-rocket mr-1" /> 全部训练 (5 GPU)
+          <i className="fas fa-rocket mr-1" /> 全部训练 (Ray)
         </button>
         <button className="btn-outline text-[11px] px-2 py-1.5" onClick={() => launch(modelType === "ensemble" ? "rl_ppo" : modelType)}
                 disabled={launching}>
@@ -1134,7 +1144,9 @@ function MarketTrainPanel({ modelType, onTrained }: { modelType: ModelType; onTr
                 <div className="flex items-center justify-between mb-1.5">
                   <div className="flex items-center gap-2">
                     <span className={`text-xs font-semibold ${c.text}`}>{MODEL_LABELS[t.model_type]}</span>
-                    <span className="text-[10px] text-ink-500">GPU {t.gpu_id ?? "?"}</span>
+                    <span className="text-[10px] text-ink-500">
+                      {typeof t.gpu_id === "number" && t.gpu_id > 1 ? `${t.gpu_id} GPU DDP` : t.gpu_id === -1 ? "CPU" : "1 GPU"}
+                    </span>
                     <span className="text-[10px] text-ink-600">{t.task_id}</span>
                   </div>
                   <button onClick={() => cancel(t.task_id)} className="text-[10px] text-red-500 hover:text-red-400">
@@ -1223,7 +1235,8 @@ function ScanPanel({
   const [threshold, setThreshold] = useState(0.35);
   const [launching, setLaunching] = useState(false);
   const [tasks, setTasks] = useState<ScanTask[]>([]);
-  const [sortKey, setSortKey] = useState<"confidence" | "risk_reward">("confidence");
+  const [sortKey, setSortKey] = useState<keyof ScanHit>(() => (localStorage.getItem("aiscan_sortKey") as keyof ScanHit) || "confidence");
+  const [sortAsc, setSortAsc] = useState(() => localStorage.getItem("aiscan_sortAsc") === "true");
 
   // Poll progress
   useEffect(() => {
@@ -1265,9 +1278,23 @@ function ScanPanel({
   const activeTask = tasks.find((t) => ["pending", "loading", "scanning"].includes(t.status));
   const latestDone = tasks.find((t) => t.status === "completed");
   const results = (activeTask?.results ?? latestDone?.results ?? []);
-  const sorted = [...results].sort((a, b) =>
-    sortKey === "confidence" ? b.confidence - a.confidence : b.risk_reward - a.risk_reward
-  );
+  const toggleSort = (key: keyof ScanHit) => {
+    if (sortKey === key) {
+      const next = !sortAsc;
+      setSortAsc(next);
+      localStorage.setItem("aiscan_sortAsc", String(next));
+    } else {
+      setSortKey(key);
+      setSortAsc(false);
+      localStorage.setItem("aiscan_sortKey", key);
+      localStorage.setItem("aiscan_sortAsc", "false");
+    }
+  };
+  const sorted = [...results].sort((a, b) => {
+    const av = a[sortKey], bv = b[sortKey];
+    const cmp = typeof av === "number" && typeof bv === "number" ? av - bv : String(av).localeCompare(String(bv));
+    return sortAsc ? cmp : -cmp;
+  });
 
   // Group by action
   const buys = sorted.filter((r) => r.action === "buy");
@@ -1422,21 +1449,9 @@ function ScanPanel({
           </div>
         )}
 
-        {/* Sort controls */}
         {results.length > 0 && (
-          <div className="flex items-center gap-3">
-            <span className="text-xs text-ink-500">排序:</span>
-            <button className={`text-xs px-2 py-1 rounded ${sortKey === "confidence" ? "bg-ink-800 text-white" : "text-ink-500"}`}
-                    onClick={() => setSortKey("confidence")}>
-              按置信度
-            </button>
-            <button className={`text-xs px-2 py-1 rounded ${sortKey === "risk_reward" ? "bg-ink-800 text-white" : "text-ink-500"}`}
-                    onClick={() => setSortKey("risk_reward")}>
-              按盈亏比
-            </button>
-            <span className="text-[10px] text-ink-600 ml-auto">
-              共 {results.length} 个信号
-            </span>
+          <div className="text-[10px] text-ink-600 text-right">
+            共 {results.length} 个信号
           </div>
         )}
 
@@ -1446,16 +1461,27 @@ function ScanPanel({
             <table className="w-full text-xs">
               <thead>
                 <tr className="text-ink-500 border-b border-ink-800 bg-ink-850">
-                  <th className="text-left py-2 px-3">股票</th>
-                  <th className="text-center py-2 px-2">模型</th>
-                  <th className="text-center py-2 px-2">信号</th>
-                  <th className="text-right py-2 px-2">置信度</th>
-                  <th className="text-right py-2 px-2">当前价</th>
-                  <th className="text-right py-2 px-2">入场价</th>
-                  <th className="text-right py-2 px-2">止损价</th>
-                  <th className="text-right py-2 px-2">目标价</th>
-                  <th className="text-right py-2 px-2">盈亏比</th>
-                  <th className="text-center py-2 px-2">趋势</th>
+                  {([
+                    { key: "name", label: "股票", align: "left", px: "px-3" },
+                    { key: "model", label: "模型", align: "center" },
+                    { key: "action", label: "信号", align: "center" },
+                    { key: "confidence", label: "置信度", align: "right" },
+                    { key: "current_price", label: "当前价", align: "right" },
+                    { key: "entry_price", label: "入场价", align: "right" },
+                    { key: "stop_loss", label: "止损价", align: "right" },
+                    { key: "target_price", label: "目标价", align: "right" },
+                    { key: "risk_reward", label: "盈亏比", align: "right" },
+                    { key: "trend", label: "趋势", align: "center" },
+                  ] as { key: keyof ScanHit; label: string; align: string; px?: string }[]).map((col) => (
+                    <th key={col.key}
+                        className={`text-${col.align} py-2 ${col.px ?? "px-2"} cursor-pointer select-none hover:text-ink-300 transition-colors whitespace-nowrap`}
+                        onClick={() => toggleSort(col.key)}>
+                      {col.label}
+                      {sortKey === col.key && (
+                        <i className={`fas fa-caret-${sortAsc ? "up" : "down"} ml-1 text-[9px] text-blue-400`} />
+                      )}
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody>

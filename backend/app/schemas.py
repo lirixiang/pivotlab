@@ -67,6 +67,15 @@ class ScreenerItem(BaseModel):
     pullback_price: float | None = None
     distance_to_support_pct: float | None = None
     triggers: list[str] = Field(default_factory=list)
+    market: str = ""
+    industry: str = ""
+    market_cap: float = 0  # 亿元
+    amount: float = 0  # 成交额（万元）
+    rr_ratio: float = 0  # 盈亏比
+    support_score: float = 0  # 支撑位强度 (0-100)
+    concept: str = ""  # 概念板块
+    fundamental_status: str = ""  # healthy/neutral/weak/risk
+    fundamental_summary: str = ""  # 基本面摘要
 
 
 class ScreenerResponse(BaseModel):

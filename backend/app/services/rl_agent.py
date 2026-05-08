@@ -52,8 +52,8 @@ class TradingEnv(gym.Env):
         super().__init__()
         self.candles = candles
         self.commission = commission
-        # obs = 12 technical features + 2 position features (alloc, unrealised_pnl)
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32)
+        # obs = 17 technical features + 2 position features (alloc, unrealised_pnl)
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(len(FEATURE_NAMES) + 2,), dtype=np.float32)
         self.action_space = spaces.Discrete(len(self.ACTIONS))
         self._start_idx = 30
         self._idx = self._start_idx

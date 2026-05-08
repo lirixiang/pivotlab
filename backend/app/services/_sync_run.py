@@ -25,6 +25,7 @@ TASK_REGISTRY = {
     "stocks":             "sync_stock_list",
     "quotes":             "sync_quotes",
     "financials":         "sync_financials",
+    "financial_history":  "sync_financial_history",
     "concepts":           "sync_concepts",
     "industry":           "sync_industry",
     "daily_candles":      "sync_candles",

@@ -19,8 +19,8 @@ from sqlalchemy import select, delete, text
 from sqlalchemy.orm import Session
 
 from ..models import (
-    Stock, QuoteCache, FinancialSnapshot, StockConcept, SyncTask, DailyCandle,
-    AnalystConsensus,
+    Stock, FinancialSnapshot, StockConcept, SyncTask, DailyCandle,
+    AnalystConsensus, FinancialHistory,
 )
 from ..database import DATABASE_URL
 from . import tencent_provider
@@ -309,62 +309,165 @@ def _sync_stock_list_em(_task_id: int = None) -> int:
 # ═══════════════════════════════════════════════════════════════
 
 def sync_quotes(_task_id: int = None) -> int:
-    """Sync real-time quotes for all stocks in DB via Tencent."""
+    """Sync real-time quotes for all stocks via EM clist batch API.
+
+    Fetches all A-share quotes in ~17s (56 pages × 100/page).
+    Replaces old per-stock Tencent approach.
+    """
+    import requests
+
     task_id = _get_or_create_task("quotes", _task_id)
     if task_id == -1:
         logger.info("task already running, skipping")
         return -1
     try:
-        with _get_session() as s:
-            codes = [r[0] for r in s.execute(select(Stock.code)).fetchall()]
-        if not codes:
-            _finish_task(task_id, 0, 0, "no stocks in DB — run stock list sync first")
+        url = "https://push2.eastmoney.com/api/qt/clist/get"
+        session = requests.Session()
+        session.headers["User-Agent"] = "Mozilla/5.0"
+
+        # f2=close, f3=chg%, f4=chg, f5=vol, f6=amt, f8=turnover, f9=PE
+        # f12=code, f14=name, f15=high, f16=low, f17=open, f18=prevClose, f20=mktcap
+        fields = "f2,f3,f4,f5,f6,f8,f9,f12,f14,f15,f16,f17,f18,f20"
+
+        all_quotes = []
+        page = 1
+        total = 0
+
+        while True:
+            params = {
+                "pn": page, "pz": 100, "po": 1, "np": 1,
+                "fltt": 2, "invt": 2, "fid": "f12",
+                "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
+                "fields": fields,
+            }
+            try:
+                resp = session.get(url, params=params, timeout=10)
+                data = resp.json().get("data", {})
+                items = data.get("diff", [])
+            except Exception:
+                break
+
+            if not items:
+                break
+            if page == 1:
+                total = data.get("total", 0)
+                logger.info("sync_quotes: %d stocks via EM clist", total)
+
+            for item in items:
+                code = item.get("f12")
+                close = item.get("f2")
+                if not code or close is None or close == "-":
+                    continue
+                try:
+                    all_quotes.append({
+                        "code": code,
+                        "name": str(item.get("f14") or ""),
+                        "price": float(close),
+                        "change_pct": float(item.get("f3") or 0),
+                        "change_amt": float(item.get("f4") or 0),
+                        "volume": float(item.get("f5") or 0),
+                        "amount": float(item.get("f6") or 0),
+                        "open": float(item.get("f17") or 0) if item.get("f17") != "-" else 0.0,
+                        "high": float(item.get("f15") or 0) if item.get("f15") != "-" else 0.0,
+                        "low": float(item.get("f16") or 0) if item.get("f16") != "-" else 0.0,
+                        "prev_close": float(item.get("f18") or 0) if item.get("f18") != "-" else 0.0,
+                        "turnover_rate": float(item.get("f8") or 0) if item.get("f8") != "-" else 0.0,
+                        "pe_ratio": float(item.get("f9") or 0) if item.get("f9") != "-" else 0.0,
+                        "market_cap": float(item.get("f20") or 0) if item.get("f20") != "-" else 0.0,
+                    })
+                except (ValueError, TypeError):
+                    continue
+
+            page += 1
+            if page > 200:
+                break
+
+        session.close()
+
+        if not all_quotes:
+            _finish_task(task_id, 0, 0, "no quotes from EM clist API")
             return task_id
 
-        total = len(codes)
-        logger.info("sync_quotes: fetching %d stocks", total)
+        # Bulk upsert into daily_candles (today's row)
+        from datetime import date as _date
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-        # Batch fetch via tencent (100 per batch)
-        all_quotes = tencent_provider.fetch_quotes(codes)
-        processed = 0
+        today = _date.today().strftime("%Y-%m-%d")
         now = datetime.utcnow()
+        processed = 0
 
         with _get_session() as s:
+            batch = []
             for q in all_quotes:
-                code = q.get("code", "")
-                if not code:
-                    continue
-                existing = s.get(QuoteCache, code)
-                data = {
-                    "code": code,
-                    "name": q.get("name", ""),
-                    "price": q.get("price", 0.0),
-                    "change_pct": q.get("change_pct", 0.0),
-                    "change_amt": q.get("change_amt", 0.0),
-                    "volume": q.get("volume", 0.0),
-                    "amount": q.get("amount", 0.0),
-                    "open": q.get("open", 0.0),
-                    "high": q.get("high", 0.0),
-                    "low": q.get("low", 0.0),
-                    "prev_close": q.get("prev_close", 0.0),
-                    "turnover_rate": q.get("turnover_rate", 0.0),
-                    "pe_ratio": q.get("pe_ratio", 0.0),
-                    "market_cap": q.get("market_cap", 0.0),
-                    "cached_at": now,
-                }
-                if existing:
-                    for k, v in data.items():
-                        setattr(existing, k, v)
-                else:
-                    s.add(QuoteCache(**data))
-                processed += 1
-                if processed % 500 == 0:
+                batch.append({
+                    "code": q["code"],
+                    "trade_date": today,
+                    "open": q["open"],
+                    "high": q["high"],
+                    "low": q["low"],
+                    "close": q["price"],
+                    "volume": q["volume"],
+                    "amount": q["amount"],
+                    "change_pct": q["change_pct"],
+                    "change_amt": q["change_amt"],
+                    "prev_close": q["prev_close"],
+                    "turnover_rate": q["turnover_rate"],
+                    "pe_ratio": q["pe_ratio"],
+                    "market_cap": q["market_cap"],
+                    "updated_at": now,
+                })
+                if len(batch) >= 1000:
+                    stmt = pg_insert(DailyCandle).values(batch)
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=["code", "trade_date"],
+                        set_={
+                            "open": stmt.excluded.open,
+                            "high": stmt.excluded.high,
+                            "low": stmt.excluded.low,
+                            "close": stmt.excluded.close,
+                            "volume": stmt.excluded.volume,
+                            "amount": stmt.excluded.amount,
+                            "change_pct": stmt.excluded.change_pct,
+                            "change_amt": stmt.excluded.change_amt,
+                            "prev_close": stmt.excluded.prev_close,
+                            "turnover_rate": stmt.excluded.turnover_rate,
+                            "pe_ratio": stmt.excluded.pe_ratio,
+                            "market_cap": stmt.excluded.market_cap,
+                            "updated_at": stmt.excluded.updated_at,
+                        },
+                    )
+                    s.execute(stmt)
                     s.commit()
+                    processed += len(batch)
                     _update_task_progress(task_id, processed, total)
-            s.commit()
+                    batch = []
+            # flush remaining
+            if batch:
+                stmt = pg_insert(DailyCandle).values(batch)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["code", "trade_date"],
+                    set_={
+                        "open": stmt.excluded.open,
+                        "high": stmt.excluded.high,
+                        "low": stmt.excluded.low,
+                        "close": stmt.excluded.close,
+                        "volume": stmt.excluded.volume,
+                        "amount": stmt.excluded.amount,
+                        "change_pct": stmt.excluded.change_pct,
+                        "change_amt": stmt.excluded.change_amt,
+                        "prev_close": stmt.excluded.prev_close,
+                        "turnover_rate": stmt.excluded.turnover_rate,
+                        "pe_ratio": stmt.excluded.pe_ratio,
+                        "market_cap": stmt.excluded.market_cap,
+                        "updated_at": stmt.excluded.updated_at,
+                    },
+                )
+                s.execute(stmt)
+                s.commit()
+                processed += len(batch)
 
         _finish_task(task_id, processed, total)
-        logger.info("sync_quotes: saved %d quotes", processed)
+        logger.info("sync_quotes: saved %d quotes → daily_candles (today=%s)", processed, today)
     except Exception as e:
         logger.error("sync_quotes error: %s", e)
         _finish_task(task_id, 0, 0, str(e))
@@ -375,27 +478,137 @@ def sync_quotes(_task_id: int = None) -> int:
 #  3. Financial snapshot sync
 # ═══════════════════════════════════════════════════════════════
 
-def _classify_fundamental(eps: float, roe: float, rev_yoy: float, np_yoy: float) -> tuple[str, str]:
-    """Return (status, summary) based on financial metrics."""
-    if roe > 15 and np_yoy > 10 and eps > 0:
-        return "healthy", f"ROE {roe:.1f}% 净利润增 {np_yoy:.1f}% 盈利质量良好"
-    if roe > 8 and np_yoy > 0:
-        return "neutral", f"ROE {roe:.1f}% 盈利稳定"
-    if roe < 0 or np_yoy < -20:
-        return "risk", f"ROE {roe:.1f}% 净利润增 {np_yoy:.1f}% 业绩承压"
-    if np_yoy < 0 or roe < 5:
-        return "weak", f"ROE {roe:.1f}% 净利润增 {np_yoy:.1f}% 基本面偏弱"
-    return "neutral", f"ROE {roe:.1f}% 基本面中性"
+def _classify_fundamental(eps: float, roe: float, rev_yoy: float, np_yoy: float,
+                          pe: float = 0, industry_pe: float = 0) -> tuple[str, str]:
+    """Multi-metric scoring system (SR-platform style).
+
+    Scoring:
+      PE:      relative to industry PE if available, else absolute brackets
+      EPS:     >0 → +1, ≤0 → -2
+      ROE:     ≥15% → +2, ≥8% → +1, <0% → -2
+      Revenue: ≥20% → +2, ≥5% → +1, <-10% → -2
+      NetProf: ≥20% → +3, ≥5% → +2, <-20% → -3, <0% → -1
+
+    Status: ≥5 healthy, ≥2 neutral, ≥1 weak (was ≥-1), <1 risk
+    """
+    score = 0
+    tags = []
+    available = 0
+
+    # PE (industry-relative first, then absolute)
+    if pe > 0:
+        available += 1
+        if industry_pe and industry_pe > 0:
+            relative = pe / industry_pe
+            if relative <= 0.8:
+                score += 2
+                tags.append("低于行业估值")
+            elif relative <= 1.2:
+                score += 1
+            elif relative <= 1.5:
+                score -= 1
+                tags.append("高于行业估值")
+            else:
+                score -= 2
+                tags.append("显著高于行业")
+        else:
+            if pe <= 25:
+                score += 2
+                tags.append(f"PE {pe:.0f}")
+            elif pe <= 45:
+                score += 1
+            elif pe > 80:
+                score -= 2
+                tags.append(f"PE {pe:.0f}")
+    elif pe < 0:
+        available += 1
+        score -= 2
+        tags.append("PE异常")
+
+    # EPS
+    if eps != 0 or roe != 0:
+        available += 1
+        if eps > 0:
+            score += 1
+        else:
+            score -= 2
+            tags.append("EPS为负")
+
+    # ROE
+    if roe != 0 or eps != 0:
+        available += 1
+        if roe >= 15:
+            score += 2
+            tags.append(f"ROE {roe:.1f}%")
+        elif roe >= 8:
+            score += 1
+            tags.append(f"ROE {roe:.1f}%")
+        elif roe < 0:
+            score -= 2
+            tags.append(f"ROE为负")
+
+    # Revenue YoY
+    if rev_yoy != 0:
+        available += 1
+        if rev_yoy >= 20:
+            score += 2
+            tags.append(f"营收+{rev_yoy:.0f}%")
+        elif rev_yoy >= 5:
+            score += 1
+        elif rev_yoy < -10:
+            score -= 2
+            tags.append(f"营收{rev_yoy:.0f}%")
+
+    # Net Profit YoY (highest weight)
+    if np_yoy != 0:
+        available += 1
+        if np_yoy >= 20:
+            score += 3
+            tags.append(f"净利+{np_yoy:.0f}%")
+        elif np_yoy >= 5:
+            score += 2
+        elif np_yoy < -20:
+            score -= 3
+            tags.append(f"净利{np_yoy:.0f}%")
+        elif np_yoy < 0:
+            score -= 1
+
+    # Not enough data
+    if available < 3:
+        return "unknown", "数据不足"
+
+    # Classify
+    if score >= 5:
+        status = "healthy"
+    elif score >= 2:
+        status = "neutral"
+    elif score >= -1:
+        status = "weak"
+    else:
+        status = "risk"
+
+    # Build summary
+    tag_str = " · ".join(tags[:3]) if tags else ""
+    label_map = {"healthy": "基本面偏强", "neutral": "基本面中性", "weak": "基本面偏弱", "risk": "基本面风险"}
+    summary = f"{label_map[status]}({score}分)"
+    if tag_str:
+        summary += f" {tag_str}"
+
+    return status, summary
 
 
 def sync_financials(_task_id: int = None) -> int:
     """Sync financial snapshots for all stocks via East Money batch API.
 
     Uses RPT_LICO_FN_CPD with ISNEW=1 to get the latest report per stock
-    in bulk (500 per page), instead of calling akshare per-stock.
+    in bulk (500 per page). Enriches with:
+      - EPS TTM (computed from financial_history)
+      - PE ratio (from today's daily_candles)
+      - Industry average PE (for relative scoring)
     ~11000 stocks in ~60 seconds.
     """
     import requests as _req
+    from datetime import date as _date
 
     task_id = _get_or_create_task("financials", _task_id)
     if task_id == -1:
@@ -407,6 +620,70 @@ def sync_financials(_task_id: int = None) -> int:
     columns = "SECURITY_CODE,BASIC_EPS,WEIGHTAVG_ROE,YSTZ,SJLTZ,TOTAL_OPERATE_INCOME,PARENT_NETPROFIT,REPORTDATE"
 
     try:
+        # Pre-load: EPS history for TTM calculation
+        eps_history: dict[str, dict[str, float]] = {}  # code → {period: eps}
+        with _get_session() as s:
+            hist_rows = s.execute(
+                select(FinancialHistory.code, FinancialHistory.report_period, FinancialHistory.eps)
+            ).all()
+            for code, period, eps in hist_rows:
+                eps_history.setdefault(code, {})[period] = eps
+        logger.info("sync_financials: loaded EPS history for %d stocks", len(eps_history))
+
+        # Pre-load: PE from today's daily_candles
+        today = _date.today().strftime("%Y-%m-%d")
+        pe_map: dict[str, float] = {}  # code → pe_ratio
+        with _get_session() as s:
+            pe_rows = s.execute(
+                select(DailyCandle.code, DailyCandle.pe_ratio).where(
+                    DailyCandle.trade_date == today,
+                    DailyCandle.pe_ratio.isnot(None),
+                )
+            ).all()
+            for code, pe in pe_rows:
+                if pe and pe != 0:
+                    pe_map[code] = pe
+        logger.info("sync_financials: loaded PE for %d stocks from daily_candles", len(pe_map))
+
+        # Pre-load: industry for each stock (for industry PE avg)
+        industry_map: dict[str, str] = {}  # code → industry
+        with _get_session() as s:
+            stk_rows = s.execute(select(Stock.code, Stock.industry)).all()
+            for code, ind in stk_rows:
+                if ind:
+                    industry_map[code] = ind
+
+        # Compute industry average PE
+        from collections import defaultdict
+        industry_pe_sum = defaultdict(float)
+        industry_pe_cnt = defaultdict(int)
+        for code, pe in pe_map.items():
+            ind = industry_map.get(code, "")
+            if ind and 0 < pe < 300:  # filter outliers
+                industry_pe_sum[ind] += pe
+                industry_pe_cnt[ind] += 1
+        industry_avg_pe: dict[str, float] = {}
+        for ind in industry_pe_sum:
+            if industry_pe_cnt[ind] >= 5:
+                industry_avg_pe[ind] = industry_pe_sum[ind] / industry_pe_cnt[ind]
+        logger.info("sync_financials: computed avg PE for %d industries", len(industry_avg_pe))
+
+        # Helper: compute EPS TTM
+        def _eps_ttm(code: str, period: str, current_eps: float) -> float:
+            """TTM = current_cumulative + prev_annual - prev_same_period."""
+            if not period or len(period) < 10:
+                return current_eps
+            # Q4 (annual report) — EPS is already full year
+            if period[5:10] == "12-31":
+                return current_eps
+            hist = eps_history.get(code, {})
+            prev_year = str(int(period[:4]) - 1)
+            prev_annual = hist.get(f"{prev_year}-12-31")
+            prev_same = hist.get(f"{prev_year}-{period[5:10]}")
+            if prev_annual is not None and prev_same is not None:
+                return current_eps + prev_annual - prev_same
+            return current_eps
+
         page = 1
         processed = 0
         total = 0
@@ -438,7 +715,7 @@ def sync_financials(_task_id: int = None) -> int:
                     code = str(item.get("SECURITY_CODE", ""))
                     if not code:
                         continue
-                    eps = float(item.get("BASIC_EPS") or 0)
+                    eps_raw = float(item.get("BASIC_EPS") or 0)
                     roe = float(item.get("WEIGHTAVG_ROE") or 0)
                     rev_yoy = float(item.get("YSTZ") or 0)
                     np_yoy = float(item.get("SJLTZ") or 0)
@@ -446,14 +723,22 @@ def sync_financials(_task_id: int = None) -> int:
                     net_profit = float(item.get("PARENT_NETPROFIT") or 0)
                     period = str(item.get("REPORTDATE") or "")[:10]
 
-                    status, summary = _classify_fundamental(eps, roe, rev_yoy, np_yoy)
+                    # TTM EPS
+                    eps = _eps_ttm(code, period, eps_raw)
+                    # PE from daily_candles
+                    pe = pe_map.get(code, 0.0)
+                    # Industry PE
+                    ind = industry_map.get(code, "")
+                    ind_pe = industry_avg_pe.get(ind, 0.0)
+
+                    status, summary = _classify_fundamental(eps, roe, rev_yoy, np_yoy, pe, ind_pe)
 
                     existing = s.get(FinancialSnapshot, code)
                     row_data = {
                         "code": code, "report_period": period,
                         "eps_ttm": eps, "roe": roe,
                         "revenue_yoy": rev_yoy, "net_profit_yoy": np_yoy,
-                        "pe_ratio_ttm": 0.0, "total_revenue": revenue,
+                        "pe_ratio_ttm": pe, "total_revenue": revenue,
                         "net_profit": net_profit,
                         "fundamental_status": status,
                         "fundamental_summary": summary,
@@ -476,6 +761,174 @@ def sync_financials(_task_id: int = None) -> int:
     except Exception as e:
         logger.error("sync_financials error: %s\n%s", e, traceback.format_exc())
         _finish_task(task_id, 0, 0, str(e))
+    return task_id
+
+
+# ═══════════════════════════════════════════════════════════════
+#  3b. Historical financial data sync (multi-quarter)
+# ═══════════════════════════════════════════════════════════════
+
+def sync_financial_history(_task_id: int = None, years: int = 5) -> int:
+    """Sync historical quarterly financial reports for all stocks.
+
+    Fetches last N years of quarterly data from East Money (RPT_LICO_FN_CPD).
+    Uses batch pagination (5000/page) + bulk PostgreSQL upsert.
+    5 years ≈ 177K records, ~2-3 minutes.
+    """
+    import requests as _req
+
+    task_id = _get_or_create_task("financial_history", _task_id)
+    if task_id == -1:
+        logger.info("financial_history: task already running, skipping")
+        return -1
+
+    url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    page_size = 500  # EM API hard caps at 500
+    columns = "SECURITY_CODE,BASIC_EPS,WEIGHTAVG_ROE,YSTZ,SJLTZ,TOTAL_OPERATE_INCOME,PARENT_NETPROFIT,REPORTDATE"
+    batch_commit_size = 5000  # commit every N rows to DB
+
+    # Calculate cutoff date
+    from datetime import date
+    cutoff = date(date.today().year - years, 1, 1).isoformat()
+
+    max_retries = 3
+    session = _req.Session()
+    session.headers.update(headers)
+
+    def fetch_page(page_num):
+        """Fetch a single page with retries."""
+        params = {
+            "reportName": "RPT_LICO_FN_CPD",
+            "columns": columns,
+            "pageSize": page_size,
+            "pageNumber": page_num,
+            "sortColumns": "REPORTDATE,SECURITY_CODE",
+            "sortTypes": "-1,-1",
+            "filter": f"(REPORTDATE>='{cutoff}')",
+        }
+        for attempt in range(max_retries):
+            try:
+                resp = session.get(url, params=params, timeout=30)
+                return resp.json()
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise
+                logger.warning("sync_financial_history: retry %d page %d: %s", attempt + 1, page_num, e)
+                time.sleep(2 * (attempt + 1))
+
+    def parse_rows(items):
+        """Parse API items into row dicts."""
+        now = datetime.utcnow()
+        rows = []
+        for item in items:
+            code = str(item.get("SECURITY_CODE", ""))
+            if not code:
+                continue
+            period = str(item.get("REPORTDATE") or "")[:10]
+            if not period:
+                continue
+            rows.append({
+                "code": code,
+                "report_period": period,
+                "eps": float(item.get("BASIC_EPS") or 0),
+                "roe": float(item.get("WEIGHTAVG_ROE") or 0),
+                "revenue": float(item.get("TOTAL_OPERATE_INCOME") or 0),
+                "net_profit": float(item.get("PARENT_NETPROFIT") or 0),
+                "revenue_yoy": float(item.get("YSTZ") or 0),
+                "net_profit_yoy": float(item.get("SJLTZ") or 0),
+                "updated_at": now,
+            })
+        return rows
+
+    def dedup_rows(rows):
+        """Remove duplicate (code, report_period) keeping last occurrence."""
+        seen = {}
+        for r in rows:
+            seen[(r["code"], r["report_period"])] = r
+        return list(seen.values())
+
+    try:
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        # First request to get total count
+        data = fetch_page(1)
+        result = data.get("result")
+        if not result or not result.get("data"):
+            _finish_task(task_id, 0, 0, "no data from EM historical financial API")
+            return task_id
+
+        total = result.get("count", 0)
+        total_pages = (total + page_size - 1) // page_size
+        logger.info("sync_financial_history: %d records, %d pages (>=%s)", total, total_pages, cutoff)
+
+        processed = 0
+        pending_rows = parse_rows(result["data"])
+        processed += len(pending_rows)
+        _update_task_progress(task_id, processed, total)
+
+        with _get_session() as s:
+            # Sequential fetch (EM API pagination is unstable with parallel)
+            page = 2
+            while page <= total_pages:
+                data = fetch_page(page)
+                r = data.get("result")
+                if r and r.get("data"):
+                    pending_rows.extend(parse_rows(r["data"]))
+                else:
+                    break  # no more data
+
+                page += 1
+                processed = (page - 1) * page_size
+
+                # Bulk upsert when pending rows exceed threshold
+                if len(pending_rows) >= batch_commit_size or page > total_pages:
+                    pending_rows = dedup_rows(pending_rows)
+                    stmt = pg_insert(FinancialHistory).values(pending_rows)
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=["code", "report_period"],
+                        set_={
+                            "eps": stmt.excluded.eps,
+                            "roe": stmt.excluded.roe,
+                            "revenue": stmt.excluded.revenue,
+                            "net_profit": stmt.excluded.net_profit,
+                            "revenue_yoy": stmt.excluded.revenue_yoy,
+                            "net_profit_yoy": stmt.excluded.net_profit_yoy,
+                            "updated_at": stmt.excluded.updated_at,
+                        },
+                    )
+                    s.execute(stmt)
+                    s.commit()
+                    pending_rows = []
+                    _update_task_progress(task_id, min(processed, total), total)
+                    logger.info("sync_financial_history: %d/%d (page %d/%d)", min(processed, total), total, page - 1, total_pages)
+
+            # Final flush
+            if pending_rows:
+                pending_rows = dedup_rows(pending_rows)
+                stmt = pg_insert(FinancialHistory).values(pending_rows)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["code", "report_period"],
+                    set_={
+                        "eps": stmt.excluded.eps,
+                        "roe": stmt.excluded.roe,
+                        "revenue": stmt.excluded.revenue,
+                        "net_profit": stmt.excluded.net_profit,
+                        "revenue_yoy": stmt.excluded.revenue_yoy,
+                        "net_profit_yoy": stmt.excluded.net_profit_yoy,
+                        "updated_at": stmt.excluded.updated_at,
+                    },
+                )
+                s.execute(stmt)
+                s.commit()
+
+        _finish_task(task_id, total, total)
+        logger.info("sync_financial_history: done %d records", total)
+    except Exception as e:
+        logger.error("sync_financial_history error: %s\n%s", e, traceback.format_exc())
+        _finish_task(task_id, 0, 0, str(e))
+    finally:
+        session.close()
     return task_id
 
 
@@ -728,12 +1181,79 @@ def _fetch_candles_em(session, code: str, beg: str, days: int) -> list[dict]:
     return []
 
 
+# ── EM clist batch API: fetch today's OHLCV for ALL stocks in ~17s ──
+_EM_CLIST_URL = "https://push2.eastmoney.com/api/qt/clist/get"
+
+
+def _fetch_today_candles_clist(session) -> list[dict]:
+    """Fetch today's OHLCV for all A-shares via EM clist pagination.
+
+    Returns list of dicts ready for DB upsert (code, trade_date, open, high, low, close, volume).
+    API caps at 100/page, ~56 pages for full market.
+    """
+    from datetime import date as _date
+    today = _date.today().strftime("%Y-%m-%d")
+    all_rows = []
+    page = 1
+
+    while True:
+        params = {
+            "pn": page, "pz": 100, "po": 1, "np": 1,
+            "fltt": 2, "invt": 2,
+            "fid": "f12",  # sort by code for stable pagination
+            "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",  # 沪深A股
+            "fields": "f12,f2,f15,f16,f17,f5",  # code,close,high,low,open,volume
+        }
+        try:
+            resp = session.get(_EM_CLIST_URL, params=params, timeout=10)
+            data = resp.json().get("data", {})
+            items = data.get("diff", [])
+        except Exception:
+            break
+
+        if not items:
+            break
+
+        for item in items:
+            code = item.get("f12")
+            close = item.get("f2")
+            if not code or close is None or close == "-":
+                continue
+            o = item.get("f17")
+            h = item.get("f15")
+            l = item.get("f16")
+            v = item.get("f5")
+            # Skip stocks with any invalid field (suspended etc.)
+            if any(x is None or x == "-" for x in (o, h, l, v)):
+                continue
+            try:
+                all_rows.append({
+                    "code": code,
+                    "trade_date": today,
+                    "open": float(o),
+                    "high": float(h),
+                    "low": float(l),
+                    "close": float(close),
+                    "volume": int(float(v)),
+                })
+            except (ValueError, TypeError):
+                continue
+
+        page += 1
+        if page > 200:  # safety limit
+            break
+
+    return all_rows
+
+
 def sync_candles(days: int = 365, _task_id: int = None) -> int:
     """Batch-sync historical daily candles for all stocks.
 
-    Incremental: only fetches data after each stock's latest cached date.
-    Uses 4 workers with connection pooling + throttling to avoid rate limits.
-    Source is configurable: tencent / em_push / dual (default).
+    Two-phase strategy:
+      1) Batch phase: use EM clist API to grab today's candle for ALL stocks (~17s)
+      2) Backfill phase: for stocks with no history, fetch full history per-stock
+
+    This replaces the old all-per-stock approach (15 min → 20s for daily updates).
     """
     import requests
     from requests.adapters import HTTPAdapter
@@ -764,55 +1284,23 @@ def sync_candles(days: int = 365, _task_id: int = None) -> int:
         latest_map = {r[0]: r[1] for r in latest_rows}
 
         from datetime import date as _date
+        today_str = _date.today().strftime("%Y-%m-%d")
         cutoff = (_date.today() - timedelta(days=3)).strftime("%Y-%m-%d")
         default_beg = (_date.today() - timedelta(days=days * 2)).strftime("%Y%m%d")
 
-        need_sync: list[tuple[str, str]] = []  # (code, beg_date)
-        skip_count = 0
-        for code in codes:
-            last = latest_map.get(code)
-            if last and last >= cutoff:
-                skip_count += 1
-            else:
-                if last:
-                    beg = (datetime.strptime(last, "%Y-%m-%d") - timedelta(days=3)).strftime("%Y%m%d")
-                else:
-                    beg = default_beg
-                need_sync.append((code, beg))
-
-        total = len(need_sync)
-        logger.info(
-            "sync_candles: %d stocks need sync, %d skipped (up-to-date), days=%d",
-            total, skip_count, days,
-        )
-        if total == 0:
-            _finish_task(task_id, skip_count, len(codes))
-            return task_id
-
-        # requests.Session with connection pool matching worker count
-        _WORKERS = 4
+        # ═══════════════════════════════════════════════════════════
+        # Phase 1: Batch fetch today's candle via clist API (~17s)
+        # ═══════════════════════════════════════════════════════════
         http = requests.Session()
         http.headers["User-Agent"] = "Mozilla/5.0"
-        adapter = HTTPAdapter(pool_connections=_WORKERS, pool_maxsize=_WORKERS)
+        adapter = HTTPAdapter(pool_connections=4, pool_maxsize=4)
         http.mount("https://", adapter)
 
-        # Throttle: use a lock to enforce minimum 50ms between requests
-        _req_lock = threading.Lock()
-        _last_req_time = [0.0]
+        logger.info("sync_candles: Phase 1 — fetching today's candles via clist batch API")
+        clist_rows = _fetch_today_candles_clist(http)
+        logger.info("sync_candles: clist returned %d stocks for %s", len(clist_rows), today_str)
 
-        def _throttled_fetch(code, beg):
-            with _req_lock:
-                elapsed = time.time() - _last_req_time[0]
-                if elapsed < 0.05:
-                    time.sleep(0.05 - elapsed)
-                _last_req_time[0] = time.time()
-            return _fetch_candles_batch(http, code, beg, days, source=candle_source)
-
-        processed = 0
-        errors = 0
-        no_data = 0  # stocks that legitimately have no kline data
-
-        # Build upsert SQL once
+        # Upsert today's candles in bulk
         upsert_sql = text(
             "INSERT INTO daily_candles (code, trade_date, open, high, low, close, volume) "
             "VALUES (:code, :trade_date, :open, :high, :low, :close, :volume) "
@@ -821,12 +1309,58 @@ def sync_candles(days: int = 365, _task_id: int = None) -> int:
             "close=EXCLUDED.close, volume=EXCLUDED.volume"
         )
 
+        if clist_rows:
+            # Write in chunks of 5000
+            for i in range(0, len(clist_rows), 5000):
+                chunk = clist_rows[i:i+5000]
+                with _get_session() as s:
+                    s.execute(upsert_sql, chunk)
+                    s.commit()
+            logger.info("sync_candles: Phase 1 done — %d today candles written", len(clist_rows))
+
+        _update_task_progress(task_id, len(clist_rows), len(codes))
+
+        # ═══════════════════════════════════════════════════════════
+        # Phase 2: Backfill stocks that have NO history at all
+        # ═══════════════════════════════════════════════════════════
+        need_backfill: list[tuple[str, str]] = []
+        for code in codes:
+            last = latest_map.get(code)
+            if not last:
+                # No cached data at all — need full history
+                need_backfill.append((code, default_beg))
+
+        total_backfill = len(need_backfill)
+        if total_backfill == 0:
+            http.close()
+            _finish_task(task_id, len(codes), len(codes))
+            logger.info("sync_candles: done — all stocks up-to-date, no backfill needed")
+            return task_id
+
+        logger.info("sync_candles: Phase 2 — backfilling %d stocks with no history", total_backfill)
+
+        # Per-stock fetch for backfill (keep existing throttled approach)
+        _WORKERS = 8
+        _req_lock = threading.Lock()
+        _last_req_time = [0.0]
+
+        def _throttled_fetch(code, beg):
+            with _req_lock:
+                elapsed = time.time() - _last_req_time[0]
+                if elapsed < 0.02:
+                    time.sleep(0.02 - elapsed)
+                _last_req_time[0] = time.time()
+            return _fetch_candles_batch(http, code, beg, days, source=candle_source)
+
+        processed = 0
+        errors = 0
+        no_data = 0
         all_rows: list[dict] = []
 
         with ThreadPoolExecutor(max_workers=_WORKERS, thread_name_prefix="kline") as executor:
             futures = {
                 executor.submit(_throttled_fetch, code, beg): code
-                for code, beg in need_sync
+                for code, beg in need_backfill
             }
             for i, future in enumerate(as_completed(futures)):
                 code = futures[future]
@@ -840,23 +1374,23 @@ def sync_candles(days: int = 365, _task_id: int = None) -> int:
                 except Exception as e:
                     errors += 1
                     if errors <= 20:
-                        logger.warning("sync_candles error for %s: %s", code, e)
+                        logger.warning("sync_candles backfill error for %s: %s", code, e)
 
                 # Flush to DB in batches
                 if len(all_rows) >= 10000:
                     with _get_session() as s:
                         s.execute(upsert_sql, all_rows)
                         s.commit()
-                    logger.info("sync_candles: flushed %d rows to DB", len(all_rows))
+                    logger.info("sync_candles: flushed %d backfill rows to DB", len(all_rows))
                     all_rows = []
 
                 # Update progress periodically
                 done = i + 1
-                if done % 200 == 0 or done == total:
-                    _update_task_progress(task_id, processed, total)
+                if done % 200 == 0 or done == total_backfill:
+                    _update_task_progress(task_id, len(clist_rows) + processed, len(codes))
                     logger.info(
-                        "sync_candles: %d/%d fetched (ok=%d, nodata=%d, err=%d)",
-                        done, total, processed, no_data, errors,
+                        "sync_candles backfill: %d/%d (ok=%d, nodata=%d, err=%d)",
+                        done, total_backfill, processed, no_data, errors,
                     )
 
         # Final flush
@@ -864,12 +1398,12 @@ def sync_candles(days: int = 365, _task_id: int = None) -> int:
             with _get_session() as s:
                 s.execute(upsert_sql, all_rows)
                 s.commit()
-            logger.info("sync_candles: flushed final %d rows to DB", len(all_rows))
+            logger.info("sync_candles: flushed final %d backfill rows to DB", len(all_rows))
 
         http.close()
-        _finish_task(task_id, processed + skip_count, len(codes))
-        logger.info("sync_candles: done %d/%d (nodata=%d, errors=%d, skipped=%d)",
-                     processed, total, no_data, errors, skip_count)
+        _finish_task(task_id, len(clist_rows) + processed, len(codes))
+        logger.info("sync_candles: done — clist=%d, backfill=%d/%d (nodata=%d, errors=%d)",
+                     len(clist_rows), processed, total_backfill, no_data, errors)
     except Exception as e:
         logger.error("sync_candles error: %s", e, exc_info=True)
         _finish_task(task_id, 0, 0, str(e))
@@ -1014,17 +1548,24 @@ def get_stock_info(code: str) -> Optional[dict]:
 
 
 def get_quote_cache(code: str) -> Optional[dict]:
-    """Get cached quote data."""
+    """Get today's quote data from daily_candles."""
+    from datetime import date as _date
+    today = _date.today().strftime("%Y-%m-%d")
     with _get_session() as s:
-        q = s.get(QuoteCache, code)
-        if not q:
+        row = s.execute(
+            select(DailyCandle).where(
+                DailyCandle.code == code,
+                DailyCandle.trade_date == today,
+            )
+        ).scalar_one_or_none()
+        if not row:
             return None
         return {
-            "open": q.open, "high": q.high, "low": q.low,
-            "prev_close": q.prev_close,
-            "turnover_rate": q.turnover_rate,
-            "pe_ratio": q.pe_ratio,
-            "market_cap": q.market_cap,
+            "open": row.open, "high": row.high, "low": row.low,
+            "prev_close": row.prev_close or 0.0,
+            "turnover_rate": row.turnover_rate or 0.0,
+            "pe_ratio": row.pe_ratio or 0.0,
+            "market_cap": row.market_cap or 0.0,
         }
 
 
@@ -1046,6 +1587,28 @@ def get_financial_snapshot(code: str) -> Optional[dict]:
             "fundamental_status": f.fundamental_status,
             "fundamental_summary": f.fundamental_summary,
         }
+
+
+def get_financial_history(code: str) -> list[dict]:
+    """Get historical quarterly financial data for a stock, ordered by period."""
+    with _get_session() as s:
+        rows = s.execute(
+            select(FinancialHistory)
+            .where(FinancialHistory.code == code)
+            .order_by(FinancialHistory.report_period.asc())
+        ).scalars().all()
+        return [
+            {
+                "period": r.report_period,
+                "eps": r.eps,
+                "roe": r.roe,
+                "revenue": r.revenue,
+                "net_profit": r.net_profit,
+                "revenue_yoy": r.revenue_yoy,
+                "net_profit_yoy": r.net_profit_yoy,
+            }
+            for r in rows
+        ]
 
 
 def get_stock_concepts(code: str) -> list[str]:
@@ -1114,7 +1677,6 @@ def get_db_stats() -> dict:
             "candle_codes": candle_codes,
             "candle_min_date": candle_min,
             "candle_max_date": candle_max,
-            "quote_cache": s.execute(text("SELECT COUNT(*) FROM quote_cache")).scalar() or 0,
             "financial_snapshots": s.execute(text("SELECT COUNT(*) FROM financial_snapshots")).scalar() or 0,
             "stock_concepts": s.execute(text("SELECT COUNT(*) FROM stock_concepts")).scalar() or 0,
             "analyst_consensus": s.execute(text("SELECT COUNT(*) FROM analyst_consensus")).scalar() or 0,
@@ -1179,12 +1741,15 @@ def run_screener(_task_id: int = None):
     import os as _os
     from .data_provider import get_candles, list_universe
     from ..schemas import Candle
-    from .screener import PATTERN_DETECTORS
+    from .screener import PATTERN_DETECTORS, clear_sr_cache
 
     task_id = _get_or_create_task("screener", _task_id)
     if task_id == -1:
         logger.info("task already running, skipping")
         return -1
+
+    # Clear SR cache before scan (each stock gets computed once)
+    clear_sr_cache()
 
     # Auto-sync candles if stale
     if _candles_are_stale():
@@ -1198,14 +1763,18 @@ def run_screener(_task_id: int = None):
     if intraday:
         logger.info("screener: market hours — syncing quotes for live candles...")
         sync_quotes()
-        # Batch load all quotes into memory
+        # Batch load today's candles into memory
+        from datetime import date as _date
+        today = _date.today().strftime("%Y-%m-%d")
         with _get_session() as s:
-            rows = s.execute(select(QuoteCache)).scalars().all()
+            rows = s.execute(
+                select(DailyCandle).where(DailyCandle.trade_date == today)
+            ).scalars().all()
             for q in rows:
-                if q.price and q.price > 0 and q.open and q.open > 0:
+                if q.close and q.close > 0 and q.open and q.open > 0:
                     quote_map[q.code] = {
                         "open": q.open, "high": q.high, "low": q.low,
-                        "close": q.price, "volume": q.volume or 0,
+                        "close": q.close, "volume": q.volume or 0,
                     }
         logger.info("screener: loaded %d live quotes, starting scan", len(quote_map))
     else:
@@ -1219,14 +1788,36 @@ def run_screener(_task_id: int = None):
     )
     _os.makedirs(cache_dir, exist_ok=True)
 
+    # Load concept + fundamental data for enrichment
+    concept_map: dict[str, str] = {}  # code → top concept
+    fundamental_map: dict[str, tuple[str, str]] = {}  # code → (status, summary)
+    with _get_session() as s:
+        from ..models import StockConcept, FinancialSnapshot
+        # Concepts: pick the first concept per stock (ordered by id)
+        from sqlalchemy import func
+        concept_rows = s.query(StockConcept.code, func.min(StockConcept.concept)).group_by(StockConcept.code).all()
+        for row in concept_rows:
+            concept_map[row[0]] = row[1]
+        # Financials
+        fin_rows = s.query(FinancialSnapshot.code, FinancialSnapshot.fundamental_status, FinancialSnapshot.fundamental_summary).all()
+        for row in fin_rows:
+            fundamental_map[row[0]] = (row[1] or "", row[2] or "")
+    logger.info("screener: loaded %d concepts, %d financials", len(concept_map), len(fundamental_map))
+
     universe = list_universe()
-    logger.info("screener: scanning %d stocks", len(universe))
+    # Filter: main board only (沪A/深A, i.e. 60xxxx and 00xxxx)
+    universe = [(c, n, ind) for c, n, ind in universe if c.startswith("6") or c.startswith("0")]
+    total_work = len(universe) * len(PATTERN_DETECTORS)
+    processed = 0
+    logger.info("screener: scanning %d stocks × %d patterns (main board only)", len(universe), len(PATTERN_DETECTORS))
+
+    # Update task total early so the frontend can show progress
+    _update_task_progress(task_id, 0, total_work)
 
     def _get_candles_with_live(code: str) -> list[Candle]:
         candles = get_candles(code, days=180)
         if not candles:
             return []
-        # Append/update today's live candle from quote_map
         live = quote_map.get(code)
         if live:
             last_date = candles[-1].date[:10] if candles else ""
@@ -1250,19 +1841,54 @@ def run_screener(_task_id: int = None):
                 )
         return candles
 
-    for pattern, detector in PATTERN_DETECTORS.items():
-        items = []
-        for code, name, _ind in universe:
-            try:
-                candles = _get_candles_with_live(code)
-                if not candles:
-                    continue
-                r = detector(code, name, candles)
-                if r:
-                    items.append(r)
-            except Exception:
+    # Results per pattern
+    all_items: dict[str, list] = {p: [] for p in PATTERN_DETECTORS}
+
+    for idx, (code, name, _ind) in enumerate(universe):
+        try:
+            candles = _get_candles_with_live(code)
+            if not candles or len(candles) < 120:
+                processed += len(PATTERN_DETECTORS)
                 continue
-        items.sort(key=lambda x: x.score, reverse=True)
+
+            # Weekly candles: fetch once per stock
+            try:
+                weekly = get_candles(code, period="weekly", days=80) or None
+            except Exception:
+                weekly = None
+
+            # Run all patterns for this stock (SR cache valid for one stock)
+            clear_sr_cache()
+            for pattern, detector in PATTERN_DETECTORS.items():
+                r = detector(code, name, candles, weekly_candles=weekly)
+                if r:
+                    q = quote_map.get(code)
+                    r.industry = _ind or ""
+                    if code.startswith("6"):
+                        r.market = "沪A"
+                    elif code.startswith("0"):
+                        r.market = "深A"
+                    elif code.startswith("3"):
+                        r.market = "创业板"
+                    else:
+                        r.market = ""
+                    if q:
+                        r.amount = round(q.get("close", 0) * q.get("volume", 0) / 10000, 1)
+                    r.concept = concept_map.get(code, "")
+                    fin = fundamental_map.get(code)
+                    if fin:
+                        r.fundamental_status = fin[0]
+                        r.fundamental_summary = fin[1]
+                    all_items[pattern].append(r)
+                processed += 1
+        except Exception:
+            processed += len(PATTERN_DETECTORS)
+        if idx % 50 == 0:
+            _update_task_progress(task_id, processed, total_work)
+
+    # Save results per pattern
+    for pattern in PATTERN_DETECTORS:
+        items = sorted(all_items[pattern], key=lambda x: x.score, reverse=True)
         result = {
             "pattern": pattern,
             "total": len(items),
@@ -1277,6 +1903,11 @@ def run_screener(_task_id: int = None):
                     "pullback_price": it.pullback_price,
                     "distance_to_support_pct": it.distance_to_support_pct,
                     "triggers": it.triggers,
+                    "market": it.market, "industry": it.industry,
+                    "market_cap": it.market_cap, "amount": it.amount,
+                    "rr_ratio": it.rr_ratio, "support_score": it.support_score,
+                    "concept": it.concept, "fundamental_status": it.fundamental_status,
+                    "fundamental_summary": it.fundamental_summary,
                 }
                 for it in items
             ],
@@ -1284,6 +1915,20 @@ def run_screener(_task_id: int = None):
         path = _os.path.join(cache_dir, f"{pattern}.json")
         with open(path, "w") as f:
             _json.dump(result, f, ensure_ascii=False)
-        logger.info("screener: %s → %d items", pattern, len(items))
+        ts = datetime.now().strftime("%Y%m%d_%H%M")
+        hist_path = _os.path.join(cache_dir, f"{pattern}_{ts}.json")
+        with open(hist_path, "w") as f:
+            _json.dump(result, f, ensure_ascii=False)
+        logger.info("screener: %s → %d items (saved history %s)", pattern, len(items), ts)
 
-    _finish_task(task_id, len(universe), len(universe))
+    # Cleanup old history files (keep last 30 per pattern)
+    for pattern in PATTERN_DETECTORS:
+        import glob
+        hist_files = sorted(glob.glob(_os.path.join(cache_dir, f"{pattern}_*.json")), reverse=True)
+        for old in hist_files[30:]:
+            try:
+                _os.remove(old)
+            except OSError:
+                pass
+
+    _finish_task(task_id, total_work, total_work)

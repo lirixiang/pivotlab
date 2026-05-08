@@ -134,6 +134,15 @@ export type ScreenerItem = {
   pullback_price?: number | null;
   distance_to_support_pct?: number | null;
   triggers: string[];
+  market?: string;
+  industry?: string;
+  market_cap?: number;
+  amount?: number;
+  rr_ratio?: number;
+  support_score?: number;
+  concept?: string;
+  fundamental_status?: string;
+  fundamental_summary?: string;
 };
 
 export type ScreenerResponse = {

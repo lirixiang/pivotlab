@@ -167,3 +167,10 @@ async def refresh_candles(
     except Exception as e:
         raise HTTPException(500, f"刷新失败: {e}")
     return {"code": code, "mode": mode, "updated_count": count}
+
+
+@router.get("/{code}/financial-history")
+async def get_financial_history(code: str):
+    """Get historical quarterly financial data for a stock."""
+    data = sync_service.get_financial_history(code)
+    return {"code": code, "history": data}

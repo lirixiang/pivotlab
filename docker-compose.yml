@@ -5,37 +5,60 @@ services:
       dockerfile: Dockerfile
       args:
         DOCKERHUB_LIBRARY_MIRROR: ${DOCKERHUB_LIBRARY_MIRROR:-m.daocloud.io/docker.io/library}
-    container_name: pivotlab
-    ports:
-      - "9173:80"
-      - "8001:18080"
+    image: robot-harbor.geekplus.com/gino/data-sync-worker:v1.0.0
+    container_name: data-sync-worker
+    network_mode: host
+    ipc: host
+    shm_size: "4g"
     volumes:
       - ./backend/models:/app/backend/models
-      # NVIDIA GPU passthrough (manual mount for rootless docker)
-      - /dev:/dev
-      - /usr/lib/x86_64-linux-gnu/libcuda.so.570.172.08:/usr/lib/nvidia/libcuda.so.570.172.08:ro
-      - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.570.172.08:/usr/lib/nvidia/libnvidia-ml.so.570.172.08:ro
-      - /usr/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.570.172.08:/usr/lib/nvidia/libnvidia-ptxjitcompiler.so.570.172.08:ro
+      - ./backend/.screener_cache:/app/backend/.screener_cache
     environment:
-      DATABASE_URL: postgresql+asyncpg://pivotlab:pivotlab@db:5432/pivotlab
-      NVIDIA_VISIBLE_DEVICES: "all"
-      LD_LIBRARY_PATH: /usr/lib/nvidia
+      DATABASE_URL: postgresql+asyncpg://pivotlab:pivotlab@127.0.0.1:5432/pivotlab
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      NCCL_DEBUG: WARN
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  trainer:
+    image: robot-harbor.geekplus.com/gino/data-sync-worker:v1.0.0
+    container_name: data-sync-trainer
+    network_mode: host
+    ipc: host
+    shm_size: "8g"
+    volumes:
+      - ./backend/models:/app/backend/models
+    environment:
+      DATABASE_URL: postgresql+asyncpg://pivotlab:pivotlab@127.0.0.1:5432/pivotlab
+      CUDA_VISIBLE_DEVICES: ""
+    working_dir: /app/backend
+    entrypoint: ["sleep", "infinity"]
     depends_on:
       db:
         condition: service_healthy
     restart: unless-stopped
 
   db:
-    image: ${DOCKERHUB_LIBRARY_MIRROR:-m.daocloud.io/docker.io/library}/postgres:16-alpine
-    container_name: pivotlab-db
+    # image: ${DOCKERHUB_LIBRARY_MIRROR:-m.daocloud.io/docker.io/library}/postgres:16-alpine
+    image: postgres:16-alpine
+    container_name: data-sync-db
+    network_mode: host
     environment:
       POSTGRES_DB: pivotlab
       POSTGRES_USER: pivotlab
       POSTGRES_PASSWORD: pivotlab
     volumes:
       - pgdata:/var/lib/postgresql/data
-    ports:
-      - "5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pivotlab"]
       interval: 3s

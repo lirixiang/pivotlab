@@ -20,10 +20,10 @@ _scheduler: BackgroundScheduler | None = None
 
 # Default schedule config — all disabled
 DEFAULT_SCHEDULE: dict[str, dict] = {
-    "daily_candles":        {"enabled": False, "cron": "0 16 * * 1-5",  "label": "历史日线",     "desc": "每交易日收盘后同步"},
+    "daily_candles":        {"enabled": True,  "cron": "0 16 * * 1-5",  "label": "历史日线",     "desc": "每交易日收盘后同步"},
     "financials":           {"enabled": False, "cron": "0 18 * * 6",    "label": "基本面快照",   "desc": "每周六更新（季报期可手动）"},
     "analyst_consensus":    {"enabled": False, "cron": "0 18 * * 3",    "label": "机构一致预期", "desc": "每周三更新"},
-    "quotes":               {"enabled": False, "cron": "5 15 * * 1-5",  "label": "实时行情",     "desc": "每交易日收盘后同步"},
+    "quotes":               {"enabled": True,  "cron": "*/30 9-15 * * 1-5", "label": "实时行情", "desc": "交易时段每30分钟刷新"},
     "stocks":               {"enabled": False, "cron": "0 8 * * 1",     "label": "股票列表",     "desc": "每周一更新"},
     "concepts":             {"enabled": False, "cron": "10 8 * * 1",    "label": "题材与概念",   "desc": "每周一更新"},
     "industry":             {"enabled": False, "cron": "20 8 * * 1",    "label": "行业数据",     "desc": "每周一更新"},
@@ -81,6 +81,19 @@ def _apply_schedule(scheduler: BackgroundScheduler, config: dict[str, dict]):
 async def lifespan(app: FastAPI):
     global _scheduler
     await init_db()
+
+    # Initialize Ray cluster (single node, all GPUs)
+    import ray
+    if not ray.is_initialized():
+        ray.init(
+            ignore_reinit_error=True,
+            num_gpus=int(os.environ.get("NUM_GPUS", "6")),
+            dashboard_host="0.0.0.0",
+            include_dashboard=False,
+            logging_level=logging.WARNING,
+        )
+        logger.info("Ray initialized: %s", ray.cluster_resources())
+
     # Only start scheduler in one worker (the first one)
     if os.environ.get("SCHEDULER_DISABLED") != "1":
         _scheduler = BackgroundScheduler()
@@ -95,6 +108,10 @@ async def lifespan(app: FastAPI):
     yield
     if _scheduler:
         _scheduler.shutdown(wait=False)
+    # Shutdown Ray
+    import ray
+    if ray.is_initialized():
+        ray.shutdown()
 
 
 app = FastAPI(title="PivotLab API", version="0.1.0", lifespan=lifespan)

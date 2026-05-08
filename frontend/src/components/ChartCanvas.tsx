@@ -109,8 +109,9 @@ export function ChartCanvas({ candles, levels, consensus }: Props) {
     for (const c of slice) { if (c.low < pMin) pMin = c.low; if (c.high > pMax) pMax = c.high; }
     for (const l of levels) { if (l.price < pMin) pMin = l.price; if (l.price > pMax) pMax = l.price; }
     if (consensus?.consensus_target) {
-      if (consensus.target_high != null) { if (consensus.target_high > pMax) pMax = consensus.target_high; if (consensus.target_high < pMin) pMin = consensus.target_high; }
-      if (consensus.target_low != null) { if (consensus.target_low > pMax) pMax = consensus.target_low; if (consensus.target_low < pMin) pMin = consensus.target_low; }
+      const ct = consensus.consensus_target;
+      if (ct > pMax) pMax = ct;
+      if (ct < pMin) pMin = ct;
     }
     const pPad = (pMax - pMin) * 0.04 || 1;
     pMin -= pPad; pMax += pPad;
@@ -203,78 +204,32 @@ export function ChartCanvas({ candles, levels, consensus }: Props) {
       ctx.restore();
     }
 
-    /* ── consensus target price lines ── */
+    /* ── consensus target price line (single) ── */
     if (consensus?.consensus_target) {
-      const PURPLE = "#a855f7";
-      const drawTarget = (price: number, label: string, alpha: number, lineW: number, dash: number[]) => {
-        const y = priceY(price);
-        if (y < PAD_T - 10 || y > PAD_T + priceH + 10) return;
+      const PURPLE = "#c084fc";
+      const price = consensus.consensus_target;
+      const y = priceY(price);
+      if (y >= PAD_T - 10 && y <= PAD_T + priceH + 10) {
         ctx.save();
         // Glow
         ctx.globalAlpha = 0.10;
         ctx.strokeStyle = PURPLE;
-        ctx.lineWidth = lineW + 4;
+        ctx.lineWidth = 5;
         ctx.setLineDash([]);
         ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - padR, y); ctx.stroke();
-        // Line
-        ctx.globalAlpha = alpha;
-        ctx.strokeStyle = PURPLE;
-        ctx.lineWidth = lineW;
-        ctx.setLineDash(dash);
-        ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - padR, y); ctx.stroke();
-        ctx.setLineDash([]);
-        // Label
-        ctx.fillStyle = PURPLE;
-        ctx.font = "10px 'JetBrains Mono', monospace";
-        ctx.textAlign = "right";
-        ctx.fillText(`${label}  ${price.toFixed(2)}`, W - padR - 4, y - 5);
-        ctx.restore();
-      };
-      drawTarget(consensus.consensus_target, "◎ 一致目标", 0.85, 1.8, [8, 4]);
-      if (consensus.target_high != null) drawTarget(consensus.target_high, "目标高", 0.45, 0.8, [4, 6]);
-      if (consensus.target_low != null) drawTarget(consensus.target_low, "目标低", 0.45, 0.8, [4, 6]);
-    }
-
-    /* ── consensus target price lines ── */
-    if (consensus?.consensus_target) {
-      const CONSENSUS_CLR = "#c084fc"; // purple for analyst target
-      const targets: { price: number; label: string }[] = [];
-      if (consensus.target_high != null) targets.push({ price: consensus.target_high, label: "目标高" });
-      if (consensus.consensus_target != null) targets.push({ price: consensus.consensus_target, label: "一致目标价" });
-      if (consensus.target_low != null) targets.push({ price: consensus.target_low, label: "目标低" });
-
-      for (const t of targets) {
-        const y = priceY(t.price);
-        if (y < PAD_T - 10 || y > PAD_T + priceH + 10) continue;
-        ctx.save();
-
-        const isMain = t.label === "一致目标价";
-
-        // Glow for main target
-        if (isMain) {
-          ctx.globalAlpha = 0.10;
-          ctx.strokeStyle = CONSENSUS_CLR;
-          ctx.lineWidth = 5;
-          ctx.setLineDash([]);
-          ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - padR, y); ctx.stroke();
-        }
-
         // Dashed line
-        ctx.globalAlpha = isMain ? 0.85 : 0.45;
-        ctx.strokeStyle = CONSENSUS_CLR;
-        ctx.lineWidth = isMain ? 1.8 : 0.8;
-        ctx.setLineDash(isMain ? [8, 4] : [4, 6]);
+        ctx.globalAlpha = 0.85;
+        ctx.strokeStyle = PURPLE;
+        ctx.lineWidth = 1.8;
+        ctx.setLineDash([8, 4]);
         ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - padR, y); ctx.stroke();
         ctx.setLineDash([]);
-
         // Label
         ctx.font = "10px 'JetBrains Mono', monospace";
-        ctx.fillStyle = CONSENSUS_CLR;
-        ctx.globalAlpha = isMain ? 0.9 : 0.6;
+        ctx.fillStyle = PURPLE;
+        ctx.globalAlpha = 0.9;
         ctx.textAlign = "right";
-        const lbl = `${t.label} ${t.price.toFixed(2)}`;
-        ctx.fillText(lbl, W - padR - 4, y + (isMain ? -5 : 12));
-
+        ctx.fillText(`◎ 一致目标价  ${price.toFixed(2)}`, W - padR - 4, y - 5);
         ctx.restore();
       }
     }

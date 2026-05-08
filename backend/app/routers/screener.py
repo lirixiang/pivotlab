@@ -1,12 +1,16 @@
 """Screener endpoints — scan runs in subprocess, results cached to JSON files."""
+import glob
 import json
 import os
+import re
 from datetime import datetime
 
 from fastapi import APIRouter, Query
+from pydantic import BaseModel
 
 from ..schemas import ScreenerResponse, ScreenerItem
 from ..services.sync_worker import spawn_sync
+from ..services.screener import get_config, update_config, PATTERN_DETECTORS, MODEL_LABELS
 
 router = APIRouter(prefix="/api/screener", tags=["screener"])
 
@@ -41,6 +45,86 @@ async def trigger_scan():
     return {"status": "already_running", "message": "筛选正在进行中，请稍后查看结果"}
 
 
+class ConfigUpdate(BaseModel):
+    pattern: str
+    params: dict
+
+
+@router.get("/config")
+async def get_screener_config():
+    """Return all model configs."""
+    return get_config()
+
+
+@router.post("/config")
+async def update_screener_config(body: ConfigUpdate):
+    """Update config for a specific pattern."""
+    ok = update_config(body.pattern, **body.params)
+    if not ok:
+        return {"status": "error", "message": f"Unknown pattern: {body.pattern}"}
+    return {"status": "ok", "config": get_config()[body.pattern]}
+
+
+@router.get("/history/{pattern}")
+async def get_history(pattern: str, limit: int = Query(30, ge=1, le=100)):
+    """List available history snapshots for a pattern, newest first."""
+    os.makedirs(_CACHE_DIR, exist_ok=True)
+    files = sorted(glob.glob(os.path.join(_CACHE_DIR, f"{pattern}_*.json")), reverse=True)
+    entries = []
+    for fp in files[:limit]:
+        fname = os.path.basename(fp)
+        # Extract timestamp from filename: pattern_YYYYMMDD_HHMM.json
+        m = re.search(r"_(\d{8}_\d{4})\.json$", fname)
+        if not m:
+            continue
+        ts = m.group(1)
+        try:
+            with open(fp, "r") as f:
+                data = json.load(f)
+            entries.append({
+                "ts": ts,
+                "scanned_at": data.get("scanned_at", ""),
+                "total": data.get("total", 0),
+                "scanned": data.get("scanned", 0),
+            })
+        except Exception:
+            continue
+    return entries
+
+
+@router.get("/history/{pattern}/{ts}")
+async def get_history_snapshot(
+    pattern: str,
+    ts: str,
+    limit: int = Query(200, ge=1, le=500),
+    min_score: float = Query(0, ge=0, le=100),
+):
+    """Load a specific history snapshot by timestamp."""
+    # Validate ts format to prevent path traversal
+    if not re.match(r"^\d{8}_\d{4}$", ts):
+        return ScreenerResponse(pattern=pattern, total=0, scanned=0, scanned_at=datetime.now(), items=[])
+    return _read_cache(f"{pattern}_{ts}", limit, min_score)
+
+
+@router.get("/summary")
+async def summary():
+    """Counts per pattern from cache."""
+    results = {}
+    scanned = 0
+    scanned_at = datetime.min
+    for p in PATTERN_DETECTORS:
+        r = _read_cache(p, 9999, 0)
+        results[p] = r.total
+        scanned = max(scanned, r.scanned)
+        scanned_at = max(scanned_at, r.scanned_at)
+    return {
+        "scanned": scanned,
+        "counts": results,
+        "labels": MODEL_LABELS,
+        "scanned_at": scanned_at,
+    }
+
+
 @router.get("/{pattern}", response_model=ScreenerResponse)
 async def get_results(
     pattern: str,
@@ -49,18 +133,3 @@ async def get_results(
 ):
     """Return cached screener results (from last scan)."""
     return _read_cache(pattern, limit, min_score)
-
-
-@router.get("/")
-async def summary():
-    """Counts per pattern from cache."""
-    bp = _read_cache("breakout_pullback", 9999, 0)
-    bs = _read_cache("bottom_stabilize", 9999, 0)
-    return {
-        "scanned": max(bp.scanned, bs.scanned),
-        "counts": {
-            "breakout_pullback": bp.total,
-            "bottom_stabilize": bs.total,
-        },
-        "scanned_at": max(bp.scanned_at, bs.scanned_at),
-    }

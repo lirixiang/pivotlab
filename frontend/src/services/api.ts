@@ -40,12 +40,28 @@ export const api = {
     const qs = q.toString();
     return http<StockDetail>(`/stocks/${code}${qs ? "?" + qs : ""}`);
   },
+  financialHistory: (code: string) =>
+    http<{ code: string; history: { period: string; eps: number; roe: number; revenue: number; net_profit: number; revenue_yoy: number; net_profit_yoy: number }[] }>(
+      `/stocks/${code}/financial-history`,
+    ),
   srFactors: () =>
     http<import("../types").SrFactor[]>("/stocks/meta/sr-factors"),
   screener: (pattern: string, limit = 50) =>
     http<ScreenerResponse>(`/screener/${pattern}?limit=${limit}`),
   triggerScan: () =>
     http<{ status: string; message: string }>("/screener/scan", { method: "POST" }),
+  screenerHistory: (pattern: string) =>
+    http<{ ts: string; scanned_at: string; total: number; scanned: number }[]>(`/screener/history/${pattern}`),
+  screenerSnapshot: (pattern: string, ts: string, limit = 200) =>
+    http<ScreenerResponse>(`/screener/history/${pattern}/${ts}?limit=${limit}`),
+  screenerConfig: () =>
+    http<Record<string, Record<string, unknown>>>("/screener/config"),
+  updateScreenerConfig: (pattern: string, params: Record<string, unknown>) =>
+    http<{ status: string }>("/screener/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pattern, params }),
+    }),
   watchlist: () => http<WatchlistItem[]>("/watchlist"),
   watchlistScores: () =>
     http<import("../types").WatchlistScore[]>("/watchlist/scores"),
@@ -73,6 +89,8 @@ export const api = {
   syncStocks: () => http<{ task_id: number }>("/sync/stocks", { method: "POST" }),
   syncQuotes: () => http<{ task_id: number }>("/sync/quotes", { method: "POST" }),
   syncFinancials: () => http<{ task_id: number }>("/sync/financials", { method: "POST" }),
+  syncFinancialHistory: (years = 5) =>
+    http<{ task_type: string; status: string }>(`/sync/financial_history?years=${years}`, { method: "POST" }),
   syncConcepts: () => http<{ task_id: number }>("/sync/concepts", { method: "POST" }),
   syncIndustry: () => http<{ task_id: number }>("/sync/industry", { method: "POST" }),
   syncAnalyst: () => http<{ task_type: string; status: string }>("/sync/analyst", { method: "POST" }),
