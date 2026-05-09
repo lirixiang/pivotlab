@@ -27,6 +27,7 @@ DEFAULT_SCHEDULE: dict[str, dict] = {
     "stocks":               {"enabled": False, "cron": "0 8 * * 1",     "label": "股票列表",     "desc": "每周一更新"},
     "concepts":             {"enabled": False, "cron": "10 8 * * 1",    "label": "题材与概念",   "desc": "每周一更新"},
     "industry":             {"enabled": False, "cron": "20 8 * * 1",    "label": "行业数据",     "desc": "每周一更新"},
+    "screener":             {"enabled": True,  "cron": "30 15 * * 1-5", "label": "形态筛选",     "desc": "每交易日15:30扫描"},
 }
 
 

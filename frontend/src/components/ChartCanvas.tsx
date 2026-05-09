@@ -5,6 +5,10 @@ type Props = {
   candles: Candle[];
   levels: Level[];
   consensus?: AnalystConsensus | null;
+  showMA?: boolean;
+  showResistance?: boolean;
+  showSupport?: boolean;
+  minScore?: number;
 };
 
 /* ── constants ── */
@@ -37,7 +41,7 @@ function fmtVol(v: number) {
 }
 function fmtDate(s: string) { return s.length >= 10 ? s.slice(5) : s; }
 
-export function ChartCanvas({ candles, levels, consensus }: Props) {
+export function ChartCanvas({ candles, levels, consensus, showMA, showResistance = true, showSupport = true, minScore = 80 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const cvRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef(0);
@@ -104,10 +108,18 @@ export function ChartCanvas({ candles, levels, consensus }: Props) {
     const cw = Math.max(1, step * 0.65);
     const xOf = (i: number) => PAD_L + i * step + step / 2;
 
+    // filter levels by toggles + score threshold
+    const visibleLevels = levels.filter(l => {
+      if (l.label === "MA20" || l.label === "MA60") return showMA;
+      if (l.kind === "resistance") return showResistance && (l.score ?? 0) >= minScore;
+      if (l.kind === "support") return showSupport && (l.score ?? 0) >= minScore;
+      return true;
+    });
+
     // price range
     let pMin = Infinity, pMax = -Infinity;
     for (const c of slice) { if (c.low < pMin) pMin = c.low; if (c.high > pMax) pMax = c.high; }
-    for (const l of levels) { if (l.price < pMin) pMin = l.price; if (l.price > pMax) pMax = l.price; }
+    for (const l of visibleLevels) { if (l.price < pMin) pMin = l.price; if (l.price > pMax) pMax = l.price; }
     if (consensus?.consensus_target) {
       const ct = consensus.consensus_target;
       if (ct > pMax) pMax = ct;
@@ -151,7 +163,7 @@ export function ChartCanvas({ candles, levels, consensus }: Props) {
     }
 
     /* ── levels (strength-based visuals) ── */
-    for (const l of levels) {
+    for (const l of visibleLevels) {
       const y = priceY(l.price);
       if (y < PAD_T - 10 || y > PAD_T + priceH + 10) continue;
       const color = l.kind === "resistance" ? GOLD : SKY;
@@ -351,7 +363,7 @@ export function ChartCanvas({ candles, levels, consensus }: Props) {
         tx += ctx.measureText(it.v).width + 12;
       }
     }
-  }, [candles, levels, consensus, ensureVp]);
+  }, [candles, levels, consensus, showMA, showResistance, showSupport, minScore, ensureVp]);
 
   /* ── schedule draw ── */
   const scheduleDraw = useCallback(() => {

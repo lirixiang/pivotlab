@@ -68,12 +68,13 @@ async def stock_detail(
     sensitivity: int = Query(5, ge=2, le=20),
     algorithm: str = Query("multifactor", regex="^(classic|multifactor)$"),
     factor_weights: str = Query("", description="JSON dict of factor weights override"),
+    min_score: float = Query(20, ge=0, le=100, description="Minimum score threshold for SR levels"),
 ):
     try:
         candles, quote = await asyncio.wait_for(
             asyncio.gather(
                 asyncio.to_thread(get_candles, code, period,
-                                  days * 5 if period == "monthly" else days * 2 if period == "weekly" else days),
+                                  days * 10 if period == "quarterly" else days * 5 if period == "monthly" else days * 2 if period == "weekly" else days),
                 asyncio.to_thread(get_quote, code),
             ),
             timeout=15.0,
@@ -88,8 +89,9 @@ async def stock_detail(
         from datetime import date as _date
         from ..services.data_provider import _is_trade_hours
         today_str = _date.today().strftime("%Y-%m-%d")
+        is_weekday = _date.today().weekday() < 5
         last_date = candles[-1].date[:10] if candles else ""
-        if last_date != today_str and quote.open > 0:
+        if is_weekday and last_date != today_str and quote.open > 0:
             candles.append(Candle(
                 date=today_str,
                 open=quote.open,
@@ -118,7 +120,7 @@ async def stock_detail(
                 pass
         levels = detect_levels_multifactor(
             candles, lookback=lookback, sensitivity=sensitivity,
-            factor_weights=weights,
+            factor_weights=weights, min_score=min_score,
         )
     else:
         levels = detect_levels(candles, lookback=lookback, sensitivity=sensitivity)
@@ -141,7 +143,9 @@ async def stock_detail(
         quote.pe_ratio = quote_cache.get("pe_ratio", 0.0)
         quote.market_cap = quote_cache.get("market_cap", 0.0)
 
+    quote.industry_pe = sync_service.get_industry_pe(code)
     quote.concepts = sync_service.get_stock_concepts(code)
+    quote.concept_details = sync_service.get_stock_concept_details(code)
     quote.fundamentals = sync_service.get_financial_snapshot(code)
     quote.analyst_consensus = sync_service.get_analyst_consensus(code)
 

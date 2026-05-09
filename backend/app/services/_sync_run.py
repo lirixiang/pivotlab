@@ -8,6 +8,7 @@ runs the corresponding sync_service function, then exits.
 import json
 import logging
 import os
+import signal
 import sys
 
 logging.basicConfig(
@@ -34,7 +35,14 @@ TASK_REGISTRY = {
 }
 
 
+def _signal_handler(signum, frame):
+    logger.error("sync worker received signal %s (%s)", signum, signal.Signals(signum).name)
+    sys.exit(128 + signum)
+
+
 def main():
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGHUP, _signal_handler)
     task_type = os.environ.get("SYNC_TASK_TYPE", "")
     kwargs_json = os.environ.get("SYNC_TASK_KWARGS", "")
     task_id = os.environ.get("SYNC_TASK_ID", "")

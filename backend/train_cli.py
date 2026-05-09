@@ -46,7 +46,11 @@ ALL_MODELS = ["lightgbm", "transformer", "lstm", "cnn_lstm", "rl_ppo"]
 
 
 def load_data(max_stocks: int, min_days: int):
-    """Load candle data from PostgreSQL."""
+    """Load candle data from PostgreSQL.
+
+    Selects stocks with the highest average daily volume (last 6 months),
+    filtered to have at least min_days of history. Excludes ST stocks.
+    """
     from sqlalchemy import create_engine, text
     from sqlalchemy.orm import Session
     from app.services.data_provider import _cache_read
@@ -60,9 +64,15 @@ def load_data(max_stocks: int, min_days: int):
     engine = create_engine(sync_url)
     with Session(engine) as session:
         rows = session.execute(text(
-            "SELECT code FROM daily_candles "
-            "GROUP BY code HAVING COUNT(*) >= :min_days "
-            "ORDER BY random() LIMIT :limit"
+            "SELECT dc.code "
+            "FROM daily_candles dc "
+            "LEFT JOIN stocks s ON dc.code = s.code "
+            "WHERE (s.is_st IS NULL OR s.is_st = false) "
+            "GROUP BY dc.code "
+            "HAVING COUNT(*) >= :min_days "
+            "ORDER BY AVG(CASE WHEN dc.trade_date >= (CURRENT_DATE - INTERVAL '180 days')::text "
+            "                  THEN dc.volume ELSE NULL END) DESC NULLS LAST "
+            "LIMIT :limit"
         ), {"min_days": min_days, "limit": max_stocks}).fetchall()
         codes = [r[0] for r in rows]
     engine.dispose()
@@ -75,7 +85,7 @@ def load_data(max_stocks: int, min_days: int):
         c for code in codes
         if (c := _cache_read(code, limit=730)) and len(c) >= min_days
     ]
-    logger.info("Loaded %d/%d stocks (min_days=%d)", len(candle_lists), len(codes), min_days)
+    logger.info("Loaded %d/%d stocks (min_days=%d, sorted by volume)", len(candle_lists), len(codes), min_days)
     return candle_lists
 
 

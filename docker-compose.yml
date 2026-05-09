@@ -11,10 +11,9 @@ services:
     ipc: host
     shm_size: "4g"
     volumes:
-      - ./backend/models:/app/backend/models
-      - ./backend/.screener_cache:/app/backend/.screener_cache
+      - ./backend:/app/backend
     environment:
-      DATABASE_URL: postgresql+asyncpg://pivotlab:pivotlab@127.0.0.1:5432/pivotlab
+      DATABASE_URL: postgresql+asyncpg://pivotlab:pivotlab@127.0.0.1:5433/pivotlab
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       NCCL_DEBUG: WARN
@@ -37,10 +36,19 @@ services:
     ipc: host
     shm_size: "8g"
     volumes:
-      - ./backend/models:/app/backend/models
+      - ./backend:/app/backend
     environment:
-      DATABASE_URL: postgresql+asyncpg://pivotlab:pivotlab@127.0.0.1:5432/pivotlab
-      CUDA_VISIBLE_DEVICES: ""
+      DATABASE_URL: postgresql+asyncpg://pivotlab:pivotlab@127.0.0.1:5433/pivotlab
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      NCCL_DEBUG: WARN
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     working_dir: /app/backend
     entrypoint: ["sleep", "infinity"]
     depends_on:
@@ -57,10 +65,11 @@ services:
       POSTGRES_DB: pivotlab
       POSTGRES_USER: pivotlab
       POSTGRES_PASSWORD: pivotlab
+    command: -p 5433
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U pivotlab"]
+      test: ["CMD-SHELL", "pg_isready -U pivotlab -p 5433"]
       interval: 3s
       timeout: 3s
       retries: 10

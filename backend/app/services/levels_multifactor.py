@@ -618,6 +618,7 @@ def detect_levels_multifactor(
     max_per_side: int = 4,
     min_touches: int = 2,
     factor_weights: dict[str, float] | None = None,
+    min_score: float | None = None,
 ) -> list[Level]:
     """Detect S/R levels using per-touch accumulation scoring (v2).
 
@@ -739,14 +740,15 @@ def detect_levels_multifactor(
             item["score_details"]["normalized_score"] = item["score"]
 
     # 8. Filter by threshold, keep at least 1
+    threshold = min_score if min_score is not None else _MIN_SCORE_THRESHOLD
     def _filter_and_sort(scored: list[dict], ascending: bool) -> list[dict]:
-        qualified = [item for item in scored if item["score"] >= _MIN_SCORE_THRESHOLD]
+        qualified = [item for item in scored if item["score"] >= threshold]
         if not qualified and scored:
             qualified = sorted(scored, key=lambda x: -x["raw_score"])[:1]
         return sorted(qualified, key=lambda x: x["price"], reverse=not ascending)
 
-    res_final = _filter_and_sort(res_scored, ascending=True)[:max_per_side]
-    sup_final = _filter_and_sort(sup_scored, ascending=False)[:max_per_side]
+    res_final = _filter_and_sort(res_scored, ascending=True)
+    sup_final = _filter_and_sort(sup_scored, ascending=False)
 
     # 9. Build Level objects
     levels: list[Level] = []
@@ -791,30 +793,25 @@ def detect_levels_multifactor(
             reasons=item["reasons"],
         ))
 
-    # 10. Add MA dynamic levels (only if not overlapping)
+    # 10. Add MA dynamic levels (always, toggle controlled by frontend)
     closes = [c.close for c in data]
     for w, label in [(20, "MA20"), (60, "MA60")]:
         if len(closes) >= w:
             ma = float(np.mean(closes[-w:]))
             kind = "support" if ma < last_price else "resistance"
             dist = round((ma - last_price) / last_price * 100, 2)
-            too_close = any(
-                abs(l.price - ma) / max(ma, 1e-6) < 0.008
-                for l in levels
-            )
-            if not too_close:
-                levels.append(Level(
-                    label=label,
-                    price=round(ma, 2),
-                    kind=kind,
-                    strength=3,
-                    touches=0,
-                    distance_pct=dist,
-                    note=f"{label} 动态{'支撑' if kind == 'support' else '压力'}",
-                    score=50.0,
-                    factors={},
-                    reasons=[f"{label}动态位"],
-                ))
+            levels.append(Level(
+                label=label,
+                price=round(ma, 2),
+                kind=kind,
+                strength=3,
+                touches=0,
+                distance_pct=dist,
+                note=f"{label} 动态{'支撑' if kind == 'support' else '压力'}",
+                score=50.0,
+                factors={},
+                reasons=[f"{label}动态位"],
+            ))
 
     return levels
 

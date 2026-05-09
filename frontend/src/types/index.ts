@@ -45,9 +45,22 @@ export type StockQuote = {
   turnover_rate: number;
   pe_ratio: number;
   market_cap: number;
+  industry_pe: { industry: string; avg_pe: number; stock_count: number } | null;
   concepts: string[];
+  concept_details: ConceptDetail[];
   fundamentals: FundamentalSnapshot | null;
   analyst_consensus: AnalystConsensus | null;
+};
+
+export type ConceptDetail = {
+  concept: string;
+  board_code: string | null;
+  rank: number | null;
+  change_pct_1d: number | null;
+  heat_level: 'core' | 'hot' | 'watch' | 'observe';
+  heat_label: string;
+  heat_tone: 'concept-hot' | 'concept-watch' | 'concept-neutral';
+  is_hot_theme: boolean;
 };
 
 export type FundamentalSnapshot = {

@@ -227,7 +227,7 @@ def _fetch_candles_em(code: str, start: str, days: int, period: str = "101") -> 
 
 
 def _resample_candles(candles: list[Candle], period: str) -> list[Candle]:
-    """Resample daily candles to weekly or monthly."""
+    """Resample daily candles to weekly, monthly, or quarterly."""
     if not candles:
         return []
     result: list[Candle] = []
@@ -261,6 +261,12 @@ def _resample_candles(candles: list[Candle], period: str) -> list[Candle]:
             if bucket:
                 prev_d = datetime.strptime(bucket[-1].date[:10], "%Y-%m-%d").date()
                 if d.month != prev_d.month or d.year != prev_d.year:
+                    flush()
+                    bucket = []
+        elif period == "quarterly":
+            if bucket:
+                prev_d = datetime.strptime(bucket[-1].date[:10], "%Y-%m-%d").date()
+                if (d.month - 1) // 3 != (prev_d.month - 1) // 3 or d.year != prev_d.year:
                     flush()
                     bucket = []
         bucket.append(c)
@@ -408,17 +414,26 @@ def get_candles(code: str, period: str = "daily", days: int = 240) -> list[Candl
     """
     code = _normalize_code(code)
 
-    # Non-daily periods: fetch from network (no DB cache for weekly/monthly)
+    # Non-daily periods: resample from DB daily cache first, then network
     if period != "daily":
-        start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y%m%d")
-        # Tencent only supports daily; fetch daily then resample
-        daily = _fetch_candles_tencent(code, start, days * 2)
+        fetch_days = days * 4 if period == "quarterly" else days * 2
+
+        # 1. Try DB-cached daily candles first (fastest, no network)
+        cached_daily = _cache_read(code, limit=fetch_days)
+        if cached_daily:
+            resampled = _resample_candles(cached_daily, period)
+            if resampled:
+                return resampled[-days:]
+
+        # 2. Try Tencent daily → resample
+        start = (datetime.now() - timedelta(days=fetch_days)).strftime("%Y%m%d")
+        daily = _fetch_candles_tencent(code, start, fetch_days)
         if daily:
             resampled = _resample_candles(daily, period)
             if resampled:
                 return resampled[-days:]
 
-        # EM natively supports weekly (102) / monthly (103)
+        # 3. EM natively supports weekly (102) / monthly (103)
         em_period = {"weekly": "102", "monthly": "103"}.get(period)
         if em_period:
             result = _fetch_candles_em(code, start, days, period=em_period)

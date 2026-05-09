@@ -30,6 +30,7 @@ export const api = {
   stock: (code: string, opts?: {
     period?: string; lookback?: number; sensitivity?: number;
     algorithm?: string; factor_weights?: Record<string, number>;
+    min_score?: number;
   }) => {
     const q = new URLSearchParams();
     if (opts?.period) q.set("period", opts.period);
@@ -37,6 +38,7 @@ export const api = {
     if (opts?.sensitivity) q.set("sensitivity", String(opts.sensitivity));
     if (opts?.algorithm) q.set("algorithm", opts.algorithm);
     if (opts?.factor_weights) q.set("factor_weights", JSON.stringify(opts.factor_weights));
+    if (opts?.min_score !== undefined) q.set("min_score", String(opts.min_score));
     const qs = q.toString();
     return http<StockDetail>(`/stocks/${code}${qs ? "?" + qs : ""}`);
   },

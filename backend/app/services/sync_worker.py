@@ -40,6 +40,7 @@ def spawn_sync(task_type: str, **kwargs) -> bool:
     env = os.environ.copy()
     env["SYNC_TASK_TYPE"] = task_type
     env["SYNC_TASK_ID"] = str(task_id)
+    env["PYTHONUNBUFFERED"] = "1"
     if kwargs:
         env["SYNC_TASK_KWARGS"] = json.dumps(kwargs)
 

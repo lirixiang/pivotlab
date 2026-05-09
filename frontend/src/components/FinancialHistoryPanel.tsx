@@ -27,7 +27,7 @@ function fmtQuarter(period: string) {
 export function FinancialHistoryPanel({ code }: { code: string }) {
   const [data, setData] = useState<HistoryItem[]>([]);
   const [loading, setLoading] = useState(false);
-  const [metric, setMetric] = useState<"eps" | "revenue" | "net_profit" | "roe">("net_profit");
+  const [metric, setMetric] = useState<"eps" | "revenue" | "net_profit" | "roe" | "net_profit_yoy" | "revenue_yoy">("net_profit");
 
   useEffect(() => {
     if (!code) return;
@@ -64,7 +64,9 @@ export function FinancialHistoryPanel({ code }: { code: string }) {
           onChange={(e) => setMetric(e.target.value as typeof metric)}
         >
           <option value="net_profit">净利润</option>
+          <option value="net_profit_yoy">净利润增长</option>
           <option value="revenue">营收</option>
+          <option value="revenue_yoy">营收增长</option>
           <option value="eps">EPS</option>
           <option value="roe">ROE</option>
         </select>
@@ -75,54 +77,79 @@ export function FinancialHistoryPanel({ code }: { code: string }) {
 
       {/* YoY growth trend */}
       <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px]">
-        {items.slice(-8).map((d) => (
-          <div key={d.period} className="flex items-center gap-1">
-            <span className="text-ink-600">{fmtQuarter(d.period)}</span>
-            <span className={d.net_profit_yoy >= 0 ? "text-green-400" : "text-red-400"}>
-              {d.net_profit_yoy >= 0 ? "+" : ""}{d.net_profit_yoy.toFixed(1)}%
-            </span>
-          </div>
-        ))}
+        {items.slice(-8).map((d) => {
+          const yoyKey = metric === "revenue" || metric === "revenue_yoy" ? "revenue_yoy" : "net_profit_yoy";
+          const yoy = d[yoyKey];
+          return (
+            <div key={d.period} className="flex items-center gap-1">
+              <span className="text-ink-600">{fmtQuarter(d.period)}</span>
+              <span className={yoy >= 0 ? "text-green-400" : "text-red-400"}>
+                {yoy >= 0 ? "+" : ""}{yoy.toFixed(1)}%
+              </span>
+            </div>
+          );
+        })}
       </div>
     </>
   );
 }
 
-function MiniBarChart({ items, metric }: { items: HistoryItem[]; metric: "eps" | "revenue" | "net_profit" | "roe" }) {
+function MiniBarChart({ items, metric }: { items: HistoryItem[]; metric: "eps" | "revenue" | "net_profit" | "roe" | "net_profit_yoy" | "revenue_yoy" }) {
   const values = items.map((d) => d[metric]);
   const max = Math.max(...values.map(Math.abs), 1e-9);
   const hasNeg = values.some((v) => v < 0);
 
-  // For revenue/net_profit, show in 亿
+  const isYoy = metric === "net_profit_yoy" || metric === "revenue_yoy";
   const isAmt = metric === "revenue" || metric === "net_profit";
-  const unit = metric === "roe" ? "%" : isAmt ? "亿" : "";
+  const unit = isYoy ? "%" : metric === "roe" ? "%" : isAmt ? "亿" : "";
 
   return (
     <div className="w-full">
-      <div className="flex items-end gap-[2px] h-16">
+      <div className={"flex gap-[2px] h-16" + (hasNeg ? "" : " items-end")}>
         {items.map((d, i) => {
           const val = d[metric];
           const pct = Math.abs(val) / max;
           const positive = val >= 0;
+          const barH = `${Math.max(pct * (hasNeg ? 50 : 100), 2)}%`;
           return (
             <div
               key={d.period}
-              className="flex-1 flex flex-col justify-end items-center group relative"
-              style={{ height: "100%" }}
+              className={"flex-1 flex flex-col items-center group relative" + (hasNeg ? "" : " justify-end")}
+              style={hasNeg ? { height: "100%", display: "flex", flexDirection: "column" } : { height: "100%" }}
             >
               {/* Tooltip */}
               <div className="absolute bottom-full mb-1 hidden group-hover:block z-10 bg-ink-800 rounded px-1.5 py-0.5 text-[9px] text-ink-200 whitespace-nowrap shadow-lg">
-                {fmtQuarter(d.period)}: {isAmt ? fmtAmt(val) : val.toFixed(2)}{unit}
+                {fmtQuarter(d.period)}: {isYoy ? `${val >= 0 ? "+" : ""}${val.toFixed(1)}` : isAmt ? fmtAmt(val) : val.toFixed(2)}{unit}
               </div>
-              <div
-                className={`w-full rounded-t-sm transition-all ${
-                  positive ? "bg-green-500/70" : "bg-red-500/70"
-                } hover:opacity-80`}
-                style={{
-                  height: `${Math.max(pct * (hasNeg ? 50 : 100), 2)}%`,
-                  marginTop: hasNeg && positive ? "auto" : undefined,
-                }}
-              />
+              {hasNeg ? (
+                <>
+                  {/* Upper half: positive bars grow upward from center */}
+                  <div className="flex-1 flex items-end w-full">
+                    {positive && (
+                      <div
+                        className="w-full rounded-t-sm bg-green-500/70 hover:opacity-80"
+                        style={{ height: barH }}
+                      />
+                    )}
+                  </div>
+                  {/* Lower half: negative bars grow downward from center */}
+                  <div className="flex-1 flex items-start w-full">
+                    {!positive && (
+                      <div
+                        className="w-full rounded-b-sm bg-red-500/70 hover:opacity-80"
+                        style={{ height: barH }}
+                      />
+                    )}
+                  </div>
+                </>
+              ) : (
+                <div
+                  className={`w-full rounded-t-sm transition-all ${
+                    positive ? "bg-green-500/70" : "bg-red-500/70"
+                  } hover:opacity-80`}
+                  style={{ height: barH }}
+                />
+              )}
             </div>
           );
         })}

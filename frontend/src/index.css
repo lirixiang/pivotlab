@@ -59,6 +59,16 @@ body,
     border-color: rgba(16, 185, 129, 0.4);
     color: #6ee7b7;
   }
+  .chip-neutral {
+    background: rgba(212, 168, 87, 0.1);
+    border-color: rgba(212, 168, 87, 0.4);
+    color: #e6c98a;
+  }
+  .chip-watch {
+    background: rgba(100, 116, 139, 0.12);
+    border-color: rgba(100, 116, 139, 0.35);
+    color: #94a3b8;
+  }
   .seg {
     background: #0c111a;
     border: 1px solid #1f2535;

@@ -5,7 +5,7 @@
 ## ✨ 核心能力
 
 - **自动画线**：基于 `scipy` 局部极值 + 价位聚类 + 均线动态，自动识别 R1/R2/R3 / S1/S2/S3 多档支撑压力位，附强度星级（1-5）和触及次数。
-- **形态筛选**：内置「**突破回踩**」「**下跌企稳**」两大量化形态扫描器，每只股票计算 0-100 综合评分（突破力度 / 回踩缩量 / 压力强度 / 多周期共振）。
+- **形态筛选**：内置「**突破回踩**」「**下跌企稳**」「**箱体支撑**」「**临近中强支撑**」四大量化形态扫描器（对齐 stock-sr-platform），每只股票计算 0-100 综合评分。
 - **AI 策略训练**：5 种模型（Transformer / LSTM / CNN-LSTM / LightGBM / RL-PPO），支持单 GPU 和多 GPU DDP 分布式训练，Ray 统一调度。
 - **专业终端 UI**：深色三栏布局（自选 + 主图 + 信号面板），金色压力位 / 天青蓝支撑位双色体系，对标 Bloomberg / TradingView 视觉规范。
 - **开源数据**：使用 `akshare` 公开行情；网络不可用时自动回退到确定性 mock 数据，保证开发与演示永远可跑。
@@ -68,7 +68,7 @@ docker-compose down
 
 启动后：
 - `http://localhost:9173` — 前端页面（nginx 反代 `/api`）
-- `http://localhost:8001/api/health` — 直连 FastAPI 后端
+- `http://localhost:18080/api/health` — 直连 FastAPI 后端
 
 ### 本地开发
 
@@ -107,53 +107,61 @@ npm run dev              # http://localhost:5173
 
 ```bash
 # 单 GPU 训练
-curl -X POST http://localhost:8001/api/strategy/train_market \
+curl -X POST http://localhost:18080/api/strategy/train_market \
   -H "Content-Type: application/json" \
   -d '{"model_type":"transformer","max_stocks":200,"epochs":50,"num_gpus":1}'
 
 # 多 GPU DDP 训练 (3 卡)
-curl -X POST http://localhost:8001/api/strategy/train_market \
+curl -X POST http://localhost:18080/api/strategy/train_market \
   -H "Content-Type: application/json" \
   -d '{"model_type":"transformer","max_stocks":200,"epochs":50,"num_gpus":3}'
 
 # 查看进度
-curl http://localhost:8001/api/strategy/train_progress
+curl http://localhost:18080/api/strategy/train_progress
 
 # 全部 5 个模型并行训练
-curl -X POST http://localhost:8001/api/strategy/train_market \
+curl -X POST http://localhost:18080/api/strategy/train_market \
   -H "Content-Type: application/json" \
   -d '{"model_type":"all","max_stocks":200,"epochs":50,"num_gpus":1}'
 ```
 
 ### CLI 独立训练
 
-不依赖 Web 服务，直接在容器内执行：
+在 trainer 容器内执行（有 GPU 支持）：
 
 ```bash
-# 单 GPU — 指定 GPU 编号
-docker exec pivotlab python /app/backend/train_cli.py \
-  --model transformer --stocks 200 --epochs 50 --gpu 0
+export DOCKER_HOST=unix:///var/run/docker.sock
 
-# 多 GPU DDP — 自动连接 Ray 集群
-docker exec pivotlab python /app/backend/train_cli.py \
-  --model transformer --stocks 200 --epochs 50 --num-gpus 3
+# ── LightGBM (CPU, 快) ──
+docker exec data-sync-trainer python /app/backend/train_cli.py \
+  --model lightgbm --stocks 1000 --epochs 100 --gpu -1
 
-# 6 卡满载 DDP
-docker exec pivotlab python /app/backend/train_cli.py \
-  --model lstm --stocks 500 --epochs 30 --num-gpus 6
+# ── Transformer (多卡 DDP) ──
+docker exec data-sync-trainer python /app/backend/train_cli.py \
+  --model transformer --stocks 500 --epochs 50 --num-gpus 4
 
-# 全部模型 (PyTorch 模型走 DDP, LightGBM 走 CPU)
-docker exec pivotlab python /app/backend/train_cli.py \
+# ── LSTM (单卡) ──
+docker exec data-sync-trainer python /app/backend/train_cli.py \
+  --model lstm --stocks 500 --epochs 50 --gpu 0
+
+# ── CNN-LSTM (单卡) ──
+docker exec data-sync-trainer python /app/backend/train_cli.py \
+  --model cnn_lstm --stocks 500 --epochs 50 --gpu 1
+
+# ── RL-PPO (CPU, 控制规模避免 OOM) ──
+docker exec data-sync-trainer python /app/backend/train_cli.py \
+  --model rl_ppo --stocks 30 --epochs 50 --gpu -1
+
+# ── 全部模型 (PyTorch 走 DDP, LightGBM 走 CPU) ──
+docker exec data-sync-trainer python /app/backend/train_cli.py \
   --model all --stocks 200 --epochs 50 --num-gpus 3
 
-# 仅 CPU (LightGBM)
-docker exec pivotlab python /app/backend/train_cli.py \
-  --model lightgbm --stocks 500
-
-# 导出结果到 JSON
-docker exec pivotlab python /app/backend/train_cli.py \
+# ── 导出结果到 JSON ──
+docker exec data-sync-trainer python /app/backend/train_cli.py \
   --model transformer --stocks 100 --epochs 20 --gpu 0 --output /app/backend/models/result.json
 ```
+
+> **注意**：RL-PPO 内存开销大，`--epochs 150` 可能触发系统 OOM killer。建议 `--epochs 50`，分批训练。
 
 **CLI 参数说明：**
 
@@ -201,7 +209,9 @@ submit_training(num_gpus=3)
 | `GET /api/stocks/universe` | 标的列表 |
 | `GET /api/stocks/{code}?lookback=120&sensitivity=5` | 行情 + K 线 + 自动画线结果 |
 | `GET /api/screener/breakout_pullback` | 突破回踩形态扫描 |
-| `GET /api/screener/bottom_stabilize` | 下跌企稳形态扫描 |
+| `GET /api/screener/stabilize` | 下跌企稳形态扫描 |
+| `GET /api/screener/box_support` | 箱体支撑形态扫描 |
+| `GET /api/screener/near_support` | 临近中强支撑扫描 |
 | `GET /api/watchlist` / `POST` / `DELETE /{code}` | 自选股管理 |
 | `POST /api/strategy/train_market` | 提交 AI 训练任务 |
 | `GET /api/strategy/train_progress` | 查询训练进度 |

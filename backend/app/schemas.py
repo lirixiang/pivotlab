@@ -31,7 +31,9 @@ class StockQuote(BaseModel):
     turnover_rate: float = 0.0
     pe_ratio: float = 0.0
     market_cap: float = 0.0
+    industry_pe: dict | None = None
     concepts: list[str] = Field(default_factory=list)
+    concept_details: list[dict] = Field(default_factory=list)
     fundamentals: dict | None = None
     analyst_consensus: dict | None = None
 

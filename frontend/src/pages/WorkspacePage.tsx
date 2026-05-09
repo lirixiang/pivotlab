@@ -2,7 +2,6 @@ import { useEffect, useState, useCallback } from "react";
 import { WatchlistPanel } from "../components/WatchlistPanel";
 import { ChartWorkspace } from "../components/ChartWorkspace";
 import { LevelsPanel } from "../components/LevelsPanel";
-import { SignalCard } from "../components/SignalCard";
 import { ScreenerTable } from "../components/ScreenerTable";
 import { api } from "../services/api";
 import type { ScreenerItem, StockDetail, SrFactor } from "../types";
@@ -29,6 +28,7 @@ export function WorkspacePage({
   const [algorithm, setAlgorithm] = useState<"classic" | "multifactor">("multifactor");
   const [factors, setFactors] = useState<SrFactor[]>([]);
   const [weights, setWeights] = useState<Record<string, number>>({});
+  const [minScore, setMinScore] = useState(80);
   const [watchedCodes, setWatchedCodes] = useState<Set<string>>(new Set());
   const [watchRefreshKey, setWatchRefreshKey] = useState(0);
 
@@ -57,12 +57,10 @@ export function WorkspacePage({
   }, [code, watchedCodes, data]);
 
   const PERIOD_MAP: Record<string, string> = {
-    "1分": "1",
-    "5分": "5",
-    "30分": "30",
     "日线": "daily",
     "周线": "weekly",
     "月线": "monthly",
+    "季线": "quarterly",
   };
 
   // Load available factors on mount + restore saved settings
@@ -75,6 +73,7 @@ export function WorkspacePage({
       api.getSetting("sr_config").then((res) => {
         const saved = res.value as Record<string, unknown>;
         if (saved.algorithm) setAlgorithm(saved.algorithm as "classic" | "multifactor");
+        if (typeof saved.min_score === "number") setMinScore(saved.min_score);
         if (saved.weights && typeof saved.weights === "object") {
           setWeights({ ...defaultW, ...(saved.weights as Record<string, number>) });
         } else {
@@ -89,6 +88,7 @@ export function WorkspacePage({
       return api.stock(c, {
         period: PERIOD_MAP[p] || "daily",
         algorithm,
+        min_score: 0,
         ...(algorithm === "multifactor" && Object.keys(weights).length > 0
           ? { factor_weights: weights }
           : {}),
@@ -128,21 +128,24 @@ export function WorkspacePage({
       // Debounced save to DB
       clearTimeout((window as any).__srSaveTimer);
       (window as any).__srSaveTimer = setTimeout(() => {
-        api.putSetting("sr_config", { algorithm, weights: next }).catch(() => {});
+        api.putSetting("sr_config", { algorithm, weights: next, min_score: minScore }).catch(() => {});
       }, 800);
       return next;
     });
   };
 
-  const handleAlgorithmChange = (algo: "classic" | "multifactor") => {
-    setAlgorithm(algo);
-    api.putSetting("sr_config", { algorithm: algo, weights }).catch(() => {});
+  const handleMinScoreChange = (val: number) => {
+    setMinScore(val);
+    clearTimeout((window as any).__srScoreTimer);
+    (window as any).__srScoreTimer = setTimeout(() => {
+      api.putSetting("sr_config", { algorithm, weights, min_score: val }).catch(() => {});
+    }, 800);
   };
 
-  const activeSignal =
-    breakoutResults.find((it) => it.code === code) ??
-    bottomResults.find((it) => it.code === code) ??
-    null;
+  const handleAlgorithmChange = (algo: "classic" | "multifactor") => {
+    setAlgorithm(algo);
+    api.putSetting("sr_config", { algorithm: algo, weights, min_score: minScore }).catch(() => {});
+  };
 
   return (
     <main
@@ -161,16 +164,12 @@ export function WorkspacePage({
           onRefresh={handleRefresh}
           isWatched={watchedCodes.has(code)}
           onToggleWatch={toggleWatch}
+          minScore={minScore}
         />
         <ScreenerTable onSelect={onSelect} onResults={onScanResults} />
       </div>
 
       <aside className="border-l border-ink-700 bg-ink-900 flex flex-col overflow-y-auto scrollbar">
-        <SignalCard
-          signal={activeSignal}
-          levels={data?.levels ?? []}
-          price={data?.quote.price ?? 0}
-        />
         <LevelsPanel levels={data?.levels ?? []} price={data?.quote.price ?? 0} />
 
         <div className="p-4 border-b border-ink-800">
@@ -191,6 +190,26 @@ export function WorkspacePage({
             >
               <i className="fas fa-chart-line mr-1 text-[10px]" />经典
             </button>
+          </div>
+
+          {/* Min score filter */}
+          <div className="mb-3">
+            <div className="flex items-center justify-between mb-0.5">
+              <span className="text-ink-300 text-[11px]" title="分数低于此阈值的支撑/阻力线将被过滤">最低分数过滤</span>
+              <span className="num text-ink-400 text-[10px] w-8 text-right">{minScore}</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={5}
+              value={minScore}
+              onChange={(e) => handleMinScoreChange(Number(e.target.value))}
+              className="w-full accent-gold h-1"
+            />
+            <div className="flex justify-between text-[9px] text-ink-600 mt-0.5">
+              <span>全部显示</span><span>仅强线</span>
+            </div>
           </div>
 
           {algorithm === "multifactor" && factors.length > 0 && (

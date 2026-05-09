@@ -36,6 +36,19 @@ class FinancialSnapshot(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+# --------------- Concept boards (板块元数据) ---------------
+class ConceptBoard(Base):
+    __tablename__ = "concept_boards"
+
+    board_code: Mapped[str] = mapped_column(String(20), primary_key=True)   # e.g. 301558
+    concept: Mapped[str] = mapped_column(String(80), nullable=False)
+    change_pct_1d: Mapped[float] = mapped_column(Float, nullable=True)
+    change_pct_5d: Mapped[float] = mapped_column(Float, nullable=True)
+    net_inflow: Mapped[float] = mapped_column(Float, nullable=True)         # 主力净流入 (元)
+    rank: Mapped[int] = mapped_column(Integer, nullable=True)               # 当日涨幅排名 (1=最热)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 # --------------- Stock concepts / themes ---------------
 class StockConcept(Base):
     __tablename__ = "stock_concepts"
@@ -43,6 +56,8 @@ class StockConcept(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     code: Mapped[str] = mapped_column(String(10), nullable=False)
     concept: Mapped[str] = mapped_column(String(80), nullable=False)
+    board_code: Mapped[str] = mapped_column(String(20), nullable=True)
+    source: Mapped[str] = mapped_column(String(20), default="eastmoney")
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (

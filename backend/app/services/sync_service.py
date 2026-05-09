@@ -15,12 +15,12 @@ import traceback
 from datetime import datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import select, delete, text
+from sqlalchemy import select, delete, text, func, Numeric
 from sqlalchemy.orm import Session
 
 from ..models import (
     Stock, FinancialSnapshot, StockConcept, SyncTask, DailyCandle,
-    AnalystConsensus, FinancialHistory,
+    AnalystConsensus, FinancialHistory, ConceptBoard,
 )
 from ..database import DATABASE_URL
 from . import tencent_provider
@@ -58,6 +58,125 @@ def _get_sync_engine():
 
 def _get_session() -> Session:
     return Session(_get_sync_engine())
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Concept heat / strength scoring (ported from SR platform)
+# ═══════════════════════════════════════════════════════════════
+
+_CONCEPT_STRENGTH_MAX_BOARD_CHANGE = 5.0
+_CONCEPT_STRENGTH_MAX_AVG_CHANGE = 3.0
+_CONCEPT_STRENGTH_MAX_LEADER_CHANGE = 10.0
+_CONCEPT_STRENGTH_MAX_TURNOVER_AMOUNT = 15_000_000_000
+_CONCEPT_STRENGTH_MAX_INFLOW_RATIO = 0.08
+
+_CONCEPT_HEAT_LABELS = {
+    "core": "强主线",
+    "hot": "热点",
+    "watch": "可跟踪",
+    "observe": "观察",
+}
+_CONCEPT_HEAT_TONES = {
+    "core": "concept-hot",
+    "hot": "concept-hot",
+    "watch": "concept-neutral",
+    "observe": "concept-watch",
+}
+
+# Broad/index concepts to exclude from display
+_CONCEPT_BLACKLIST = {
+    "深股通", "沪股通", "融资融券", "富时罗素", "标准普尔", "MSCI中国",
+    "深成500", "沪深300", "上证50", "上证180", "中证500", "中证1000",
+    "国企改革", "西部大开发", "一带一路", "京津冀一体化",
+    "创投", "高送转", "次新股", "举牌", "股权转让",
+    "转融券标的", "含可转债", "标普道琼斯",
+}
+_CONCEPT_BLACKLIST_PATTERNS = ("年报预增", "年报预减", "年报扭亏", "年报续亏",
+                                "季报预增", "季报预减", "季报扭亏", "中报预增")
+
+
+def _normalize_positive(value: float | int | None, ceiling: float) -> float:
+    if ceiling <= 0:
+        return 0.0
+    return max(0.0, min(float(value or 0), ceiling)) / ceiling
+
+
+def _calculate_concept_strength(item: dict) -> float:
+    """Composite strength score 0-100 for a concept board."""
+    quoted = int(item.get("quoted") or 0)
+    up_count = int(item.get("up_count") or 0)
+    up_ratio = (up_count / quoted) if quoted > 0 else 0.0
+    turnover_amount = float(item.get("turnover_amount") or 0)
+    net_inflow = float(item.get("net_inflow") or 0)
+    inflow_ratio = (net_inflow / turnover_amount) if turnover_amount > 0 and net_inflow > 0 else 0.0
+    leader_changes = [
+        float(ld["change_pct"])
+        for ld in item.get("leaders") or []
+        if ld.get("change_pct") is not None
+    ]
+    strongest_leader = max(leader_changes) if leader_changes else 0.0
+
+    board_score = _normalize_positive(item.get("change_pct_1d"), _CONCEPT_STRENGTH_MAX_BOARD_CHANGE) * 25
+    breadth_score = max(0.0, min(up_ratio, 1.0)) * 25
+    avg_score = _normalize_positive(item.get("avg_change_pct"), _CONCEPT_STRENGTH_MAX_AVG_CHANGE) * 15
+    leader_score = _normalize_positive(strongest_leader, _CONCEPT_STRENGTH_MAX_LEADER_CHANGE) * 15
+    capital_score = (
+        _normalize_positive(turnover_amount, _CONCEPT_STRENGTH_MAX_TURNOVER_AMOUNT) * 8
+        + _normalize_positive(inflow_ratio, _CONCEPT_STRENGTH_MAX_INFLOW_RATIO) * 12
+    )
+    return round(board_score + breadth_score + avg_score + leader_score + capital_score, 1)
+
+
+def build_concept_heat_fields(rank: int | None, strength_score: float | None = None) -> dict:
+    """Determine heat_level / heat_label / heat_tone from rank + strength."""
+    if rank is None:
+        if strength_score is None:
+            level = "observe"
+        elif strength_score >= 90:
+            level = "core"
+        elif strength_score >= 75:
+            level = "hot"
+        elif strength_score >= 58:
+            level = "watch"
+        else:
+            level = "observe"
+    elif rank <= 10:
+        level = "core"
+    elif rank <= 20:
+        level = "hot"
+    elif rank <= 30:
+        level = "hot" if (strength_score is not None and strength_score >= 55) else "watch"
+    elif rank <= 50:
+        level = "watch"
+    else:
+        level = "observe"
+
+    # Adjust by strength
+    if strength_score is not None:
+        if strength_score >= 85:
+            if level in {"core", "hot"}:
+                level = "core"
+            elif level == "watch":
+                level = "hot"
+        elif strength_score >= 72:
+            if level == "watch":
+                level = "hot"
+        elif strength_score < 40:
+            if level == "core":
+                level = "hot"
+            elif level == "hot":
+                level = "watch"
+            elif level == "watch":
+                level = "observe"
+        elif strength_score < 50 and level == "hot" and rank is not None and rank > 20:
+            level = "watch"
+
+    return {
+        "heat_level": level,
+        "heat_label": _CONCEPT_HEAT_LABELS[level],
+        "heat_tone": _CONCEPT_HEAT_TONES[level],
+        "is_hot_theme": level in {"core", "hot", "watch"},
+    }
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -937,75 +1056,257 @@ def sync_financial_history(_task_id: int = None, years: int = 5) -> int:
 # ═══════════════════════════════════════════════════════════════
 
 def sync_concepts(_task_id: int = None) -> int:
-    """Sync stock concepts/themes from East Money datacenter API.
+    """Sync stock concepts/themes — same approach as SR platform.
 
-    Uses RPT_WEB_RESPREDICT which provides CONCEPTINDEX_BOARD per stock.
-    Covers ~2700 stocks (those with analyst coverage).
+    Phase 1: EM F10 board API (RPT_F10_CORETHEME_BOARDTYPE) — ~90k records,
+             covers ALL A-shares, ~180 batch requests.
+    Phase 2: 同花顺 concept boards — fetch board list with change%/rank (1 req)
+             then constituent stocks per board (~362 reqs).
+             Populates concept_boards table + links stock_concepts.board_code.
+    Both phases use ON CONFLICT for idempotent upsert.
     """
+    import re
     import requests
 
     task_id = _get_or_create_task("concepts", _task_id)
     if task_id == -1:
         logger.info("task already running, skipping")
         return -1
-    url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    page_size = 200
-    page = 1
-    processed = 0
     concept_count = 0
 
     try:
+        # ── Phase 1: EM F10 batch API (primary, covers all A-shares) ──
+        logger.info("sync_concepts: phase 1 — EM F10 batch API")
         with _get_session() as s:
             s.execute(delete(StockConcept))
+            s.execute(delete(ConceptBoard))
             s.commit()
-            now = datetime.utcnow()
 
-            while True:
-                params = {
-                    "reportName": "RPT_WEB_RESPREDICT",
-                    "columns": "SECURITY_CODE,CONCEPTINDEX_BOARD",
-                    "pageSize": page_size,
-                    "pageNumber": page,
-                }
-                resp = requests.get(url, params=params, headers=headers, timeout=15)
+        f10_url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+        f10_page = 1
+        f10_added = 0
+        while True:
+            params = {
+                "reportName": "RPT_F10_CORETHEME_BOARDTYPE",
+                "columns": "SECURITY_CODE,BOARD_NAME",
+                "pageSize": 500,
+                "pageNumber": f10_page,
+            }
+            try:
+                resp = requests.get(f10_url, params=params, headers=headers, timeout=15)
                 data = resp.json()
                 result = data.get("result")
                 if not result or not result.get("data"):
-                    if page == 1:
-                        _finish_task(task_id, 0, 0, "no data from EM API")
-                        return task_id
+                    if f10_page == 1:
+                        logger.warning("sync_concepts: F10 API returned no data")
                     break
+            except Exception as e:
+                logger.warning("sync_concepts: F10 page %d error: %s", f10_page, e)
+                break
 
-                total = result.get("count", 0)
+            now = datetime.utcnow()
+            with _get_session() as s:
                 for item in result["data"]:
                     code = item.get("SECURITY_CODE", "")
-                    concepts_str = item.get("CONCEPTINDEX_BOARD") or ""
-                    if not code or not concepts_str:
+                    board = (item.get("BOARD_NAME") or "").strip()
+                    if not code or not board:
                         continue
-                    for concept in concepts_str.split(","):
-                        concept = concept.strip().rstrip("_")
-                        if not concept:
-                            continue
-                        s.add(StockConcept(code=code, concept=concept, updated_at=now))
-                        concept_count += 1
-                    processed += 1
-
+                    s.execute(
+                        text("INSERT INTO stock_concepts (code, concept, source, updated_at) "
+                             "VALUES (:code, :concept, 'eastmoney', :ts) "
+                             "ON CONFLICT (code, concept) DO NOTHING"),
+                        {"code": code, "concept": board, "ts": now},
+                    )
+                    f10_added += 1
                 s.commit()
-                _update_task_progress(task_id, processed, total)
-                logger.info("sync_concepts: page %d, %d stocks, %d mappings", page, processed, concept_count)
 
-                if page >= result.get("pages", 1):
-                    break
-                page += 1
-                time.sleep(0.3)
+            if f10_page % 50 == 0:
+                logger.info("sync_concepts: F10 page %d, %d mappings", f10_page, f10_added)
+            _update_task_progress(task_id, f10_page, result.get("pages", 1))
+            if f10_page >= result.get("pages", 1):
+                break
+            f10_page += 1
+            time.sleep(0.15)
 
-        _finish_task(task_id, processed, concept_count)
-        logger.info("sync_concepts: done %d stocks, %d mappings", processed, concept_count)
+        concept_count += f10_added
+        logger.info("sync_concepts: F10 done — %d pages, %d mappings", f10_page, f10_added)
+
+        # ── Phase 2: 同花顺 concept boards (batch per board) ──
+        logger.info("sync_concepts: phase 2 — 同花顺 concept boards")
+        ths_headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "http://q.10jqka.com.cn/",
+        }
+        ths_added = 0
+        boards = []
+        try:
+            # Step 1: get all concept boards with change% (1 request)
+            resp = requests.get("http://q.10jqka.com.cn/gn/",
+                                headers=ths_headers, timeout=15)
+            resp.encoding = "gbk"
+            pairs = re.findall(
+                r'/gn/detail/code/(\d+)/["\'][^>]*>([^<]+)<', resp.text
+            )
+            seen = set()
+            for code, name in pairs:
+                name = name.strip()
+                if code not in seen and name:
+                    seen.add(code)
+                    boards.append((code, name))
+            logger.info("sync_concepts: THS found %d concept boards", len(boards))
+
+            # Fetch change_pct for top boards from detail pages (top 50 only)
+            board_changes: dict[str, float] = {}
+            for board_code, board_name in boards[:50]:
+                try:
+                    detail_url = f"http://q.10jqka.com.cn/gn/detail/code/{board_code}/"
+                    r = requests.get(detail_url, headers=ths_headers, timeout=10)
+                    r.encoding = "gbk"
+                    chg_match = re.search(r'class="board-zf"[^>]*>([+-]?\d+\.?\d*)%', r.text)
+                    if chg_match:
+                        board_changes[board_code] = float(chg_match.group(1))
+                except Exception:
+                    pass
+                time.sleep(0.1)
+
+            # Sort boards by change% desc and assign rank
+            board_with_rank = []
+            for bc, bn in boards:
+                board_with_rank.append((bc, bn, board_changes.get(bc)))
+            board_with_rank.sort(key=lambda x: (x[2] or -999), reverse=True)
+
+            # Upsert into concept_boards table
+            now = datetime.utcnow()
+            with _get_session() as s:
+                for rank_idx, (bc, bn, chg) in enumerate(board_with_rank, 1):
+                    s.execute(
+                        text("INSERT INTO concept_boards (board_code, concept, change_pct_1d, rank, updated_at) "
+                             "VALUES (:bc, :concept, :chg, :rank, :ts) "
+                             "ON CONFLICT (board_code) DO UPDATE SET "
+                             "concept=:concept, change_pct_1d=:chg, rank=:rank, updated_at=:ts"),
+                        {"bc": bc, "concept": bn, "chg": chg, "rank": rank_idx, "ts": now},
+                    )
+                s.commit()
+            logger.info("sync_concepts: upserted %d concept_boards", len(board_with_rank))
+
+            # Step 2: for each board, fetch constituent stocks
+            for idx, (board_code, board_name) in enumerate(boards):
+                try:
+                    url = f"http://q.10jqka.com.cn/gn/detail/code/{board_code}/"
+                    r = requests.get(url, headers=ths_headers, timeout=10)
+                    r.encoding = "gbk"
+                    codes = re.findall(r'(?<!\d)(\d{6})(?!\d)', r.text)
+                    stock_codes = set()
+                    for c in codes:
+                        if c[0] in ('0', '3', '6') and c != board_code:
+                            stock_codes.add(c)
+
+                    if stock_codes:
+                        now = datetime.utcnow()
+                        with _get_session() as s:
+                            for sc in stock_codes:
+                                s.execute(
+                                    text("INSERT INTO stock_concepts (code, concept, board_code, source, updated_at) "
+                                         "VALUES (:code, :concept, :bc, 'ths', :ts) "
+                                         "ON CONFLICT (code, concept) DO UPDATE SET "
+                                         "board_code=:bc, source='ths', updated_at=:ts"),
+                                    {"code": sc, "concept": board_name, "bc": board_code, "ts": now},
+                                )
+                            s.commit()
+                            ths_added += len(stock_codes)
+                except Exception:
+                    pass
+
+                if (idx + 1) % 50 == 0:
+                    logger.info("sync_concepts: THS %d/%d boards, %d mappings",
+                                idx + 1, len(boards), ths_added)
+                time.sleep(0.2)
+
+        except Exception as e:
+            logger.warning("sync_concepts: THS phase error: %s", e)
+
+        concept_count += ths_added
+        logger.info("sync_concepts: THS done — %d boards, %d mappings",
+                     len(boards), ths_added)
+
+        _finish_task(task_id, concept_count, concept_count)
+        logger.info("sync_concepts: total %d mappings", concept_count)
     except Exception as e:
         logger.error("sync_concepts error: %s", e)
         _finish_task(task_id, 0, 0, str(e))
     return task_id
+
+
+def _sync_concepts_ths_f10(task_id: int | None = None) -> int:
+    """Phase 3: Fetch concepts per stock from 同花顺 F10 concept page.
+
+    Uses basic.10jqka.com.cn/{code}/concept.html
+    Only processes stocks that have NO concepts yet (gap-fill).
+    Returns number of new mappings added.
+    """
+    import re
+    import requests
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "http://basic.10jqka.com.cn/",
+    }
+
+    with _get_session() as s:
+        # Find stocks without any concepts
+        all_codes = [r[0] for r in s.execute(text("SELECT code FROM stocks ORDER BY code")).fetchall()]
+        covered = {r[0] for r in s.execute(text("SELECT DISTINCT code FROM stock_concepts")).fetchall()}
+        missing = [c for c in all_codes if c not in covered]
+
+    logger.info("sync_concepts THS: %d stocks missing concepts (of %d total)", len(missing), len(all_codes))
+    if not missing:
+        return 0
+
+    added = 0
+    errors = 0
+    now = datetime.utcnow()
+
+    for i, code in enumerate(missing):
+        url = f"http://basic.10jqka.com.cn/{code}/concept.html"
+        try:
+            resp = requests.get(url, headers=headers, timeout=10)
+            resp.encoding = "gbk"
+            if resp.status_code != 200:
+                errors += 1
+                continue
+            concepts = re.findall(r'gnName[^>]*>\s*([^\s<]+(?:\s[^\s<]+)*?)\s*<', resp.text)
+            if not concepts:
+                continue
+            with _get_session() as s:
+                for concept in concepts:
+                    concept = concept.strip()
+                    if not concept:
+                        continue
+                    s.execute(
+                        text("INSERT INTO stock_concepts (code, concept, updated_at) "
+                             "VALUES (:code, :concept, :ts) ON CONFLICT (code, concept) DO NOTHING"),
+                        {"code": code, "concept": concept, "ts": now},
+                    )
+                s.commit()
+                added += len(concepts)
+        except Exception as e:
+            errors += 1
+            if errors <= 5:
+                logger.warning("THS concept fetch %s failed: %s", code, e)
+
+        if (i + 1) % 100 == 0:
+            logger.info("sync_concepts THS: %d/%d stocks, %d mappings added, %d errors",
+                        i + 1, len(missing), added, errors)
+        # Rate limit: ~0.15s between requests
+        time.sleep(0.15)
+
+    logger.info("sync_concepts THS done: %d mappings from %d stocks (%d errors)",
+                added, len(missing), errors)
+    return added
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1548,15 +1849,12 @@ def get_stock_info(code: str) -> Optional[dict]:
 
 
 def get_quote_cache(code: str) -> Optional[dict]:
-    """Get today's quote data from daily_candles."""
-    from datetime import date as _date
-    today = _date.today().strftime("%Y-%m-%d")
+    """Get latest quote data from daily_candles (today or most recent)."""
     with _get_session() as s:
         row = s.execute(
             select(DailyCandle).where(
                 DailyCandle.code == code,
-                DailyCandle.trade_date == today,
-            )
+            ).order_by(DailyCandle.trade_date.desc()).limit(1)
         ).scalar_one_or_none()
         if not row:
             return None
@@ -1566,6 +1864,42 @@ def get_quote_cache(code: str) -> Optional[dict]:
             "turnover_rate": row.turnover_rate or 0.0,
             "pe_ratio": row.pe_ratio or 0.0,
             "market_cap": row.market_cap or 0.0,
+        }
+
+
+def get_industry_pe(code: str) -> Optional[dict]:
+    """Get industry average PE for a stock's industry."""
+    with _get_session() as s:
+        stock = s.get(Stock, code)
+        if not stock or not stock.industry:
+            return None
+        # Get latest trade_date
+        latest = s.execute(
+            select(func.max(DailyCandle.trade_date))
+        ).scalar()
+        if not latest:
+            return None
+        # Compute industry average PE (filter outliers)
+        result = s.execute(
+            select(
+                func.round(func.avg(DailyCandle.pe_ratio).cast(Numeric), 2),
+                func.count(DailyCandle.code),
+            ).join(Stock, Stock.code == DailyCandle.code)
+            .where(
+                Stock.industry == stock.industry,
+                DailyCandle.trade_date == latest,
+                DailyCandle.pe_ratio > 0,
+                DailyCandle.pe_ratio < 300,
+            )
+        ).one()
+        avg_pe = float(result[0]) if result[0] else None
+        count = result[1]
+        if not avg_pe or count < 3:
+            return None
+        return {
+            "industry": stock.industry,
+            "avg_pe": avg_pe,
+            "stock_count": count,
         }
 
 
@@ -1611,13 +1945,48 @@ def get_financial_history(code: str) -> list[dict]:
         ]
 
 
-def get_stock_concepts(code: str) -> list[str]:
-    """Get concept/theme tags for a stock."""
+def get_stock_concepts(code: str, limit: int = 5) -> list[str]:
+    """Legacy: return concept names only (for backwards compat)."""
+    details = get_stock_concept_details(code, limit=limit)
+    return [d["concept"] for d in details]
+
+
+def get_stock_concept_details(code: str, limit: int = 5) -> list[dict]:
+    """Get concept details with heat/strength scoring (like SR platform).
+
+    Joins stock_concepts → concept_boards to get rank, then computes
+    heat_level/heat_label/heat_tone for each concept.
+    Returns top `limit` concepts sorted by board rank (most relevant first).
+    """
     with _get_session() as s:
         rows = s.execute(
-            select(StockConcept.concept).where(StockConcept.code == code)
+            text("""
+                SELECT sc.concept, sc.board_code, cb.rank, cb.change_pct_1d
+                FROM stock_concepts sc
+                LEFT JOIN concept_boards cb ON cb.board_code = sc.board_code
+                WHERE sc.code = :code
+                ORDER BY cb.rank ASC NULLS LAST, sc.concept ASC
+            """),
+            {"code": code},
         ).fetchall()
-        return [r[0] for r in rows]
+
+        result = []
+        for concept, board_code, rank, change_pct_1d in rows:
+            if concept in _CONCEPT_BLACKLIST:
+                continue
+            if any(concept.endswith(p) for p in _CONCEPT_BLACKLIST_PATTERNS):
+                continue
+            heat = build_concept_heat_fields(rank)
+            result.append({
+                "concept": concept,
+                "board_code": board_code,
+                "rank": rank,
+                "change_pct_1d": round(float(change_pct_1d), 2) if change_pct_1d is not None else None,
+                **heat,
+            })
+            if len(result) >= limit:
+                break
+        return result
 
 
 def get_analyst_consensus(code: str) -> Optional[dict]:

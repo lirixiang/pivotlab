@@ -6,7 +6,8 @@ const PATTERNS = [
   { key: "breakout_pullback", label: "突破回踩", color: "gold" },
   { key: "stabilize", label: "下跌企稳", color: "sky" },
   { key: "box_support", label: "箱体支撑", color: "gold" },
-  { key: "near_support", label: "临近中强支撑", color: "sky" },
+  { key: "volume_breakout", label: "放量突破", color: "emerald" },
+  { key: "macd_divergence", label: "MACD底背离", color: "violet" },
 ];
 
 type SortKey = "score" | "change_pct" | "volume_ratio" | "distance" | "price" | "rr_ratio" | "support_score" | "amount";

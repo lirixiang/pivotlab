@@ -1,10 +1,11 @@
 """Pattern screener V4: aligned with stock-sr-platform.
 
-Models (same as SR):
+Models:
   - breakout_pullback: 突破回踩
   - stabilize: 下跌企稳
   - box_support: 箱体支撑
-  - near_support: 临近中强支撑
+  - volume_breakout: 放量突破
+  - macd_divergence: MACD底背离
 
 Architecture:
   - SR cache: compute levels once per stock, reuse across models
@@ -63,13 +64,21 @@ SCREENER_CONFIG: dict[str, ModelConfig] = {
         min_total_score=50,
         min_touch_count=2,
     ),
-    "near_support": ModelConfig(
-        label="临近中强支撑",
+    "volume_breakout": ModelConfig(
+        label="放量突破",
         min_candles=120,
-        max_dist_support_pct=6.0,
-        min_support_score=70,
-        min_total_score=54,
-        min_touch_count=3,
+        max_dist_support_pct=5.0,
+        min_support_score=50,
+        min_total_score=75,
+        min_touch_count=1,
+    ),
+    "macd_divergence": ModelConfig(
+        label="MACD底背离",
+        min_candles=120,
+        max_dist_support_pct=8.0,
+        min_support_score=45,
+        min_total_score=72,
+        min_touch_count=1,
     ),
 }
 
@@ -514,11 +523,16 @@ def detect_stabilize(code: str, name: str, candles: list[Candle], weekly_candles
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Model: near_support (临近中强支撑) — matches SR _model_near_support
+# Model: volume_breakout (放量突破) — 量价齐升突破前高
 # ─────────────────────────────────────────────────────────────────────
 
-def detect_near_support(code: str, name: str, candles: list[Candle], weekly_candles: list[Candle] | None = None) -> ScreenerItem | None:
-    cfg = SCREENER_CONFIG["near_support"]
+def detect_volume_breakout(code: str, name: str, candles: list[Candle], weekly_candles: list[Candle] | None = None) -> ScreenerItem | None:
+    """Detect stocks breaking out of consolidation with volume surge.
+
+    Logic: price breaks above recent resistance / consolidation high on
+    above-average volume, ideally with support below as a safety net.
+    """
+    cfg = SCREENER_CONFIG["volume_breakout"]
     if not cfg.enabled or len(candles) < cfg.min_candles:
         return None
 
@@ -529,118 +543,323 @@ def detect_near_support(code: str, name: str, candles: list[Candle], weekly_cand
     cur = closes[-1]
     n = len(candles)
 
-    # ── Coarse filter: recent drawdown 2-18% ──
-    high30 = max(highs[-30:])
-    recent_drawdown_pct = (high30 - cur) / max(high30, 1)
-    if not (0.02 <= recent_drawdown_pct <= 0.18):
+    # ── Coarse filter: close above 20-day high (excluding last 3 bars to allow fresh breakout) ──
+    if n < 25:
+        return None
+    lookback_highs = highs[-23:-3]  # 20 bars ending 3 bars ago
+    if not lookback_highs:
+        return None
+    prev_high = max(lookback_highs)
+    # Price must be near or above the previous high (within 2% above to count recent breakout)
+    breakout_pct = (cur - prev_high) / max(prev_high, 1)
+    if breakout_pct < -0.01:  # allow 1% below (just touched)
+        return None
+    if breakout_pct > 0.15:  # too far above, not a fresh breakout
         return None
 
-    recent_10_low = min(lows[-10:])
-    if recent_10_low < cur * 0.93:
+    # ── Volume surge: last 3-day avg volume >= 1.5x 20-day avg ──
+    avg_vol_20 = np.mean(volumes[-23:-3]) if len(volumes) >= 23 else np.mean(volumes[:-3])
+    if avg_vol_20 <= 0:
+        return None
+    avg_vol_recent = np.mean(volumes[-3:])
+    vol_ratio_breakout = float(avg_vol_recent / avg_vol_20)
+    if vol_ratio_breakout < 2.0:
+        return None
+
+    # ── Pre-breakout consolidation: 20-day range before breakout <= 25% ──
+    pre_high = max(highs[-23:-3])
+    pre_low = min(lows[-23:-3])
+    pre_range_pct = (pre_high - pre_low) / max(pre_low, 1)
+    if pre_range_pct > 0.22:
+        return None
+
+    # ── Last bar: must be positive or small doji (not big red) ──
+    last = candles[-1]
+    last_pct = (last.close - last.open) / max(last.open, 1)
+    if last_pct < -0.03:
         return None
 
     # ── SR from cache ──
     ctx = get_sr_context(code, candles, cur, weekly_candles)
-    if ctx.sup_price is None:
-        return None
-    if ctx.sup_score < cfg.min_support_score:
-        return None
-    if ctx.sup_touches < cfg.min_touch_count:
-        return None
 
-    dist_pct = abs(cur - ctx.sup_price) / max(ctx.sup_price, 1)
-    if dist_pct > cfg.max_dist_support_pct / 100:
-        return None
+    # Support is nice-to-have, not mandatory for breakout
+    dist_pct = 0.0
+    if ctx.sup_price is not None and ctx.sup_price < cur:
+        dist_pct = (cur - ctx.sup_price) / max(ctx.sup_price, 1)
 
-    # ── Weekly trend: must not be fully down ──
-    if ctx.weekly_trend["direction"] == "down":
-        return None
+    # ── Weekly trend: prefer not down ──
+    weekly_down = ctx.weekly_trend["direction"] == "down"
 
-    # ── Recent 5-day low >= support * 0.985 ──
-    recent_5_low = min(lows[-5:])
-    if recent_5_low < ctx.sup_price * 0.985:
-        return None
-
-    # ── Last bar not big red ──
-    last = candles[-1]
-    prev = candles[-2] if n >= 2 else last
-    last_body = abs(last.close - last.open)
-    last_range = max(last.high - last.low, 0.01)
-    last_lower_shadow = min(last.open, last.close) - last.low
-    last_pct = (last.close - last.open) / max(last.open, 1)
-    if last_pct < -0.045:
-        return None
-
-    # ── MA5 >= MA20 * 0.94 ──
+    # ── MA alignment: MA5 > MA10 > MA20 (bullish alignment) ──
     ma5 = sum(closes[-5:]) / 5
+    ma10 = sum(closes[-10:]) / 10
     ma20 = sum(closes[-20:]) / 20
-    if ma5 < ma20 * 0.94:
+    ma_aligned = ma5 >= ma10 >= ma20
+    ma_rising = ma5 > ma20  # at least short above long
+
+    if not ma_aligned:
         return None
 
-    # ── Resistance gap >= 4% ──
-    effective_resistance = ctx.res_price if ctx.res_price is not None and ctx.res_price > cur else max(highs[-30:])
+    # ── Resistance gap (upside room) ──
+    effective_resistance = ctx.res_price if ctx.res_price is not None and ctx.res_price > cur else prev_high * 1.15
     resistance_gap_pct = (effective_resistance - cur) / max(cur, 1)
-    if resistance_gap_pct < 0.04:
-        return None
 
-    # ── Volume not exploding (recent 5-day <= 135% of 20-day avg) ──
-    recent_5_vol = sum(volumes[-5:]) / 5
-    avg_vol_20 = sum(volumes[-20:]) / 20
-    volume_ok = recent_5_vol <= avg_vol_20 * 1.35
+    # ── Scoring ──
+    # Volume component: higher volume ratio = stronger signal (0-25)
+    score_volume = min((vol_ratio_breakout - 1.0) * 25, 25)
 
-    # ── Signal patterns ──
-    has_lower_shadow = last_lower_shadow >= last_body * 0.8
-    is_small_body = last_body / last_range < 0.45
-    no_new_low = last.low >= prev.low
+    # Breakout strength: how cleanly price broke out (0-20)
+    score_breakout = 20 if breakout_pct >= 0.03 else 15 if breakout_pct >= 0.01 else 10 if breakout_pct >= 0 else 5
 
-    # ── Scoring (identical to SR _model_near_support) ──
-    score_support = min(ctx.sup_score, 100) * 0.42
-    score_precision = max(0, (6 - dist_pct * 100) / 6) * 28
-    score_room = 10 if resistance_gap_pct >= 0.08 else 7 if resistance_gap_pct >= 0.05 else 4
+    # Support safety net (0-20)
+    score_support = 0
+    if ctx.sup_price is not None:
+        score_support = min(ctx.sup_score, 100) * 0.20
 
-    score_signal = 0
-    signal_parts = []
-    if has_lower_shadow:
-        score_signal += 4
-        signal_parts.append("承接下影")
-    if is_small_body:
-        score_signal += 4
-        signal_parts.append("波动收敛")
-    if no_new_low:
-        score_signal += 4
-        signal_parts.append("未再破低")
+    # MA alignment (0-15)
+    score_ma = 15 if ma_aligned else 8 if ma_rising else 0
 
-    weekly_bonus = 8 if ctx.weekly_trend["direction"] == "up" else 5 if ctx.weekly_trend["direction"] == "flat" else 0
-    volume_bonus = 4 if volume_ok else 0
+    # Weekly trend bonus (0-10)
+    weekly_bonus = 10 if ctx.weekly_trend["direction"] == "up" else 5 if not weekly_down else 0
 
-    total_score = score_support + score_precision + score_room + score_signal + weekly_bonus + volume_bonus
+    # Consolidation tightness bonus (0-10): tighter pre-breakout range = better
+    score_consolidation = max(0, (0.25 - pre_range_pct) / 0.25) * 10
+
+    total_score = score_volume + score_breakout + score_support + score_ma + weekly_bonus + score_consolidation
     total_score = round(min(total_score, 100), 1)
     if total_score < cfg.min_total_score:
         return None
 
     # ── Triggers ──
-    triggers = [f"距强支撑{dist_pct * 100:.1f}%"]
-    triggers.append(f"支撑触碰{ctx.sup_touches}次")
-    triggers.append(f"上方空间{resistance_gap_pct * 100:.1f}%")
-    if signal_parts:
-        triggers.append("临近支撑信号: " + "+".join(signal_parts))
-    if volume_ok:
-        triggers.append("量能未失控")
+    triggers = [f"突破前高{prev_high:.2f}，涨幅{breakout_pct * 100:.1f}%"]
+    triggers.append(f"量比{vol_ratio_breakout:.1f}倍(3日/20日)")
+    triggers.append(f"整理幅度{pre_range_pct * 100:.1f}%")
+    if ma_aligned:
+        triggers.append("均线多头排列(5>10>20)")
+    if ctx.sup_price is not None:
+        triggers.append(f"下方支撑{ctx.sup_price:.2f}")
+    if ctx.weekly_trend["direction"] == "up":
+        triggers.append("周线向上")
+
+    vr = _vol_ratio(candles)
+    change_pct = (last.close / candles[-2].close - 1) * 100 if n >= 2 else 0.0
+    sup_for_rr = ctx.sup_price if ctx.sup_price else cur * 0.95
+    rr = _rr_ratio(cur, sup_for_rr, effective_resistance)
+
+    return ScreenerItem(
+        code=code, name=name, pattern="volume_breakout",
+        score=total_score, price=round(cur, 2),
+        change_pct=round(change_pct, 2),
+        volume_ratio=round(vr, 2),
+        breakout_price=round(prev_high, 2),
+        pullback_price=round(ctx.sup_price, 2) if ctx.sup_price else None,
+        distance_to_support_pct=round(dist_pct * 100, 2) if ctx.sup_price else None,
+        triggers=triggers,
+        rr_ratio=round(rr, 2),
+        support_score=round(ctx.sup_score, 1),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Model: macd_divergence (MACD底背离) — 底背离信号
+# ─────────────────────────────────────────────────────────────────────
+
+def _compute_macd(closes: list[float], fast: int = 12, slow: int = 26, signal: int = 9):
+    """Compute MACD line, signal line, histogram."""
+    arr = np.array(closes, dtype=float)
+    ema_fast = _ema(arr, fast)
+    ema_slow = _ema(arr, slow)
+    macd_line = ema_fast - ema_slow
+    signal_line = _ema(macd_line, signal)
+    histogram = macd_line - signal_line
+    return macd_line, signal_line, histogram
+
+
+def _ema(data: np.ndarray, period: int) -> np.ndarray:
+    """Exponential moving average."""
+    alpha = 2.0 / (period + 1)
+    result = np.empty_like(data)
+    result[0] = data[0]
+    for i in range(1, len(data)):
+        result[i] = alpha * data[i] + (1 - alpha) * result[i - 1]
+    return result
+
+
+def detect_macd_divergence(code: str, name: str, candles: list[Candle], weekly_candles: list[Candle] | None = None) -> ScreenerItem | None:
+    """Detect bullish MACD divergence (bottom divergence).
+
+    Logic: price makes a lower low while MACD histogram or MACD line makes
+    a higher low — classic bottom divergence signal suggesting trend reversal.
+    """
+    cfg = SCREENER_CONFIG["macd_divergence"]
+    if not cfg.enabled or len(candles) < cfg.min_candles:
+        return None
+
+    closes = [c.close for c in candles]
+    lows = [c.low for c in candles]
+    highs = [c.high for c in candles]
+    volumes = [c.volume for c in candles]
+    cur = closes[-1]
+    n = len(candles)
+
+    # Need at least 60 bars for meaningful MACD
+    if n < 60:
+        return None
+
+    # ── Compute MACD ──
+    macd_line, signal_line, histogram = _compute_macd(closes)
+
+    # ── Find two recent troughs in price and MACD ──
+    # Look in last 60 bars for two distinct lows
+    search_len = min(n, 60)
+    search_lows = lows[-search_len:]
+    search_hist = histogram[-search_len:]
+    search_macd = macd_line[-search_len:]
+
+    # Find local minima in price (within 5-bar window)
+    price_troughs = []
+    for i in range(5, search_len - 3):
+        window = search_lows[max(0, i - 5):i + 6]
+        if search_lows[i] == min(window):
+            price_troughs.append((i, search_lows[i]))
+
+    if len(price_troughs) < 2:
+        return None
+
+    # Take the two most recent troughs, at least 8 bars apart
+    valid_pairs = []
+    for j in range(len(price_troughs) - 1):
+        for k in range(j + 1, len(price_troughs)):
+            t1_idx, t1_price = price_troughs[j]
+            t2_idx, t2_price = price_troughs[k]
+            if t2_idx - t1_idx >= 8:
+                valid_pairs.append((t1_idx, t1_price, t2_idx, t2_price))
+
+    if not valid_pairs:
+        return None
+
+    # Use the latest valid pair
+    t1_idx, t1_price, t2_idx, t2_price = valid_pairs[-1]
+
+    # ── Check divergence: price lower low, MACD higher low ──
+    # Second trough must be within last 6 bars (recent signal)
+    if search_len - t2_idx > 8:
+        return None
+
+    # Price: second low <= first low (lower or equal low)
+    if t2_price > t1_price * 1.01:  # allow 1% tolerance
+        return None
+
+    # MACD: second trough higher than first (divergence)
+    macd_t1 = min(search_hist[max(0, t1_idx - 2):t1_idx + 3])
+    macd_t2 = min(search_hist[max(0, t2_idx - 2):t2_idx + 3])
+
+    # Also check MACD line itself
+    macd_line_t1 = min(search_macd[max(0, t1_idx - 2):t1_idx + 3])
+    macd_line_t2 = min(search_macd[max(0, t2_idx - 2):t2_idx + 3])
+
+    hist_divergence = macd_t2 > macd_t1  # histogram higher low
+    line_divergence = macd_line_t2 > macd_line_t1  # MACD line higher low
+
+    if not hist_divergence:  # histogram divergence is required
+        return None
+    if not line_divergence:  # MACD line divergence also required
+        return None
+
+    # ── Current MACD should be turning up (histogram increasing) ──
+    if len(histogram) >= 3:
+        hist_turning = histogram[-1] > histogram[-2] or histogram[-1] > histogram[-3]
+    else:
+        hist_turning = False
+
+    if not hist_turning:
+        return None
+
+    # ── Must not be in free-fall: last bar not big red ──
+    last = candles[-1]
+    last_pct = (last.close - last.open) / max(last.open, 1)
+    if last_pct < -0.05:
+        return None
+
+    # ── Recent drawdown: must have pulled back (not at highs) ──
+    high60 = max(highs[-60:])
+    drawdown_pct = (high60 - cur) / max(high60, 1)
+    if drawdown_pct < 0.12:  # need meaningful pullback for divergence
+        return None
+
+    # ── SR from cache ──
+    ctx = get_sr_context(code, candles, cur, weekly_candles)
+
+    dist_pct = 0.0
+    if ctx.sup_price is not None and ctx.sup_price < cur:
+        dist_pct = (cur - ctx.sup_price) / max(ctx.sup_price, 1)
+
+    # ── Scoring ──
+    # Divergence clarity (0-30)
+    score_divergence = 0
+    if hist_divergence and line_divergence:
+        score_divergence = 30  # both diverge — strongest signal
+    elif hist_divergence:
+        score_divergence = 22
+    elif line_divergence:
+        score_divergence = 18
+
+    # MACD turning bonus (0-15)
+    score_turning = 15 if hist_turning else 5
+
+    # Support safety net (0-20)
+    score_support = 0
+    if ctx.sup_price is not None:
+        score_support = min(ctx.sup_score, 100) * 0.20
+
+    # Drawdown depth: deeper pullback = more room (0-15)
+    score_drawdown = min(drawdown_pct * 100, 15)
+
+    # Weekly trend (0-10)
+    weekly_bonus = 10 if ctx.weekly_trend["direction"] == "up" else 5 if ctx.weekly_trend["direction"] == "flat" else 0
+
+    # Volume shrinkage at second trough (0-10): lower volume = healthier divergence
+    vol_t1 = float(np.mean(volumes[max(0, n - search_len + t1_idx - 2):n - search_len + t1_idx + 3]))
+    vol_t2 = float(np.mean(volumes[max(0, n - search_len + t2_idx - 2):n - search_len + t2_idx + 3]))
+    vol_shrink = vol_t2 < vol_t1 * 0.9 if vol_t1 > 0 else False
+    score_volume = 10 if vol_shrink else 4
+
+    total_score = score_divergence + score_turning + score_support + score_drawdown + weekly_bonus + score_volume
+    total_score = round(min(total_score, 100), 1)
+    if total_score < cfg.min_total_score:
+        return None
+
+    # ── Triggers ──
+    price_diff_pct = (t2_price - t1_price) / max(t1_price, 1) * 100
+    triggers = [f"价格二次探底({t2_price:.2f} vs {t1_price:.2f})"]
+    if hist_divergence:
+        triggers.append("MACD柱状线底背离")
+    if line_divergence:
+        triggers.append("MACD线底背离")
+    if hist_turning:
+        triggers.append("MACD柱状线拐头向上")
+    triggers.append(f"回调幅度{drawdown_pct * 100:.1f}%")
+    if vol_shrink:
+        triggers.append("二次探底量能萎缩")
+    if ctx.sup_price is not None:
+        triggers.append(f"下方支撑{ctx.sup_price:.2f}")
     if ctx.weekly_trend["direction"] in {"up", "flat"}:
         triggers.append(f"周线{'向上' if ctx.weekly_trend['direction'] == 'up' else '走平'}")
 
     vr = _vol_ratio(candles)
     change_pct = (last.close / candles[-2].close - 1) * 100 if n >= 2 else 0.0
-    rr = _rr_ratio(cur, ctx.sup_price, effective_resistance)
+    effective_resistance = ctx.res_price if ctx.res_price is not None and ctx.res_price > cur else high60
+    sup_for_rr = ctx.sup_price if ctx.sup_price else min(lows[-20:])
+    rr = _rr_ratio(cur, sup_for_rr, effective_resistance)
 
     return ScreenerItem(
-        code=code, name=name, pattern="near_support",
+        code=code, name=name, pattern="macd_divergence",
         score=total_score, price=round(cur, 2),
         change_pct=round(change_pct, 2),
         volume_ratio=round(vr, 2),
         breakout_price=None,
-        pullback_price=round(ctx.sup_price, 2),
-        distance_to_support_pct=round(dist_pct * 100, 2),
+        pullback_price=round(ctx.sup_price, 2) if ctx.sup_price else None,
+        distance_to_support_pct=round(dist_pct * 100, 2) if ctx.sup_price else None,
         triggers=triggers,
         rr_ratio=round(rr, 2),
         support_score=round(ctx.sup_score, 1),
@@ -814,12 +1033,14 @@ PATTERN_DETECTORS = {
     "breakout_pullback": detect_breakout_pullback,
     "stabilize": detect_stabilize,
     "box_support": detect_box_support,
-    "near_support": detect_near_support,
+    "volume_breakout": detect_volume_breakout,
+    "macd_divergence": detect_macd_divergence,
 }
 
 MODEL_LABELS = {
     "breakout_pullback": "突破回踩",
     "stabilize": "下跌企稳",
     "box_support": "箱体支撑",
-    "near_support": "临近中强支撑",
+    "volume_breakout": "放量突破",
+    "macd_divergence": "MACD底背离",
 }
