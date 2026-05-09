@@ -152,7 +152,7 @@ export function ChartWorkspace({ data, loading, period, onPeriodChange, refreshi
               <i className="fas fa-circle-notch fa-spin mr-2" /> 正在加载行情与画线...
             </div>
           ) : (
-            <ChartCanvas candles={data.candles} levels={data.levels} consensus={q?.analyst_consensus} showMA={showMA} showResistance={showRes} showSupport={showSup} showVP={showVP} minScore={minScore} />
+            <ChartCanvas candles={data.candles} levels={data.levels} consensus={q?.analyst_consensus} showMA={showMA} showResistance={showRes} showSupport={showSup} showVP={showVP} minScore={minScore} code={q?.code} name={q?.name} />
           )}
         </div>
 

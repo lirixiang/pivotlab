@@ -37,12 +37,16 @@ def _read_cache(pattern: str, limit: int, min_score: float) -> ScreenerResponse:
 
 
 @router.post("/scan")
-async def trigger_scan():
-    """Trigger screener scan in a separate process."""
-    started = spawn_sync("screener")
+async def trigger_scan(pattern: str | None = Query(None, description="单形态扫描;留空=全部")):
+    """Trigger screener scan in a separate process. Optionally limit to one pattern."""
+    if pattern and pattern not in PATTERN_DETECTORS:
+        return {"status": "error", "message": f"未知形态: {pattern}"}
+    kwargs = {"pattern": pattern} if pattern else {}
+    started = spawn_sync("screener", **kwargs)
     if started:
-        return {"status": "started", "message": "筛选扫描已启动，请稍后刷新查看结果"}
-    return {"status": "already_running", "message": "筛选正在进行中，请稍后查看结果"}
+        scope = f"「{MODEL_LABELS.get(pattern, pattern)}」" if pattern else "全部形态"
+        return {"status": "started", "message": f"已启动{scope}扫描,请稍后查看结果"}
+    return {"status": "already_running", "message": "筛选正在进行中,请稍后查看结果"}
 
 
 class ConfigUpdate(BaseModel):
@@ -123,6 +127,30 @@ async def summary():
         "labels": MODEL_LABELS,
         "scanned_at": scanned_at,
     }
+
+
+@router.get("/by_codes")
+async def by_codes(codes: str = Query(..., description="comma-separated stock codes")):
+    """对一批 code 查询所有命中的形态。返回 {code: [{pattern, label, score, scanned_at}]}"""
+    code_set = {c.strip() for c in codes.split(",") if c.strip()}
+    out: dict[str, list] = {c: [] for c in code_set}
+    if not code_set:
+        return out
+    for p in PATTERN_DETECTORS:
+        resp = _read_cache(p, 9999, 0)
+        scanned_at = resp.scanned_at.isoformat() if resp.scanned_at else ""
+        for it in resp.items:
+            if it.code in code_set:
+                out[it.code].append({
+                    "pattern": p,
+                    "label": MODEL_LABELS.get(p, p),
+                    "score": it.score,
+                    "scanned_at": scanned_at,
+                })
+    # 按得分降序
+    for c in out:
+        out[c].sort(key=lambda x: x["score"], reverse=True)
+    return out
 
 
 @router.get("/{pattern}", response_model=ScreenerResponse)

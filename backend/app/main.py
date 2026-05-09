@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import init_db
-from .routers import market, screener, stocks, watchlist, sync, settings, backtest, algo, strategy
+from .routers import market, screener, stocks, watchlist, sync, settings, backtest, algo, strategy, dragon, recommend
 from .services.data_provider import preload_candles
 from .services.sync_worker import spawn_sync
 
@@ -28,6 +28,12 @@ DEFAULT_SCHEDULE: dict[str, dict] = {
     "concepts":             {"enabled": False, "cron": "10 8 * * 1",    "label": "题材与概念",   "desc": "每周一更新"},
     "industry":             {"enabled": False, "cron": "20 8 * * 1",    "label": "行业数据",     "desc": "每周一更新"},
     "screener":             {"enabled": True,  "cron": "30 15 * * 1-5", "label": "形态筛选",     "desc": "每交易日15:30扫描"},
+    "zt_pool":              {"enabled": True,  "cron": "35 15 * * 1-5", "label": "涨停池",       "desc": "每交易日15:35抓取涨停/炸板池"},
+    "lhb":                  {"enabled": True,  "cron": "30 18 * * 1-5", "label": "龙虎榜",       "desc": "每交易日18:30抓取龙虎榜（盘后公布）"},
+    "concept_heat_history": {"enabled": True,  "cron": "40 15 * * 1-5", "label": "板块热度快照", "desc": "涨停池采集后立即生成"},
+    "recommend_scan":       {"enabled": True,  "cron": "5 16 * * 1-5",  "label": "智能选股扫描", "desc": "每交易日16:05全市场扫描+生成交易计划"},
+    "sync_indices":         {"enabled": True,  "cron": "10 16 * * 1-5", "label": "大盘指数同步", "desc": "每交易日16:10拉取上证/深成/创业板等指数日线"},
+    "lifecycle_update":     {"enabled": True,  "cron": "30 16 * * 1-5", "label": "推荐生命周期", "desc": "每交易日16:30追踪所有推荐的触发/止损/止盈状态"},
 }
 
 
@@ -134,6 +140,8 @@ app.include_router(settings.router)
 app.include_router(backtest.router)
 app.include_router(algo.router)
 app.include_router(strategy.router)
+app.include_router(dragon.router)
+app.include_router(recommend.router)
 
 
 @app.get("/api/health")

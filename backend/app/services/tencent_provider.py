@@ -61,13 +61,26 @@ def _parse_line(line: str) -> Optional[dict]:
         if len(parts) >= 3:
             amount = _safe_float(parts[2])
 
+    # 成交量单位:沪深主板/中小创(6/0/3 开头)Tencent 返回「手」,
+    # 科创板(688/689)与北交所(8/4 开头)直接返回「股」。
+    # 用 amount/price 反推「股」是最稳妥的口径,避免误判市场前缀。
+    raw_vol = _safe_float(f[6])
+    if amount > 0 and price > 0:
+        volume = amount / price
+    else:
+        # 没有 amount(如停牌/集合竞价前):按主板规则 ×100,科创/北交除外。
+        if code.startswith(("688", "689", "8", "4")):
+            volume = raw_vol
+        else:
+            volume = raw_vol * 100
+
     return {
         "code": code,
         "name": name,
         "price": price,
         "prev_close": _safe_float(f[4], price),
         "open": _safe_float(f[5], price),
-        "volume": _safe_float(f[6]) * 100,  # lots → shares
+        "volume": volume,
         "change_amt": _safe_float(f[31]),
         "change_pct": _safe_float(f[32]),
         "high": _safe_float(f[33], price),

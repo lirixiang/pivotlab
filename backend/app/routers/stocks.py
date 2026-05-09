@@ -7,12 +7,32 @@ from ..schemas import StockDetail, Candle
 from ..services.data_provider import (
     get_candles, get_quote, list_universe,
     refresh_candles_full, refresh_candles_latest, _run_in_net_executor,
+    _now_cst,
 )
 from ..services.levels import detect_levels
 from ..services.levels_multifactor import detect_levels_multifactor, get_available_factors
 from ..services import sync_service
 
 router = APIRouter(prefix="/api/stocks", tags=["stocks"])
+
+
+def _trade_minutes_elapsed(now=None) -> int:
+    """A股已开盘累计分钟(0~240)。9:30-11:30 + 13:00-15:00,周末/盘前/盘后会饱和到边界。"""
+    from datetime import time as _time
+    n = now or _now_cst()
+    if n.weekday() >= 5:
+        return 240  # 周末按全日计,即不放大
+    t = n.time()
+    am_open, am_close = _time(9, 30), _time(11, 30)
+    pm_open, pm_close = _time(13, 0), _time(15, 0)
+    mins = 0
+    if t >= am_open:
+        end = min(t, am_close)
+        mins += max(0, (end.hour - 9) * 60 + (end.minute - 30))
+    if t >= pm_open:
+        end = min(t, pm_close)
+        mins += max(0, (end.hour - 13) * 60 + end.minute)
+    return min(240, max(0, mins))
 
 
 @router.get("/universe")
@@ -86,11 +106,19 @@ async def stock_detail(
 
     # Append today's live candle from quote if not already in candles
     if quote and quote.price > 0 and period == "daily":
-        from datetime import date as _date
         from ..services.data_provider import _is_trade_hours
-        today_str = _date.today().strftime("%Y-%m-%d")
-        is_weekday = _date.today().weekday() < 5
+        now_cst = _now_cst()
+        today_str = now_cst.strftime("%Y-%m-%d")
+        is_weekday = now_cst.weekday() < 5
         last_date = candles[-1].date[:10] if candles else ""
+        # quote.volume 来自 EM clist f5,单位「股」;daily_candles 与历史 K 线
+        # 数据现已统一以「股」存储,无需再换算。
+        live_vol = float(quote.volume or 0)
+        # 盘中按已开盘分钟数线性外推到全日,让今日量柱可以直接和历史比较。
+        # 收盘后(elapsed=240)倍数=1,等于不放大。
+        elapsed = _trade_minutes_elapsed()
+        if elapsed > 0 and elapsed < 240 and live_vol > 0:
+            live_vol = live_vol * (240.0 / elapsed)
         if is_weekday and last_date != today_str and quote.open > 0:
             candles.append(Candle(
                 date=today_str,
@@ -98,7 +126,8 @@ async def stock_detail(
                 high=quote.high if quote.high > 0 else quote.price,
                 low=quote.low if quote.low > 0 else quote.price,
                 close=quote.price,
-                volume=quote.volume,
+                volume=live_vol,
+                estimated=(0 < elapsed < 240),
             ))
         elif last_date == today_str and _is_trade_hours():
             # Update today's candle with latest quote data
@@ -108,7 +137,8 @@ async def stock_detail(
                 high=max(candles[-1].high, quote.high if quote.high > 0 else quote.price),
                 low=min(candles[-1].low, quote.low if quote.low > 0 else quote.price) if candles[-1].low > 0 else quote.price,
                 close=quote.price,
-                volume=quote.volume if quote.volume > 0 else candles[-1].volume,
+                volume=live_vol if live_vol > 0 else candles[-1].volume,
+                estimated=(0 < elapsed < 240),
             )
 
     if algorithm == "multifactor":

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../services/api";
 import { LabelChart } from "../components/LabelChart";
 import { TradeChart } from "../components/TradeChart";
+import { DragonStrategyPanel } from "../components/DragonStrategyPanel";
+import { useUrlParam } from "../utils/useUrlParam";
 import type {
   AiBacktestResult,
   AiModelStatus,
@@ -14,10 +16,10 @@ import type {
 } from "../types";
 
 type ModelType = "lightgbm" | "transformer" | "lstm" | "cnn_lstm" | "rl_ppo" | "ensemble";
-type Tab = "train" | "signal" | "backtest" | "scan" | "regime" | "position" | "pattern";
+type Tab = "train" | "signal" | "backtest" | "regime" | "position" | "pattern" | "dragon";
 
 export function StrategyPage({ defaultCode }: { defaultCode: string }) {
-  const [tab, setTab] = useState<Tab>("train");
+  const [tab, setTab] = useUrlParam<Tab>("tab", "train");
   const [code, setCode] = useState(defaultCode);
   const [modelType, setModelType] = useState<ModelType>("lightgbm");
   const [status, setStatus] = useState<AiModelStatus | null>(null);
@@ -33,10 +35,10 @@ export function StrategyPage({ defaultCode }: { defaultCode: string }) {
     { k: "train", l: "训练模型", icon: "fa-graduation-cap" },
     { k: "signal", l: "信号预测", icon: "fa-crosshairs" },
     { k: "backtest", l: "AI回测", icon: "fa-chart-line" },
-    { k: "scan", l: "AI选股", icon: "fa-radar" },
     { k: "regime", l: "市场状态", icon: "fa-chart-area" },
     { k: "position", l: "RL仓位", icon: "fa-robot" },
     { k: "pattern", l: "形态识别", icon: "fa-shapes" },
+    { k: "dragon", l: "🐉 龙头战法", icon: "fa-dragon" },
   ];
 
   return (
@@ -132,12 +134,10 @@ export function StrategyPage({ defaultCode }: { defaultCode: string }) {
         {tab === "backtest" && (
           <BacktestPanel code={code} setCode={setCode} modelType={modelType} status={status} />
         )}
-        {tab === "scan" && (
-          <ScanPanel code={code} modelType={modelType} status={status} setCode={setCode} />
-        )}
         {tab === "regime" && <RegimePanel />}
         {tab === "position" && <RlPositionPanel />}
         {tab === "pattern" && <PatternPanel />}
+        {tab === "dragon" && <DragonStrategyPanel defaultCode={code} />}
       </div>
     </div>
   );

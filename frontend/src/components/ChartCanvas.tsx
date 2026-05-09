@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Candle, Level, AnalystConsensus } from "../types";
+import { detectEvents, styleFor, VOL_SIGNAL_STYLE, VOL_STACK_COLOR, type CandleEvent } from "../utils/candleEvents";
 
 type Props = {
   candles: Candle[];
@@ -9,7 +10,10 @@ type Props = {
   showResistance?: boolean;
   showSupport?: boolean;
   showVP?: boolean;
+  showEvents?: boolean;
   minScore?: number;
+  code?: string;
+  name?: string;
 };
 
 /* ── constants ── */
@@ -42,10 +46,16 @@ function fmtVol(v: number) {
 }
 function fmtDate(s: string) { return s.length >= 10 ? s.slice(5) : s; }
 
-export function ChartCanvas({ candles, levels, consensus, showMA, showResistance = true, showSupport = true, showVP = false, minScore = 80 }: Props) {
+export function ChartCanvas({ candles, levels, consensus, showMA, showResistance = true, showSupport = true, showVP = false, showEvents = true, minScore = 80, code, name }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const cvRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef(0);
+
+  // pre-compute events once per candle dataset
+  const events = useMemo<CandleEvent[]>(
+    () => (showEvents ? detectEvents(candles, code, name) : []),
+    [candles, code, name, showEvents],
+  );
 
   // viewport: [start, end) indices into candles
   const vpRef = useRef<{ start: number; end: number } | null>(null);
@@ -110,10 +120,14 @@ export function ChartCanvas({ candles, levels, consensus, showMA, showResistance
     const xOf = (i: number) => PAD_L + i * step + step / 2;
 
     // filter levels by toggles + score threshold
+    // 经典算法不计算 score(始终为 0),用 score==0 视为「无评分」直接放行,
+    // 仅对多因子算法(score>0)应用分数过滤。
     const visibleLevels = levels.filter(l => {
       if (l.label === "MA20" || l.label === "MA60") return showMA;
-      if (l.kind === "resistance") return showResistance && (l.score ?? 0) >= minScore;
-      if (l.kind === "support") return showSupport && (l.score ?? 0) >= minScore;
+      const s = l.score ?? 0;
+      const passScore = s === 0 || s >= minScore;
+      if (l.kind === "resistance") return showResistance && passScore;
+      if (l.kind === "support") return showSupport && passScore;
       return true;
     });
 
@@ -131,9 +145,22 @@ export function ChartCanvas({ candles, levels, consensus, showMA, showResistance
     const pRange = pMax - pMin || 1;
     const priceY = (p: number) => PAD_T + ((pMax - p) / pRange) * priceH;
 
-    // vol range
+    // vol range — robust to outliers (e.g. realtime bar in different unit).
+    // Use median × 8 as cap so a single 30~100x outlier doesn't squash the
+    // whole panel into a flat line. If still bigger, the outlier itself is
+    // clipped at the cap when drawn (see below).
     let vMax = 0;
-    for (const c of slice) { if (c.volume > vMax) vMax = c.volume; }
+    {
+      const vs: number[] = [];
+      for (const c of slice) if (c.volume > 0) vs.push(c.volume);
+      if (vs.length) {
+        vs.sort((a, b) => a - b);
+        const med = vs[Math.floor(vs.length / 2)] || 0;
+        const rawMax = vs[vs.length - 1];
+        const cap = med > 0 ? med * 8 : rawMax;
+        vMax = Math.min(rawMax, cap);
+      }
+    }
     vMax = vMax || 1;
 
     /* ── grid ── */
@@ -169,7 +196,8 @@ export function ChartCanvas({ candles, levels, consensus, showMA, showResistance
       const y = priceY(l.price);
       if (y < PAD_T - 10 || y > PAD_T + priceH + 10) continue;
       const color = l.kind === "resistance" ? GOLD : SKY;
-      const score = l.score ?? (l.strength * 20);
+      // 经典算法 score=0,用 strength*20 作为回退分数,避免线被画得极淡。
+      const score = l.score && l.score > 0 ? l.score : l.strength * 20;
 
       // Strength-based visual parameters
       const lineW = score >= 70 ? 2.2 : score >= 50 ? 1.6 : score >= 30 ? 1.0 : 0.7;
@@ -312,19 +340,85 @@ export function ChartCanvas({ candles, levels, consensus, showMA, showResistance
       const c = slice[i];
       const x = xOf(i);
       const up = c.close >= c.open;
-      const color = up ? UP : DN;
+      const ev = showEvents ? events[vp.start + i] : undefined;
+      const evStyle = ev ? styleFor(ev) : null;
+      const baseColor = up ? UP : DN;
+      const fillColor = evStyle ? evStyle.fill : baseColor;
+      const wickColor = evStyle ? evStyle.fill : baseColor;
       // wick
-      ctx.strokeStyle = color;
+      ctx.strokeStyle = wickColor;
       ctx.lineWidth = 1;
       ctx.globalAlpha = 0.85;
       ctx.beginPath(); ctx.moveTo(x, priceY(c.high)); ctx.lineTo(x, priceY(c.low)); ctx.stroke();
       // body
       ctx.globalAlpha = 0.95;
-      ctx.fillStyle = color;
+      ctx.fillStyle = fillColor;
       const oY = priceY(c.open), cY = priceY(c.close);
-      const top = Math.min(oY, cY), h = Math.max(1, Math.abs(oY - cY));
+      const top = Math.min(oY, cY);
+      const h = Math.max(evStyle ? 2 : 1, Math.abs(oY - cY));
       ctx.fillRect(x - cw / 2, top, cw, h);
+      // 预估柱(盘中今日):不再画虚线,但保留轻微透明度区分
+      if (c.estimated) {
+        ctx.save();
+        ctx.globalAlpha = 0.85;
+        ctx.fillStyle = fillColor;
+        ctx.fillRect(x - cw / 2, top, cw, h);
+        ctx.restore();
+      }
+      // event glow / outline
+      if (evStyle) {
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = evStyle.stroke;
+        ctx.lineWidth = 1.4;
+        ctx.shadowColor = evStyle.stroke;
+        ctx.shadowBlur = 4;
+        ctx.strokeRect(x - cw / 2 - 0.5, top - 0.5, cw + 1, h + 1);
+        ctx.shadowBlur = 0;
+        // top glyph (▲ ⚡ ▌ ⊥) or bottom glyph for 跌停
+        ctx.font = "bold 10px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillStyle = evStyle.stroke;
+        if (ev!.tag === "dt") {
+          ctx.fillText(evStyle.glyph, x, priceY(c.low) + 12);
+        } else {
+          ctx.fillText(evStyle.glyph, x, priceY(c.high) - 4);
+        }
+        // N 连板角标
+        if (ev!.consecutive >= 2) {
+          const tag = String(ev!.consecutive);
+          const tw = ctx.measureText(tag).width + 4;
+          const tx = x + cw / 2 + 2;
+          const ty = priceY(c.high) - 14;
+          ctx.fillStyle = "rgba(255,23,68,0.85)";
+          ctx.fillRect(tx, ty, tw, 11);
+          ctx.fillStyle = "#fff";
+          ctx.font = "bold 9px 'JetBrains Mono', monospace";
+          ctx.textAlign = "center";
+          ctx.fillText(tag, tx + tw / 2, ty + 9);
+        }
+      }
       ctx.globalAlpha = 1;
+    }
+
+    /* ── 量价背离箭头（顶背离 ↘ 红 / 底背离 ↗ 绿）── */
+    if (showEvents) {
+      ctx.save();
+      ctx.font = "bold 11px sans-serif";
+      ctx.textAlign = "center";
+      for (let i = 0; i < n; i++) {
+        const ev = events[vp.start + i];
+        if (!ev?.divergence) continue;
+        const c = slice[i];
+        const x = xOf(i);
+        if (ev.divergence === "top") {
+          ctx.fillStyle = "#ff1744";
+          ctx.fillText("↘", x, priceY(c.high) - 14);
+        } else {
+          ctx.fillStyle = "#00e676";
+          ctx.fillText("↗", x, priceY(c.low) + 18);
+        }
+      }
+      ctx.restore();
     }
 
     /* ── latest price line ── */
@@ -406,16 +500,105 @@ export function ChartCanvas({ candles, levels, consensus, showMA, showResistance
     ctx.beginPath(); ctx.moveTo(PAD_L, volTop); ctx.lineTo(W - padR, volTop); ctx.stroke();
     ctx.fillStyle = TEXT; ctx.font = "10px 'JetBrains Mono', monospace";
     ctx.textAlign = "left"; ctx.fillText("VOL", PAD_L + 4, volTop + 12);
+
+    const volBarTop = volTop + 4;          // 给标签让出 4px
+    const volH2 = volH - 12;
+    const volBaseY = volTop + volH;
+    const volScaleY = (v: number) => volBaseY - Math.min(1, v / vMax) * volH2;
+
     for (let i = 0; i < n; i++) {
       const c = slice[i];
       const x = xOf(i);
       const up = c.close >= c.open;
-      const h = Math.max(1, (c.volume / vMax) * (volH - 12));
-      ctx.fillStyle = up ? UP : DN;
-      ctx.globalAlpha = 0.55;
-      ctx.fillRect(x - cw / 2, volTop + volH - h, cw, h);
+      const h = Math.max(1, Math.min(1, c.volume / vMax) * volH2);
+      const ev = showEvents ? events[vp.start + i] : undefined;
+      ctx.fillStyle = ev?.highVol ? "#fbbf24" : (up ? UP : DN);
+      ctx.globalAlpha = ev?.highVol ? 0.85 : 0.55;
+      ctx.fillRect(x - cw / 2, volBaseY - h, cw, h);
+      // 预估量柱:不再画虚线描边
+      // 量价信号小色块（顶端 2px 横条）
+      if (ev?.volSignal) {
+        const sig = VOL_SIGNAL_STYLE[ev.volSignal];
+        ctx.save();
+        ctx.fillStyle = sig.color;
+        ctx.globalAlpha = 0.95;
+        ctx.fillRect(x - cw / 2, volBaseY - h - 3, cw, 2);
+        ctx.restore();
+      }
     }
     ctx.globalAlpha = 1;
+
+    if (showEvents && events.length > 0) {
+      // ── 量能均线 MA5(橙) / MA20(青) ──
+      const drawMa = (color: string, getter: (e: CandleEvent) => number) => {
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.globalAlpha = 0.85;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        let started = false;
+        for (let i = 0; i < n; i++) {
+          const ev = events[vp.start + i];
+          if (!ev) continue;
+          const v = getter(ev);
+          if (v <= 0) { started = false; continue; }
+          const x = xOf(i);
+          const y = volScaleY(v);
+          if (!started) { ctx.moveTo(x, y); started = true; }
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+        ctx.restore();
+      };
+      drawMa("#fb923c", (e) => e.volMa5);   // MA5 橙
+      drawMa("#22d3ee", (e) => e.volMa20);  // MA20 青
+
+      // ── 量堆 underline（连续 3+ 天 vol_ratio>1.5）紫色 ──
+      ctx.save();
+      ctx.strokeStyle = VOL_STACK_COLOR;
+      ctx.lineWidth = 2;
+      ctx.globalAlpha = 0.9;
+      let segStart = -1;
+      const flush = (endIdx: number) => {
+        if (segStart < 0) return;
+        const x1 = xOf(segStart) - cw / 2;
+        const x2 = xOf(endIdx) + cw / 2;
+        const y = volBaseY + 1;
+        ctx.beginPath(); ctx.moveTo(x1, y); ctx.lineTo(x2, y); ctx.stroke();
+        segStart = -1;
+      };
+      for (let i = 0; i < n; i++) {
+        const ev = events[vp.start + i];
+        if (ev?.volStack) {
+          if (segStart < 0) segStart = i;
+        } else if (segStart >= 0) {
+          flush(i - 1);
+        }
+      }
+      flush(n - 1);
+      ctx.restore();
+
+      // ── 量比 R x.x（VOL 标签右侧）──
+      const lastEv = events[vp.start + n - 1];
+      if (lastEv && lastEv.volRatio > 0) {
+        const ratio = lastEv.volRatio;
+        const ratioColor = ratio >= 3 ? "#ff1744"
+          : ratio >= 2 ? "#fbbf24"
+          : ratio >= 1.5 ? "#fb923c"
+          : ratio < 0.7 ? "#22d3ee"
+          : TEXT;
+        ctx.save();
+        ctx.font = "10px 'JetBrains Mono', monospace";
+        ctx.fillStyle = ratioColor;
+        ctx.textAlign = "left";
+        ctx.fillText(`R ${ratio.toFixed(2)}`, PAD_L + 36, volTop + 12);
+        // 图例 MA5 / MA20
+        ctx.fillStyle = "#fb923c"; ctx.fillText("MA5", PAD_L + 96, volTop + 12);
+        ctx.fillStyle = "#22d3ee"; ctx.fillText("MA20", PAD_L + 130, volTop + 12);
+        ctx.restore();
+      }
+    }
+    void volBarTop;
 
     /* ── crosshair + tooltip ── */
     const mouse = hoverRef.current;
@@ -460,7 +643,9 @@ export function ChartCanvas({ candles, levels, consensus, showMA, showResistance
       const prevClose = ci > 0 ? slice[ci - 1].close : (vp.start > 0 ? candles[vp.start - 1].close : c.open);
       const chgPct = ((c.close - prevClose) / prevClose) * 100;
       const chgUp = chgPct >= 0;
-      const items = [
+      const ev = showEvents ? events[vp.start + ci] : undefined;
+      const evStyle = ev ? styleFor(ev) : null;
+      const items: { l: string; v: string; color?: string }[] = [
         { l: "开", v: c.open.toFixed(2) },
         { l: "高", v: c.high.toFixed(2) },
         { l: "低", v: c.low.toFixed(2) },
@@ -468,18 +653,42 @@ export function ChartCanvas({ candles, levels, consensus, showMA, showResistance
         { l: "涨跌", v: (chgUp ? "+" : "") + chgPct.toFixed(2) + "%", color: chgUp ? UP : DN },
         { l: "量", v: fmtVol(c.volume) },
       ];
+      if (evStyle) {
+        const lbl = ev!.consecutive >= 2 ? `${ev!.consecutive}连${evStyle.label}` : evStyle.label;
+        items.push({ l: "事件", v: lbl, color: evStyle.stroke });
+      }
+      if (ev?.highVol) {
+        items.push({ l: "巨量", v: "✓", color: "#fbbf24" });
+      }
+      if (ev?.volRatio) {
+        const r = ev.volRatio;
+        const rc = r >= 3 ? "#ff1744" : r >= 2 ? "#fbbf24" : r >= 1.5 ? "#fb923c" : r < 0.7 ? "#22d3ee" : TEXT;
+        items.push({ l: "量比", v: r.toFixed(2), color: rc });
+      }
+      if (ev?.volSignal) {
+        const sig = VOL_SIGNAL_STYLE[ev.volSignal];
+        items.push({ l: "信号", v: sig.tip, color: sig.color });
+      }
+      if (ev?.volStack) {
+        items.push({ l: "量堆", v: "✓", color: VOL_STACK_COLOR });
+      }
+      if (ev?.divergence === "top") {
+        items.push({ l: "背离", v: "顶背离 价新高缩量 ↘", color: "#ff1744" });
+      } else if (ev?.divergence === "bottom") {
+        items.push({ l: "背离", v: "底背离 价新低缩量 ↗", color: "#00e676" });
+      }
       let tx = PAD_L + 8;
       const ty = PAD_T + 12;
       for (const it of items) {
         ctx.fillStyle = TEXT;
         ctx.fillText(it.l, tx, ty);
         tx += it.l.length > 1 ? 24 : 14;
-        ctx.fillStyle = (it as any).color ?? (up ? UP : DN);
+        ctx.fillStyle = it.color ?? (up ? UP : DN);
         ctx.fillText(it.v, tx, ty);
         tx += ctx.measureText(it.v).width + 12;
       }
     }
-  }, [candles, levels, consensus, showMA, showResistance, showSupport, showVP, minScore, ensureVp]);
+  }, [candles, levels, consensus, showMA, showResistance, showSupport, showVP, showEvents, events, minScore, ensureVp]);
 
   /* ── schedule draw ── */
   const scheduleDraw = useCallback(() => {

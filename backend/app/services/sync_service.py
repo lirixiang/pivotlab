@@ -503,6 +503,42 @@ def sync_quotes(_task_id: int = None) -> int:
 
         session.close()
 
+        # Fallback: EM clist 全挂时用 Tencent 兜底
+        if not all_quotes:
+            logger.warning("sync_quotes: EM clist returned 0 — falling back to Tencent batch quote")
+            try:
+                from .data_provider import list_universe
+                universe = list_universe()
+                codes_all = [c for c, _, _ in universe if c.startswith(("0", "3", "6", "8", "4"))]
+                tq = tencent_provider.fetch_quotes(codes_all)
+                for q in tq:
+                    code = q.get("code")
+                    price = q.get("price") or 0
+                    if not code or price <= 0:
+                        continue
+                    vol_share = q.get("volume") or 0  # tencent_provider 已统一为「股」
+                    all_quotes.append({
+                        "code": code,
+                        "name": q.get("name") or "",
+                        "price": price,
+                        "change_pct": q.get("change_pct") or 0.0,
+                        "change_amt": q.get("change_amt") or 0.0,
+                        # 下游会 ×100(EM 习惯),这里先 /100 抵消,使最终入库为「股」
+                        "volume": vol_share / 100.0,
+                        "amount": q.get("amount") or 0.0,
+                        "open": q.get("open") or price,
+                        "high": q.get("high") or price,
+                        "low": q.get("low") or price,
+                        "prev_close": q.get("prev_close") or price,
+                        "turnover_rate": q.get("turnover_rate") or 0.0,
+                        "pe_ratio": 0.0,
+                        "market_cap": 0.0,
+                    })
+                total = len(all_quotes)
+                logger.info("sync_quotes: Tencent fallback got %d stocks", total)
+            except Exception as e:
+                logger.error("sync_quotes: Tencent fallback failed: %s", e)
+
         if not all_quotes:
             _finish_task(task_id, 0, 0, "no quotes from EM clist API")
             return task_id
@@ -525,7 +561,9 @@ def sync_quotes(_task_id: int = None) -> int:
                     "high": q["high"],
                     "low": q["low"],
                     "close": q["price"],
-                    "volume": q["volume"],
+                    # EM clist f5 始终以「手」返回,×100 得到股;
+                    # daily_candles.volume 统一以股存储。
+                    "volume": q["volume"] * 100,
                     "amount": q["amount"],
                     "change_pct": q["change_pct"],
                     "change_amt": q["change_amt"],
@@ -1384,6 +1422,18 @@ def _tx_kline_symbol(code: str) -> str:
     return f"sz{code}"
 
 
+def _qfqday_volume_to_shares(code: str, raw_vol: float) -> int:
+    """Tencent qfqday 与深交所实时接口:主板 / 中小创返「手」,科创 688/689 与北交所 8/4 返「股」。"""
+    if code.startswith(("688", "689", "8", "4")):
+        return int(raw_vol)
+    return int(raw_vol * 100)
+
+
+def _em_volume_to_shares(raw_vol: float) -> int:
+    """EM clist 与 EM kline f5 始终以「手」返回,乘 100 得到「股」。"""
+    return int(raw_vol * 100)
+
+
 def _fetch_candles_batch(session, code: str, beg: str, days: int, source: str = "dual") -> list[dict]:
     """Fetch daily candles from configured source.
 
@@ -1392,7 +1442,11 @@ def _fetch_candles_batch(session, code: str, beg: str, days: int, source: str = 
     if source == "tencent":
         return _fetch_candles_tencent(session, code, beg, days)
     elif source == "em_push":
-        return _fetch_candles_em(session, code, beg, days)
+        # EM 优先,失败时自动用 Tencent 兜底(避免 push2his 全挂时整个回填失败)
+        rows = _fetch_candles_em(session, code, beg, days)
+        if rows:
+            return rows
+        return _fetch_candles_tencent(session, code, beg, days)
     # dual: try tencent, fallback EM
     rows = _fetch_candles_tencent(session, code, beg, days)
     if rows:
@@ -1424,7 +1478,7 @@ def _fetch_candles_tencent(session, code: str, beg: str, days: int) -> list[dict
                         "close": float(k[2]),
                         "high": float(k[3]),
                         "low": float(k[4]),
-                        "volume": int(float(k[5])),
+                        "volume": _qfqday_volume_to_shares(code, float(k[5])),
                     })
                 return rows
     except Exception:
@@ -1457,7 +1511,7 @@ def _fetch_candles_em(session, code: str, beg: str, days: int) -> list[dict]:
                         "close": float(parts[2]),
                         "high": float(parts[3]),
                         "low": float(parts[4]),
-                        "volume": int(float(parts[5])),
+                        "volume": _em_volume_to_shares(float(parts[5])),
                     })
                 return rows
     except Exception:
@@ -1518,7 +1572,8 @@ def _fetch_today_candles_clist(session) -> list[dict]:
                     "high": float(h),
                     "low": float(l),
                     "close": float(close),
-                    "volume": int(float(v)),
+                    # EM clist f5 = 手,×100 得股。
+                    "volume": int(float(v) * 100),
                 })
             except (ValueError, TypeError):
                 continue
@@ -1526,6 +1581,38 @@ def _fetch_today_candles_clist(session) -> list[dict]:
         page += 1
         if page > 200:  # safety limit
             break
+
+    # Fallback: 如果 EM clist 完全失败(502/限流),用 Tencent batch quote 兜底
+    if not all_rows:
+        logger.warning("sync_candles: EM clist returned 0 stocks — falling back to Tencent batch quote")
+        try:
+            from .data_provider import list_universe
+            from . import tencent_provider
+            universe = list_universe()
+            codes = [c for c, _, _ in universe if c.startswith(("0", "3", "6")) and not c.startswith("4")]
+            quotes = tencent_provider.fetch_quotes(codes)
+            for q in quotes:
+                code = q.get("code")
+                price = q.get("price") or 0
+                openp = q.get("open") or 0
+                high = q.get("high") or 0
+                low = q.get("low") or 0
+                vol_share = q.get("volume") or 0  # tencent_provider 返回「股」
+                if not code or price <= 0 or openp <= 0 or vol_share <= 0:
+                    continue
+                # daily_candles 约定单位:股(与 EM clist ×100 后写入一致)
+                all_rows.append({
+                    "code": code,
+                    "trade_date": today,
+                    "open": openp,
+                    "high": high if high > 0 else price,
+                    "low": low if low > 0 else price,
+                    "close": price,
+                    "volume": int(vol_share),
+                })
+            logger.info("sync_candles: Tencent fallback got %d stocks", len(all_rows))
+        except Exception as e:
+            logger.error("sync_candles: Tencent fallback failed: %s", e)
 
     return all_rows
 
@@ -2059,25 +2146,84 @@ def _safe_float(row, col: str, default: float = 0.0) -> float:
 # ═══════════════════════════════════════════════════════════════
 
 def _candles_are_stale() -> bool:
-    """Check if daily candles are stale (latest date is not today).
-    Only considers trading hours — before 9:30 uses yesterday's date."""
-    from datetime import date as _date
+    """Check if daily candles are stale (returns True when sync is needed).
+
+    Triggers sync when:
+      - 没有任何 candle 数据
+      - 最近交易日没数据 (latest < expected_latest)
+      - 今天数据残缺 (latest=today 但 < 3000 行)
+      - 过去 14 天交易日数明显偏少(说明中间有缺口)
+
+    9:30 之前/周末按"上一交易日"判断。
+    """
+    from datetime import date as _date, timedelta
     from sqlalchemy import func as sa_func
     now = datetime.now()
-    # Before 9:30 AM, don't consider candles stale (market hasn't opened)
-    if now.hour < 9 or (now.hour == 9 and now.minute < 30):
-        return False
-    today = _date.today().strftime("%Y-%m-%d")
+
+    # 期望的"最近交易日"
+    today = _date.today()
+    if now.weekday() >= 5:
+        # 周末: 上周五
+        expected_latest = today - timedelta(days=now.weekday() - 4)
+    elif now.hour < 9 or (now.hour == 9 and now.minute < 30):
+        # 工作日 9:30 前: 上一工作日 (周一→上周五)
+        expected_latest = today - timedelta(days=3 if now.weekday() == 0 else 1)
+    else:
+        expected_latest = today
+    expected_str = expected_latest.strftime("%Y-%m-%d")
+    today_str = today.strftime("%Y-%m-%d")
+
     try:
         with _get_session() as s:
-            latest = s.execute(
-                select(sa_func.max(DailyCandle.trade_date))
-            ).scalar()
-        if not latest:
-            return True
-        return latest < today
+            latest = s.execute(select(sa_func.max(DailyCandle.trade_date))).scalar()
+            if not latest:
+                return True
+            if latest < expected_str:
+                logger.info("candles stale: latest=%s expected>=%s", latest, expected_str)
+                return True
+            # 今天数据完整性
+            if latest == today_str:
+                today_rows = s.execute(
+                    select(sa_func.count(DailyCandle.code)).where(DailyCandle.trade_date == today_str)
+                ).scalar() or 0
+                if today_rows < 3000:
+                    logger.info("candles stale: today=%s only %d rows (<3000)", today_str, today_rows)
+                    return True
+            # 缺口检测: 过去 14 天 distinct 日期数 — 应有 ≈10 个交易日
+            since = (today - timedelta(days=14)).strftime("%Y-%m-%d")
+            distinct_days = s.execute(
+                select(sa_func.count(sa_func.distinct(DailyCandle.trade_date)))
+                .where(DailyCandle.trade_date >= since)
+            ).scalar() or 0
+            if distinct_days < 9:
+                logger.info("candles stale: only %d distinct days in last 14 days (<9)", distinct_days)
+                return True
+        return False
     except Exception:
         return False
+
+
+def _suggest_sync_days() -> int:
+    """估算 sync_candles 应该取多少天才能补齐缺口。
+    返回值: 30 / 90 / 365 三档。
+    """
+    from datetime import date as _date, timedelta
+    from sqlalchemy import func as sa_func
+    today = _date.today()
+    try:
+        with _get_session() as s:
+            latest = s.execute(select(sa_func.max(DailyCandle.trade_date))).scalar()
+        if not latest:
+            return 365
+        latest_d = _date.fromisoformat(latest)
+        gap = (today - latest_d).days
+        if gap <= 7:
+            return 30          # 缺一周内: 拉 30 天足够
+        if gap <= 60:
+            return 90          # 缺 1-2 月: 拉 90 天
+        return 365             # 缺更多: 拉一年
+    except Exception:
+        return 365
 
 
 def _is_market_hours() -> bool:
@@ -2089,9 +2235,12 @@ def _is_market_hours() -> bool:
     return 930 <= t <= 1500
 
 
-def run_screener(_task_id: int = None):
-    """Run all pattern detectors and save results to .screener_cache/*.json.
+def run_screener(_task_id: int = None, pattern: str | None = None):
+    """Run pattern detectors and save results to .screener_cache/*.json.
 
+    Args:
+      pattern: 如果传入单个 pattern key, 只扫该模式（快很多）；
+               为 None 时扫全部 5 个形态。
     Automatically syncs daily candles first if data is stale.
     During market hours, also syncs quotes and appends live candles.
     """
@@ -2100,6 +2249,12 @@ def run_screener(_task_id: int = None):
     from .data_provider import get_candles, list_universe
     from ..schemas import Candle
     from .screener import PATTERN_DETECTORS, clear_sr_cache
+
+    # Filter detectors to a single pattern if requested
+    if pattern and pattern not in PATTERN_DETECTORS:
+        logger.error("screener: unknown pattern %s", pattern)
+        return -1
+    active_patterns = {pattern: PATTERN_DETECTORS[pattern]} if pattern else dict(PATTERN_DETECTORS)
 
     task_id = _get_or_create_task("screener", _task_id)
     if task_id == -1:
@@ -2111,8 +2266,9 @@ def run_screener(_task_id: int = None):
 
     # Auto-sync candles if stale
     if _candles_are_stale():
-        logger.info("screener: candles are stale, syncing first...")
-        sync_candles(days=365)
+        days_to_sync = _suggest_sync_days()
+        logger.info("screener: candles are stale, syncing %d days first...", days_to_sync)
+        sync_candles(days=days_to_sync)
         logger.info("screener: candle sync done")
 
     # During market hours, sync quotes and build live candle map
@@ -2163,11 +2319,13 @@ def run_screener(_task_id: int = None):
     logger.info("screener: loaded %d concepts, %d financials", len(concept_map), len(fundamental_map))
 
     universe = list_universe()
-    # Filter: main board only (沪A/深A, i.e. 60xxxx and 00xxxx)
-    universe = [(c, n, ind) for c, n, ind in universe if c.startswith("6") or c.startswith("0")]
-    total_work = len(universe) * len(PATTERN_DETECTORS)
+    # 业务层全局过滤:仅主板(沪 600/601/603/605 + 深 000/001/002/003)
+    from ..utils.markets import filter_main_board
+    universe = filter_main_board(universe, key=lambda r: r[0])
+    total_work = len(universe) * len(active_patterns)
     processed = 0
-    logger.info("screener: scanning %d stocks × %d patterns (main board only)", len(universe), len(PATTERN_DETECTORS))
+    logger.info("screener: scanning %d stocks × %d patterns%s (main board only)",
+                len(universe), len(active_patterns), f" [{pattern}]" if pattern else "")
 
     # Update task total early so the frontend can show progress
     _update_task_progress(task_id, 0, total_work)
@@ -2200,13 +2358,13 @@ def run_screener(_task_id: int = None):
         return candles
 
     # Results per pattern
-    all_items: dict[str, list] = {p: [] for p in PATTERN_DETECTORS}
+    all_items: dict[str, list] = {p: [] for p in active_patterns}
 
     for idx, (code, name, _ind) in enumerate(universe):
         try:
             candles = _get_candles_with_live(code)
             if not candles or len(candles) < 120:
-                processed += len(PATTERN_DETECTORS)
+                processed += len(active_patterns)
                 continue
 
             # Weekly candles: fetch once per stock
@@ -2217,7 +2375,7 @@ def run_screener(_task_id: int = None):
 
             # Run all patterns for this stock (SR cache valid for one stock)
             clear_sr_cache()
-            for pattern, detector in PATTERN_DETECTORS.items():
+            for pat, detector in active_patterns.items():
                 r = detector(code, name, candles, weekly_candles=weekly)
                 if r:
                     q = quote_map.get(code)
@@ -2237,18 +2395,18 @@ def run_screener(_task_id: int = None):
                     if fin:
                         r.fundamental_status = fin[0]
                         r.fundamental_summary = fin[1]
-                    all_items[pattern].append(r)
+                    all_items[pat].append(r)
                 processed += 1
         except Exception:
-            processed += len(PATTERN_DETECTORS)
+            processed += len(active_patterns)
         if idx % 50 == 0:
             _update_task_progress(task_id, processed, total_work)
 
     # Save results per pattern
-    for pattern in PATTERN_DETECTORS:
-        items = sorted(all_items[pattern], key=lambda x: x.score, reverse=True)
+    for pat in active_patterns:
+        items = sorted(all_items[pat], key=lambda x: x.score, reverse=True)
         result = {
-            "pattern": pattern,
+            "pattern": pat,
             "total": len(items),
             "scanned": len(universe),
             "scanned_at": datetime.now().isoformat(),
@@ -2270,19 +2428,19 @@ def run_screener(_task_id: int = None):
                 for it in items
             ],
         }
-        path = _os.path.join(cache_dir, f"{pattern}.json")
+        path = _os.path.join(cache_dir, f"{pat}.json")
         with open(path, "w") as f:
             _json.dump(result, f, ensure_ascii=False)
         ts = datetime.now().strftime("%Y%m%d_%H%M")
-        hist_path = _os.path.join(cache_dir, f"{pattern}_{ts}.json")
+        hist_path = _os.path.join(cache_dir, f"{pat}_{ts}.json")
         with open(hist_path, "w") as f:
             _json.dump(result, f, ensure_ascii=False)
-        logger.info("screener: %s → %d items (saved history %s)", pattern, len(items), ts)
+        logger.info("screener: %s → %d items (saved history %s)", pat, len(items), ts)
 
     # Cleanup old history files (keep last 30 per pattern)
-    for pattern in PATTERN_DETECTORS:
+    for pat in active_patterns:
         import glob
-        hist_files = sorted(glob.glob(_os.path.join(cache_dir, f"{pattern}_*.json")), reverse=True)
+        hist_files = sorted(glob.glob(_os.path.join(cache_dir, f"{pat}_*.json")), reverse=True)
         for old in hist_files[30:]:
             try:
                 _os.remove(old)

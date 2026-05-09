@@ -34,6 +34,25 @@ TASK_REGISTRY = {
     "screener":           "run_screener",
 }
 
+# Dragon-strategy sync tasks (use a different module — dragon_sync)
+DRAGON_TASK_REGISTRY = {
+    "zt_pool":              "sync_zt_pool",
+    "lhb":                  "sync_lhb",
+    "concept_heat_history": "sync_concept_heat_history",
+    "dragon_all":           "sync_dragon_all",
+    "dragon_backfill":      "backfill_dragon_history",
+}
+
+# Strategy / ML tasks (use module app.services.strategy_jobs)
+STRATEGY_TASK_REGISTRY = {
+    "recommend_scan":   "run_recommend_scan",
+    "train_lgbm":       "run_train_lgbm",
+    "train_seq":        "run_train_seq",
+    "train_rl":         "run_train_rl",
+    "sync_indices":     "run_sync_indices",
+    "lifecycle_update": "run_lifecycle_update",
+}
+
 
 def _signal_handler(signum, frame):
     logger.error("sync worker received signal %s (%s)", signum, signal.Signals(signum).name)
@@ -52,6 +71,14 @@ def main():
         sys.exit(1)
 
     fn_name = TASK_REGISTRY.get(task_type)
+    dragon_fn = DRAGON_TASK_REGISTRY.get(task_type)
+    strat_fn = STRATEGY_TASK_REGISTRY.get(task_type)
+    use_dragon = dragon_fn is not None
+    use_strat = strat_fn is not None
+    if use_dragon:
+        fn_name = dragon_fn
+    elif use_strat:
+        fn_name = strat_fn
     if not fn_name:
         logger.error("Unknown task type: %s", task_type)
         sys.exit(1)
@@ -69,8 +96,13 @@ def main():
         kwargs["_task_id"] = int(task_id)
 
     try:
-        from app.services import sync_service
-        fn = getattr(sync_service, fn_name)
+        if use_dragon:
+            from app.services import dragon_sync as _module
+        elif use_strat:
+            from app.services import strategy_jobs as _module
+        else:
+            from app.services import sync_service as _module
+        fn = getattr(_module, fn_name)
         logger.info("Starting %s(%s)", fn_name, kwargs or "")
         fn(**kwargs) if kwargs else fn()
         logger.info("Finished %s", fn_name)

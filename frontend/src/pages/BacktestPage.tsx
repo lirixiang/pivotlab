@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useUrlParam } from "../utils/useUrlParam";
 import { api } from "../services/api";
 import { TradeChart } from "../components/TradeChart";
 import type { BacktestResponse, BacktestTrade, Candle, OptimizeResult, TradeSignal } from "../types";
@@ -12,8 +13,8 @@ const PERIODS = [
 
 export function BacktestPage({ defaultCode }: { defaultCode: string }) {
   const [code, setCode] = useState(defaultCode);
-  const [period, setPeriod] = useState("3m");
-  const [strategy, setStrategy] = useState("breakout_pullback");
+  const [period, setPeriod] = useUrlParam<string>("period", "3m");
+  const [strategy, setStrategy] = useUrlParam<string>("strategy", "breakout_pullback");
   const [stopLoss, setStopLoss] = useState(2.5);
   const [target, setTarget] = useState(6);
   const [maxHold, setMaxHold] = useState(20);

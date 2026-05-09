@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import time as _time
 import uuid
@@ -367,6 +368,38 @@ def _all_scans() -> list[dict]:
         proc = _scan_workers[tid]
         if proc.poll() is not None:
             del _scan_workers[tid]
+    # Heal orphan "scanning"/"loading"/"pending" tasks whose worker process is gone
+    # (e.g. container was restarted mid-scan). Without this they stay forever as
+    # "scanning" with huge results payloads, and the frontend polls them every 2s.
+    ACTIVE = ("pending", "loading", "scanning")
+    for t in tasks:
+        if t.get("status") in ACTIVE:
+            tid = t.get("task_id") or ""
+            if tid not in _scan_workers:
+                t["status"] = "failed"
+                t["message"] = "进程异常退出(可能因服务重启),任务已中止"
+                t["ended_at"] = t.get("ended_at") or _time.time()
+                # persist so we don't keep transforming on every poll
+                fp = _scan_file(tid)
+                try:
+                    fp.write_text(json.dumps(t, ensure_ascii=False))
+                except OSError:
+                    pass
+    # Trim payload: only the active task and the most-recent completed task need
+    # their full `results` array on the live polling endpoint. Older finished
+    # tasks keep summary fields only (callers can use /scan_history/{ts} for
+    # full snapshots). This keeps the 2s poll small even after many scans.
+    seen_completed = False
+    for t in tasks:
+        st = t.get("status")
+        if st in ACTIVE:
+            continue
+        if st == "completed" and not seen_completed:
+            seen_completed = True
+            continue
+        if "results" in t and t["results"]:
+            t["results_count"] = len(t["results"])
+            t["results"] = []
     return tasks
 
 
@@ -485,3 +518,50 @@ async def clear_scan_history():
         except Exception:
             pass
     return {"removed": removed}
+
+
+# ─── AI Scan history snapshots ───
+_SCAN_HIST_DIR = _SCAN_DIR / "history"
+
+
+def _list_snapshots() -> list[dict]:
+    if not _SCAN_HIST_DIR.exists():
+        return []
+    out = []
+    for p in sorted(_SCAN_HIST_DIR.glob("*.json"), reverse=True):
+        try:
+            d = json.loads(p.read_text())
+            out.append({
+                "ts": d.get("ts", p.stem),
+                "scope": d.get("scope", ""),
+                "scope_code": d.get("scope_code", ""),
+                "model_types": d.get("model_types", []),
+                "scanned": d.get("scanned", 0),
+                "total": d.get("total", 0),
+                "hits_total": d.get("hits_total", len(d.get("results", []))),
+                "started_at": d.get("started_at"),
+                "ended_at": d.get("ended_at"),
+            })
+        except Exception:
+            continue
+    return out
+
+
+@router.get("/scan_history")
+async def scan_history(limit: int = 50):
+    """List historical scan snapshots, newest first."""
+    return _list_snapshots()[:limit]
+
+
+@router.get("/scan_history/{ts}")
+async def scan_snapshot(ts: str):
+    """Load a specific historical scan snapshot."""
+    if not re.match(r"^\d{8}_\d{4}$", ts):
+        return {"error": "invalid timestamp"}
+    p = _SCAN_HIST_DIR / f"{ts}.json"
+    if not p.exists():
+        return {"error": "snapshot not found"}
+    try:
+        return json.loads(p.read_text())
+    except Exception as e:
+        return {"error": str(e)}

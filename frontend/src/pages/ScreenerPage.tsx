@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../services/api";
+import { useUrlParam } from "../utils/useUrlParam";
 import type { ScreenerItem, ScreenerResponse, SyncTask } from "../types";
 
 const PATTERNS = [
@@ -10,10 +11,18 @@ const PATTERNS = [
   { key: "macd_divergence", label: "MACD底背离", color: "violet" },
 ];
 
-type SortKey = "score" | "change_pct" | "volume_ratio" | "distance" | "price" | "rr_ratio" | "support_score" | "amount";
+type SortKey =
+  | "score" | "change_pct" | "volume_ratio" | "distance" | "price"
+  | "rr_ratio" | "support_score" | "amount"
+  | "name" | "market" | "industry" | "concept" | "fundamental" | "triggers";
 type SortDir = "asc" | "desc";
 
 const COLUMNS: { key: SortKey; label: string; defaultDir: SortDir }[] = [
+  { key: "name", label: "代码/名称", defaultDir: "asc" },
+  { key: "market", label: "市场", defaultDir: "asc" },
+  { key: "industry", label: "行业", defaultDir: "asc" },
+  { key: "concept", label: "概念", defaultDir: "asc" },
+  { key: "fundamental", label: "基本面", defaultDir: "desc" },
   { key: "score", label: "信号强度", defaultDir: "desc" },
   { key: "price", label: "现价", defaultDir: "desc" },
   { key: "change_pct", label: "涨跌幅", defaultDir: "desc" },
@@ -22,17 +31,26 @@ const COLUMNS: { key: SortKey; label: string; defaultDir: SortDir }[] = [
   { key: "distance", label: "距支撑", defaultDir: "asc" },
   { key: "rr_ratio", label: "盈亏比", defaultDir: "desc" },
   { key: "support_score", label: "支撑强度", defaultDir: "desc" },
+  { key: "triggers", label: "触发条件", defaultDir: "desc" },
 ];
 
-export function ScreenerPage({ onPickStock }: { onPickStock: (code: string) => void }) {
-  const [pattern, setPattern] = useState("breakout_pullback");
+const FUND_RANK: Record<string, number> = { healthy: 4, neutral: 3, weak: 2, risk: 1, unknown: 0, "": 0 };
+
+export function ScreenerPage({
+  onPickStock,
+  onShowRecommend,
+}: {
+  onPickStock: (code: string) => void;
+  onShowRecommend?: (code: string) => void;
+}) {
+  const [pattern, setPattern] = useUrlParam<string>("pattern", "breakout_pullback");
   const [data, setData] = useState<Record<string, ScreenerResponse>>({});
   const [loading, setLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [scanProgress, setScanProgress] = useState<{ processed: number; total: number } | null>(null);
   const [minScore, setMinScore] = useState(0);
-  const [sortKey, setSortKey] = useState<SortKey>(() => (localStorage.getItem("screener_sortKey") as SortKey) || "score");
-  const [sortDir, setSortDir] = useState<SortDir>(() => (localStorage.getItem("screener_sortDir") as SortDir) || "desc");
+  const [sortKey, setSortKey] = useUrlParam<SortKey>("sort", "score");
+  const [sortDir, setSortDir] = useUrlParam<SortDir>("dir", "desc");
   const [history, setHistory] = useState<{ ts: string; scanned_at: string; total: number; scanned: number }[]>([]);
   const [histOpen, setHistOpen] = useState(false);
   const [activeTs, setActiveTs] = useState<string | null>(null); // null = latest
@@ -68,12 +86,12 @@ export function ScreenerPage({ onPickStock }: { onPickStock: (code: string) => v
     return () => document.removeEventListener("mousedown", handler);
   }, [histOpen]);
 
-  const runScan = async () => {
+  const runScan = async (scope: "current" | "all" = "current") => {
     setScanning(true);
     setScanProgress(null);
     setActiveTs(null);
     try {
-      await api.triggerScan();
+      await api.triggerScan(scope === "current" ? pattern : undefined);
       // Poll progress from sync tasks
       for (let i = 0; i < 120; i++) {
         await new Promise((r) => setTimeout(r, 2000));
@@ -118,15 +136,11 @@ export function ScreenerPage({ onPickStock }: { onPickStock: (code: string) => v
 
   const handleSort = (key: SortKey) => {
     if (key === sortKey) {
-      const next = sortDir === "desc" ? "asc" : "desc";
-      setSortDir(next);
-      localStorage.setItem("screener_sortDir", next);
+      setSortDir(sortDir === "desc" ? "asc" : "desc");
     } else {
       const col = COLUMNS.find((c) => c.key === key)!;
       setSortKey(key);
       setSortDir(col.defaultDir);
-      localStorage.setItem("screener_sortKey", key);
-      localStorage.setItem("screener_sortDir", col.defaultDir);
     }
   };
 
@@ -134,23 +148,28 @@ export function ScreenerPage({ onPickStock }: { onPickStock: (code: string) => v
     const raw = data[pattern]?.items ?? [];
     const filtered = minScore > 0 ? raw.filter((i) => i.score >= minScore) : raw;
     const mul = sortDir === "desc" ? -1 : 1;
-    return [...filtered].sort((a, b) => {
-      let va: number, vb: number;
+    const getVal = (it: ScreenerItem): number | string => {
       switch (sortKey) {
-        case "score": va = a.score; vb = b.score; break;
-        case "price": va = a.price; vb = b.price; break;
-        case "change_pct": va = a.change_pct; vb = b.change_pct; break;
-        case "volume_ratio": va = a.volume_ratio; vb = b.volume_ratio; break;
-        case "amount": va = a.amount ?? 0; vb = b.amount ?? 0; break;
-        case "rr_ratio": va = a.rr_ratio ?? 0; vb = b.rr_ratio ?? 0; break;
-        case "support_score": va = a.support_score ?? 0; vb = b.support_score ?? 0; break;
-        case "distance":
-          va = a.distance_to_support_pct ?? 999;
-          vb = b.distance_to_support_pct ?? 999;
-          break;
-        default: return 0;
+        case "score": return it.score;
+        case "price": return it.price;
+        case "change_pct": return it.change_pct;
+        case "volume_ratio": return it.volume_ratio;
+        case "amount": return it.amount ?? 0;
+        case "rr_ratio": return it.rr_ratio ?? 0;
+        case "support_score": return it.support_score ?? 0;
+        case "distance": return it.distance_to_support_pct ?? 999;
+        case "name": return it.name || it.code;
+        case "market": return it.market || "";
+        case "industry": return it.industry || "";
+        case "concept": return it.concept || "";
+        case "fundamental": return FUND_RANK[it.fundamental_status ?? ""] ?? 0;
+        case "triggers": return it.triggers?.length ?? 0;
       }
-      return (va - vb) * mul;
+    };
+    return [...filtered].sort((a, b) => {
+      const va = getVal(a), vb = getVal(b);
+      if (typeof va === "string" && typeof vb === "string") return va.localeCompare(vb) * mul;
+      return ((va as number) - (vb as number)) * mul;
     });
   }, [data, pattern, minScore, sortKey, sortDir]);
 
@@ -247,17 +266,28 @@ export function ScreenerPage({ onPickStock }: { onPickStock: (code: string) => v
               </div>
             )}
           </div>
-          <button
-            className="px-3 py-1.5 text-[12px] rounded-md grad-gold text-ink-950 font-semibold disabled:opacity-50"
-            onClick={runScan}
-            disabled={scanning}
-          >
-            {scanning ? (
-              <><i className="fas fa-circle-notch fa-spin mr-1" /> 扫描中...</>
-            ) : (
-              <><i className="fas fa-bolt mr-1" /> 全市场扫描</>
-            )}
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              className="px-3 py-1.5 text-[12px] rounded-l-md grad-gold text-ink-950 font-semibold disabled:opacity-50"
+              onClick={() => runScan("current")}
+              disabled={scanning}
+              title={`仅扫描当前选中的形态(约 3810 只×1 形态,快 5 倍)`}
+            >
+              {scanning ? (
+                <><i className="fas fa-circle-notch fa-spin mr-1" /> 扫描中...</>
+              ) : (
+                <><i className="fas fa-bolt mr-1" /> 当前形态</>
+              )}
+            </button>
+            <button
+              className="px-2 py-1.5 text-[12px] rounded-r-md bg-ink-800 hover:bg-ink-700 text-ink-200 disabled:opacity-50 border-l border-ink-900"
+              onClick={() => runScan("all")}
+              disabled={scanning}
+              title="扫描全部 5 个形态 (约 19050 任务，较慢)"
+            >
+              <i className="fas fa-layer-group mr-1" />全部
+            </button>
+          </div>
         </div>
       </div>
 
@@ -294,11 +324,11 @@ export function ScreenerPage({ onPickStock }: { onPickStock: (code: string) => v
           <thead className="text-ink-500 text-[10px] tracking-wider uppercase sticky top-0 grad-head z-10">
             <tr className="border-b border-ink-800">
               <th className="text-left font-normal px-5 py-2.5 w-8">#</th>
-              <th className="text-left font-normal px-2">代码 / 名称</th>
-              <th className="text-left font-normal px-2">市场</th>
-              <th className="text-left font-normal px-2">行业</th>
-              <th className="text-left font-normal px-2">概念</th>
-              <th className="text-left font-normal px-2">基本面</th>
+              <SortTh k="name" label="代码 / 名称" sortKey={sortKey} sortDir={sortDir} onClick={handleSort} align="left" />
+              <SortTh k="market" label="市场" sortKey={sortKey} sortDir={sortDir} onClick={handleSort} align="left" />
+              <SortTh k="industry" label="行业" sortKey={sortKey} sortDir={sortDir} onClick={handleSort} align="left" />
+              <SortTh k="concept" label="概念" sortKey={sortKey} sortDir={sortDir} onClick={handleSort} align="left" />
+              <SortTh k="fundamental" label="基本面" sortKey={sortKey} sortDir={sortDir} onClick={handleSort} align="left" />
               <SortTh k="price" label="现价" sortKey={sortKey} sortDir={sortDir} onClick={handleSort} align="right" />
               <SortTh k="change_pct" label="涨跌幅" sortKey={sortKey} sortDir={sortDir} onClick={handleSort} align="right" />
               <SortTh k="amount" label="成交额(万)" sortKey={sortKey} sortDir={sortDir} onClick={handleSort} align="right" />
@@ -307,13 +337,14 @@ export function ScreenerPage({ onPickStock }: { onPickStock: (code: string) => v
               <SortTh k="support_score" label="支撑强度" sortKey={sortKey} sortDir={sortDir} onClick={handleSort} align="right" />
               <SortTh k="volume_ratio" label="量比" sortKey={sortKey} sortDir={sortDir} onClick={handleSort} align="right" />
               <SortTh k="score" label="信号强度" sortKey={sortKey} sortDir={sortDir} onClick={handleSort} align="left" className="w-36" />
-              <th className="text-left font-normal px-2">触发条件</th>
+              <SortTh k="triggers" label="触发条件" sortKey={sortKey} sortDir={sortDir} onClick={handleSort} align="left" />
+              <th className="text-right font-normal px-2 w-20">推荐</th>
             </tr>
           </thead>
           <tbody className="text-ink-200">
             {(loading || scanning) && items.length === 0 && (
               <tr>
-                <td colSpan={15} className="text-center text-ink-500 py-16">
+                <td colSpan={16} className="text-center text-ink-500 py-16">
                   <i className="fas fa-circle-notch fa-spin text-xl text-gold mb-3 block" />
                   {scanning
                     ? scanProgress && scanProgress.total > 0
@@ -325,7 +356,7 @@ export function ScreenerPage({ onPickStock }: { onPickStock: (code: string) => v
             )}
             {!loading && !scanning && items.length === 0 && (
               <tr>
-                <td colSpan={15} className="text-center text-ink-500 py-16">
+                <td colSpan={16} className="text-center text-ink-500 py-16">
                   <i className="fas fa-binoculars text-2xl text-ink-700 block mb-3" />
                   <div>暂无结果</div>
                   <div className="mt-1 text-[11px]">
@@ -417,6 +448,17 @@ export function ScreenerPage({ onPickStock }: { onPickStock: (code: string) => v
                         </span>
                       ))}
                     </div>
+                  </td>
+                  <td className="px-2 text-right">
+                    {onShowRecommend && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onShowRecommend(it.code); }}
+                        className="px-2 py-1 text-[10px] rounded bg-gold/20 text-gold hover:bg-gold/30 whitespace-nowrap"
+                        title="跳转到选股页查看该股票的推荐"
+                      >
+                        <i className="fas fa-bullseye mr-1" />推荐
+                      </button>
+                    )}
                   </td>
                 </tr>
               );

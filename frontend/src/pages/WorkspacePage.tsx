@@ -2,24 +2,15 @@ import { useEffect, useState, useCallback } from "react";
 import { WatchlistPanel } from "../components/WatchlistPanel";
 import { ChartWorkspace } from "../components/ChartWorkspace";
 import { LevelsPanel } from "../components/LevelsPanel";
-import { ScreenerTable } from "../components/ScreenerTable";
 import { api } from "../services/api";
-import type { ScreenerItem, StockDetail, SrFactor } from "../types";
+import type { StockDetail, SrFactor } from "../types";
 
 export function WorkspacePage({
   code,
   onSelect,
-  onScanResults,
-  scanCounts,
-  breakoutResults,
-  bottomResults,
 }: {
   code: string;
   onSelect: (c: string) => void;
-  onScanResults: (r: { breakout: ScreenerItem[]; bottom: ScreenerItem[] }) => void;
-  scanCounts: { breakout: number; bottom: number; high: number };
-  breakoutResults: ScreenerItem[];
-  bottomResults: ScreenerItem[];
 }) {
   const [period, setPeriod] = useState("日线");
   const [data, setData] = useState<StockDetail | null>(null);
@@ -152,7 +143,7 @@ export function WorkspacePage({
       className="grid flex-1"
       style={{ gridTemplateColumns: "280px 1fr 340px", minHeight: "calc(100vh - 84px)" }}
     >
-      <WatchlistPanel activeCode={code} onSelect={onSelect} scanCounts={scanCounts} refreshKey={watchRefreshKey} />
+      <WatchlistPanel activeCode={code} onSelect={onSelect} refreshKey={watchRefreshKey} />
 
       <div className="flex flex-col">
         <ChartWorkspace
@@ -166,7 +157,6 @@ export function WorkspacePage({
           onToggleWatch={toggleWatch}
           minScore={minScore}
         />
-        <ScreenerTable onSelect={onSelect} onResults={onScanResults} />
       </div>
 
       <aside className="border-l border-ink-700 bg-ink-900 flex flex-col overflow-y-auto scrollbar">

@@ -19,7 +19,16 @@ import concurrent.futures
 import logging
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+# 容器内时区可能是 UTC,A 股交易时间判断必须用东八区。
+_CST = timezone(timedelta(hours=8))
+
+
+def _now_cst() -> datetime:
+    """北京时间 (UTC+8) 当前时刻,naive datetime(去掉 tzinfo 便于沿用旧接口)。"""
+    return datetime.now(_CST).replace(tzinfo=None)
+
 from typing import Iterable, Optional
 
 import requests as _req
@@ -43,7 +52,7 @@ _HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit
 
 def _is_trade_hours() -> bool:
     """Return True if within A-share trading window (weekday 09:15–15:10 CST)."""
-    now = datetime.now()
+    now = _now_cst()
     if now.weekday() >= 5:          # Saturday / Sunday
         return False
     t = now.hour * 100 + now.minute
@@ -52,7 +61,7 @@ def _is_trade_hours() -> bool:
 
 def _market_closed_today() -> bool:
     """Return True if today is a weekday and market already closed (after 15:10)."""
-    now = datetime.now()
+    now = _now_cst()
     if now.weekday() >= 5:
         return False  # weekend — not 'closed today', just non-trading
     return now.hour * 100 + now.minute > 1510
@@ -181,10 +190,12 @@ def _fetch_candles_tencent(code: str, start: str, days: int) -> list[Candle]:
             stock = data.get(symbol.lower(), data.get(symbol, {}))
             klines = stock.get("qfqday") or stock.get("day") or []
             if klines:
+                # Tencent qfqday: 主板 / 中小创 = 手,科创/北交 = 股。
+                vmul = 1 if code.startswith(("688", "689", "8", "4")) else 100
                 return [
                     Candle(date=k[0], open=float(k[1]), close=float(k[2]),
                            high=float(k[3]), low=float(k[4]),
-                           volume=int(float(k[5])))
+                           volume=int(float(k[5]) * vmul))
                     for k in klines if len(k) >= 6
                 ]
     except Exception as e:
@@ -213,10 +224,11 @@ def _fetch_candles_em(code: str, start: str, days: int, period: str = "101") -> 
         if r.status_code == 200:
             data = r.json().get("data")
             if data and data.get("klines"):
+                # EM kline f5 始终以「手」返回。
                 return [
                     Candle(date=parts[0], open=float(parts[1]), close=float(parts[2]),
                            high=float(parts[3]), low=float(parts[4]),
-                           volume=int(float(parts[5])))
+                           volume=int(float(parts[5]) * 100))
                     for line in data["klines"]
                     for parts in [line.split(",")]
                     if len(parts) >= 6
@@ -276,7 +288,7 @@ def _resample_candles(candles: list[Candle], period: str) -> list[Candle]:
 
 def _fetch_candles_sync(code: str, days: int = 240) -> list[Candle]:
     """Fetch daily candles: try Tencent first, then East Money. Direct HTTP, no akshare."""
-    start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y%m%d")
+    start = (_now_cst() - timedelta(days=days * 2)).strftime("%Y%m%d")
 
     # --- Source 1: Tencent (fast + stable) ---
     result = _fetch_candles_tencent(code, start, days)
@@ -426,7 +438,7 @@ def get_candles(code: str, period: str = "daily", days: int = 240) -> list[Candl
                 return resampled[-days:]
 
         # 2. Try Tencent daily → resample
-        start = (datetime.now() - timedelta(days=fetch_days)).strftime("%Y%m%d")
+        start = (_now_cst() - timedelta(days=fetch_days)).strftime("%Y%m%d")
         daily = _fetch_candles_tencent(code, start, fetch_days)
         if daily:
             resampled = _resample_candles(daily, period)
@@ -443,7 +455,7 @@ def get_candles(code: str, period: str = "daily", days: int = 240) -> list[Candl
 
     # --- Daily candles: DB cache + background refresh ---
     cached = _cache_read(code, limit=days)
-    today = datetime.now().strftime("%Y%m%d")
+    today = _now_cst().strftime("%Y%m%d")
     cache_key = f"{code}:{today}"
 
     if cached and cache_key in _candle_refresh_done:
@@ -495,7 +507,7 @@ def refresh_candles_full(code: str, days: int = 500) -> int:
     """Force full re-fetch of candles for a stock. Clears cache first."""
     code = _normalize_code(code)
     _cache_delete(code)
-    today = datetime.now().strftime("%Y%m%d")
+    today = _now_cst().strftime("%Y%m%d")
     _candle_refresh_done.discard(f"{code}:{today}")
 
     new_candles = _fetch_candles_sync(code, days)
@@ -509,7 +521,7 @@ def refresh_candles_full(code: str, days: int = 500) -> int:
 def refresh_candles_latest(code: str) -> int:
     """Re-fetch latest candles for a stock (incremental)."""
     code = _normalize_code(code)
-    today = datetime.now().strftime("%Y%m%d")
+    today = _now_cst().strftime("%Y%m%d")
     _candle_refresh_done.discard(f"{code}:{today}")
 
     new_candles = _fetch_candles_sync(code, 240)

@@ -5,6 +5,8 @@ export type Candle = {
   low: number;
   close: number;
   volume: number;
+  /** 盘中尚未收盘 / 量能按已交易时间外推得到的预估柱,前端用虚框区分 */
+  estimated?: boolean;
 };
 
 export type Level = {
@@ -185,10 +187,27 @@ export type WatchlistItem = {
   name: string;
   note: string;
   industry: string;
+  market: string;
   price: number;
   change_pct: number;
   volume: number;
   amount: number;
+  turnover_rate: number;
+  pe: number | null;
+  market_cap: number;
+  roe: number | null;
+  fundamental_status: string;
+  fundamental_summary: string;
+  concepts: string[];
+  sparkline: number[];
+  score: number | null;
+  pattern: string | null;
+  pattern_label: string | null;
+  triggers: string[];
+  distance_to_support_pct: number | null;
+  rr_ratio: number | null;
+  support_score: number | null;
+  volume_ratio: number | null;
   created_at: string;
 };
 
@@ -399,4 +418,282 @@ export type AiModelStatus = {
   lstm: { trained: boolean; path: string | null };
   cnn_lstm: { trained: boolean; path: string | null };
   rl_ppo: { trained: boolean; path: string | null };
+};
+
+// ── Recommender (v2 strategy) ────────────────────────────────
+export type RecommendStyle = "short_term" | "swing" | "value" | "multi_factor" | "ai_ensemble";
+
+export type TradePlan = {
+  buy_low: number;
+  buy_high: number;
+  buy_trigger: string;
+  stop_loss: number;
+  take_profit_1: number;
+  take_profit_2: number;
+  position_pct: number;          // 0–1
+  holding_days_min: number;
+  holding_days_max: number;
+  risk_reward: number;
+  atr_pct: number;
+  confidence: number;
+  reason: string;
+  factors: Record<string, number | string | null>;
+  // New tradability fields
+  state?: "buy" | "wait_breakout" | "wait_pullback" | "reject";
+  tradable?: boolean;
+  risk_warning?: string;
+};
+
+export type Recommendation = {
+  id?: number;
+  code: string;
+  name: string;
+  style: RecommendStyle;
+  score: number;
+  rank?: number;
+  tier?: "core" | "watch" | "observe";
+  price: number;
+  industry: string;
+  concept: string;
+  reasons: string[];
+  factors: Record<string, number>;
+  scan_date?: string;
+  expires_date?: string;
+  status?: string;
+  plan: TradePlan | null;
+};
+
+export type RecommendListResp = {
+  scan_date: string;
+  style: RecommendStyle | null;
+  count: number;
+  items: Recommendation[];
+};
+
+export type RecommendScanProgress = {
+  scan_id: string;
+  styles: RecommendStyle[];
+  status: "running" | "done" | "error";
+  phase: string;
+  pct: number;
+  processed?: number;
+  total?: number;
+  counts?: Record<RecommendStyle, number>;
+  error?: string;
+};
+
+export type MlModelKey = "lgbm" | "seq" | "rl";
+
+export type MlTrainProgress = {
+  job_id: string;
+  model: MlModelKey | string;
+  params?: Record<string, unknown>;
+  status: "running" | "done" | "error";
+  phase: string;
+  pct: number;
+  // Per-phase fields (any of these may be populated)
+  snap_dates_done?: number;
+  snap_dates_total?: number;
+  samples?: number;
+  train_samples?: number;
+  val_samples?: number;
+  epoch?: number;
+  epochs?: number;
+  train_loss?: number;
+  val_loss?: number;
+  val_ic?: number;
+  timesteps?: number;
+  total_timesteps?: number;
+  // Final
+  meta?: Record<string, unknown>;
+  error?: string;
+  started_at?: string;
+  finished_at?: string;
+};
+
+export type MlRegistry = Record<
+  string,
+  null | {
+    model: string;
+    saved_at?: string;
+    val_rank_ic?: number;
+    final_val_ic?: number;
+    eval_avg_reward?: number;
+    samples_train?: number;
+    samples_val?: number;
+    top_features?: [string, number][];
+    [k: string]: unknown;
+  }
+>;
+
+export type MlTrainStatusResp = {
+  current: ({ running: boolean } & Partial<MlTrainProgress>) | null;
+  registry: MlRegistry;
+};
+
+// ── Dragon Strategy (龙头战法) ──
+export type DragonStatus = {
+  stage1: { trained: boolean; modified_at: string | null; size_kb: number };
+  stage2: { trained: boolean; modified_at: string | null; size_kb: number };
+};
+
+export type MarketCycle = {
+  trade_date: string;
+  phase: "ice" | "warmup" | "peak" | "cooldown";
+  score: number;
+  zt_count: number;
+  blast_count: number;
+  blast_rate: number;
+  high_consecutive: number;
+  consecutive_3plus: number;
+  yesterday_zt_today_perf: number;
+};
+
+export type ZtPoolItem = {
+  code: string;
+  name: string;
+  change_pct: number | null;
+  close: number | null;
+  amount: number | null;
+  market_cap: number | null;
+  turnover_rate: number | null;
+  first_zt_time: string;
+  last_zt_time: string;
+  open_count: number;
+  seal_amount: number | null;
+  consecutive: number;
+  concept: string;
+  industry: string;
+  zt_status: string;
+};
+
+export type LhbRecord = {
+  trade_date: string;
+  name: string;
+  reason: string;
+  close: number | null;
+  change_pct: number | null;
+  turnover: number | null;
+  buy_total: number;
+  sell_total: number;
+  net_amount: number;
+  net_rate: number | null;
+};
+
+export type LhbSeat = {
+  rank: number;
+  side: "buy" | "sell";
+  seat_name: string;
+  buy_amount: number;
+  sell_amount: number;
+  net_amount: number;
+  is_known_hot: boolean;
+  hot_money_tag: string;
+};
+
+export type BoardHeatItem = {
+  concept: string;
+  board_code: string;
+  change_pct: number | null;
+  net_inflow: number | null;
+  heat_score: number | null;
+  heat_level: string;
+  rank: number | null;
+  zt_count: number;
+  up_ratio: number | null;
+  leader_code: string;
+  leader_name: string;
+  leader_change: number | null;
+  leader_consecutive: number;
+  trend: { date: string; score: number | null }[];
+};
+
+export type DragonTrainJob = {
+  task_id: string;
+  status: string;
+  progress: number;
+  message: string;
+  start_date: string;
+  end_date: string;
+  epochs: number;
+  train_stage2: boolean;
+  started_at: number;
+  ended_at: number | null;
+  result: Record<string, unknown> | null;
+};
+
+export type DragonScanCandidate = {
+  code: string;
+  name: string;
+  trade_date: string;
+  signal_type: "buy" | "sell" | "hold";
+  dragon_score: number;
+  dragon_rank: number;
+  consecutive: number;
+  concept: string;
+  market_cycle: string;
+  model_confidence: number;
+  entry_price: number | null;
+  stop_price: number | null;
+  target_price: number | null;
+  reasons: string[];
+  feature_snapshot: Record<string, unknown>;
+  amount?: number;
+  industry?: string;
+};
+
+export type DragonScanJob = {
+  task_id: string;
+  status: string;
+  progress: number;
+  message: string;
+  date: string;
+  threshold: number;
+  started_at: number;
+  ended_at: number | null;
+  candidates: DragonScanCandidate[];
+};
+
+export type DragonSignalRow = {
+  code: string;
+  name: string;
+  signal_type: string;
+  dragon_rank: number;
+  dragon_score: number;
+  concept: string;
+  consecutive: number;
+  model_conf: number;
+  entry_price: number | null;
+  stop_price: number | null;
+  target_price: number | null;
+  market_cycle: string;
+  reason: Record<string, unknown>;
+};
+
+export type DragonSignalDetail = DragonScanCandidate;
+
+export type DragonBacktestResult = {
+  start_date: string;
+  end_date: string;
+  init_cash: number;
+  final_cash: number;
+  total_return_pct: number;
+  max_drawdown_pct: number;
+  trades: number;
+  win_rate: number;
+  avg_win_pct: number;
+  avg_loss_pct: number;
+  params: Record<string, unknown>;
+  equity_curve: { date: string; equity: number }[];
+  trade_list: {
+    code: string;
+    entry_date: string;
+    exit_date: string;
+    entry_price: number;
+    exit_price: number;
+    pnl_pct: number;
+    reason: string;
+    dragon_score: number;
+  }[];
+  error?: string;
 };

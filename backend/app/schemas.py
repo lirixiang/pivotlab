@@ -10,6 +10,8 @@ class Candle(BaseModel):
     low: float
     close: float
     volume: float
+    # 盘中尚未收盘 / 量能按已交易时间外推得到的"预估"K线,前端用虚框区分
+    estimated: bool = False
 
 
 class StockQuote(BaseModel):

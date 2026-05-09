@@ -1,4 +1,4 @@
-.PHONY: dev-backend dev-frontend install up down logs build
+.PHONY: dev-backend dev-frontend install up down logs build backup restore
 
 install:
 	cd backend && pip install -r requirements.txt
@@ -21,3 +21,9 @@ down:
 
 logs:
 	docker compose logs -f --tail=100
+
+backup:
+	bash backup/backup.sh
+
+restore:
+	bash backup/restore.sh

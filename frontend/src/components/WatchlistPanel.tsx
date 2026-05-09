@@ -36,12 +36,12 @@ function SortBtn({ k, label, cur, dir, onClick }: {
 export function WatchlistPanel({
   activeCode,
   onSelect,
-  scanCounts,
+
   refreshKey,
 }: {
   activeCode: string;
   onSelect: (code: string) => void;
-  scanCounts: { breakout: number; bottom: number; high: number };
+
   refreshKey?: number;
 }) {
   const [items, setItems] = useState<WatchlistItem[]>([]);
@@ -102,12 +102,12 @@ export function WatchlistPanel({
           vb = scores[b.code]?.decision_score ?? -1;
           break;
         case "change":
-          va = a.change_pct;
-          vb = b.change_pct;
+          va = a.change_pct ?? 0;
+          vb = b.change_pct ?? 0;
           break;
         case "price":
-          va = a.price;
-          vb = b.price;
+          va = a.price ?? 0;
+          vb = b.price ?? 0;
           break;
         default:
           return 0;
@@ -155,7 +155,9 @@ export function WatchlistPanel({
         )}
         {sortedItems.map((it) => {
           const active = it.code === activeCode;
-          const up = it.change_pct >= 0;
+          const price = it.price ?? 0;
+          const changePct = it.change_pct ?? 0;
+          const up = changePct >= 0;
           const sc = scores[it.code];
           const dscore = sc?.decision_score ?? null;
           const dlabel = sc?.decision_label ?? "";
@@ -199,9 +201,9 @@ export function WatchlistPanel({
                   </div>
                   {/* Price */}
                   <div className="w-[50px] text-right num">
-                    {it.price > 0 ? (
+                    {price > 0 ? (
                       <div className={"text-[13px] " + (up ? "text-cn-up" : "text-cn-dn")}>
-                        {it.price.toFixed(2)}
+                        {price.toFixed(2)}
                       </div>
                     ) : (
                       <div className="text-[11px] text-ink-600">—</div>
@@ -209,9 +211,9 @@ export function WatchlistPanel({
                   </div>
                   {/* Change */}
                   <div className="w-[52px] text-right num">
-                    {it.price > 0 ? (
+                    {price > 0 ? (
                       <div className={"text-[13px] " + (up ? "text-cn-up" : "text-cn-dn")}>
-                        {up ? "+" : ""}{it.change_pct.toFixed(2)}%
+                        {up ? "+" : ""}{changePct.toFixed(2)}%
                       </div>
                     ) : (
                       <div className="text-[11px] text-ink-600">—</div>
@@ -232,26 +234,6 @@ export function WatchlistPanel({
         })}
       </div>
 
-      <div className="border-t border-ink-800 p-3 grad-card">
-        <div className="flex items-center justify-between mb-2">
-          <span className="tag text-ink-500">今日扫描</span>
-          <span className="text-[11px] text-gold">实时</span>
-        </div>
-        <div className="grid grid-cols-3 gap-2 text-center">
-          <div className="bg-ink-850 ring-soft rounded-md py-2">
-            <div className="num text-cn-up text-base">{scanCounts.breakout}</div>
-            <div className="text-[10px] text-ink-500 mt-0.5">突破回踩</div>
-          </div>
-          <div className="bg-ink-850 ring-soft rounded-md py-2">
-            <div className="num text-cn-dn text-base">{scanCounts.bottom}</div>
-            <div className="text-[10px] text-ink-500 mt-0.5">下跌企稳</div>
-          </div>
-          <div className="bg-ink-850 ring-soft rounded-md py-2">
-            <div className="num text-gold text-base">{scanCounts.high}</div>
-            <div className="text-[10px] text-ink-500 mt-0.5">高强信号</div>
-          </div>
-        </div>
-      </div>
     </aside>
   );
 }

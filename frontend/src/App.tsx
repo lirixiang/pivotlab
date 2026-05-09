@@ -2,16 +2,19 @@ import { useCallback, useEffect, useState } from "react";
 import { TopBar, IndexStrip, type TabKey } from "./components/TopBar";
 import { WorkspacePage } from "./pages/WorkspacePage";
 import { ScreenerPage } from "./pages/ScreenerPage";
+import { AIScanPage } from "./pages/AIScanPage";
 import { BacktestPage } from "./pages/BacktestPage";
 import { MonitorPage } from "./pages/MonitorPage";
 import { SyncPage } from "./pages/SyncPage";
 import { StrategyPage } from "./pages/StrategyPage";
-import type { ScreenerItem } from "./types";
+import { RecommendPage } from "./pages/RecommendPage";
 
 // ── URL ↔ state helpers ──
 const TAB_PATHS: Record<TabKey, string> = {
+  recommend: "/recommend",
   workspace: "/",
   screener: "/screener",
+  aiscan: "/aiscan",
   backtest: "/backtest",
   strategy: "/strategy",
   monitor: "/monitor",
@@ -34,17 +37,15 @@ function parseLocation(): { tab: TabKey; code: string } {
 export default function App() {
   const [tab, setTab] = useState<TabKey>(() => parseLocation().tab);
   const [code, setCode] = useState(() => parseLocation().code || "600519");
-  const [breakoutResults, setBreakoutResults] = useState<ScreenerItem[]>([]);
-  const [bottomResults, setBottomResults] = useState<ScreenerItem[]>([]);
-
-  const highCount =
-    breakoutResults.filter((i) => i.score >= 80).length +
-    bottomResults.filter((i) => i.score >= 80).length;
+  const [recommendInitCode, setRecommendInitCode] = useState<string>("");
 
   // Push URL on tab/code change
   const pushUrl = useCallback((t: TabKey, c?: string) => {
     const path = t === "workspace" ? `/stock/${c || code}` : TAB_PATHS[t];
-    if (window.location.pathname !== path) {
+    // Strip query/hash when switching top-level tabs — each page has its
+    // own sub-state in ?params, those don't carry meaning across tabs.
+    const cur = window.location.pathname + window.location.search + window.location.hash;
+    if (cur !== path) {
       window.history.pushState(null, "", path);
     }
   }, [code]);
@@ -71,6 +72,15 @@ export default function App() {
     const path = `/stock/${c}`;
     if (window.location.pathname !== path) {
       window.history.pushState(null, "", path);
+    }
+  }, []);
+
+  // Bridge: jump from Screener to Recommend filtered by stock code
+  const goRecommend = useCallback((c: string) => {
+    setRecommendInitCode(c);
+    setTab("recommend");
+    if (window.location.pathname !== "/recommend") {
+      window.history.pushState(null, "", "/recommend");
     }
   }, []);
 
@@ -103,25 +113,22 @@ export default function App() {
         <WorkspacePage
           code={code}
           onSelect={handleSelectCode}
-          onScanResults={(r) => {
-            setBreakoutResults(r.breakout);
-            setBottomResults(r.bottom);
-          }}
-          scanCounts={{
-            breakout: breakoutResults.length,
-            bottom: bottomResults.length,
-            high: highCount,
-          }}
-          breakoutResults={breakoutResults}
-          bottomResults={bottomResults}
         />
       )}
 
-      {tab === "screener" && <ScreenerPage onPickStock={goWorkspace} />}
+      {tab === "screener" && <ScreenerPage onPickStock={goWorkspace} onShowRecommend={goRecommend} />}
+      {tab === "aiscan" && <AIScanPage defaultCode={code} />}
       {tab === "backtest" && <BacktestPage defaultCode={code} />}
       {tab === "strategy" && <StrategyPage defaultCode={code} />}
       {tab === "monitor" && <MonitorPage onPickStock={goWorkspace} />}
       {tab === "sync" && <SyncPage />}
+      {tab === "recommend" && (
+        <RecommendPage
+          onPickStock={goWorkspace}
+          initialCode={recommendInitCode}
+          onClearInitial={() => setRecommendInitCode("")}
+        />
+      )}
 
       <footer className="h-8 border-t border-ink-800 grad-head flex items-center px-4 text-[11px] text-ink-500 gap-4">
         <span className="flex items-center gap-1.5">
@@ -130,7 +137,6 @@ export default function App() {
         <span className="flex items-center gap-1.5">
           <span className="dot bg-cn-dn" /> 算法引擎 v0.2.0
         </span>
-        <span>已扫描 {breakoutResults.length + bottomResults.length} 信号</span>
         <span className="flex-1" />
         <span>
           <span className="kbd">F</span> 重新画线

@@ -2,14 +2,16 @@ import { useEffect, useRef, useState } from "react";
 import type { MarketOverview } from "../types";
 import { api } from "../services/api";
 
-export type TabKey = "workspace" | "screener" | "backtest" | "strategy" | "monitor" | "sync";
+export type TabKey = "recommend" | "workspace" | "screener" | "aiscan" | "backtest" | "strategy" | "monitor" | "sync";
 
 const TABS: { k: TabKey; l: string }[] = [
+  { k: "recommend", l: "今日推荐" },
   { k: "workspace", l: "画线工作台" },
   { k: "screener", l: "形态筛选" },
+  { k: "aiscan", l: "AI选股" },
   { k: "backtest", l: "历史回测" },
   { k: "strategy", l: "策略引擎" },
-  { k: "monitor", l: "自选监控" },
+  { k: "monitor", l: "自选" },
   { k: "sync", l: "数据同步" },
 ];
 

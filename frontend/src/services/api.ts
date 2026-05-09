@@ -50,8 +50,15 @@ export const api = {
     http<import("../types").SrFactor[]>("/stocks/meta/sr-factors"),
   screener: (pattern: string, limit = 50) =>
     http<ScreenerResponse>(`/screener/${pattern}?limit=${limit}`),
-  triggerScan: () =>
-    http<{ status: string; message: string }>("/screener/scan", { method: "POST" }),
+  screenerByCodes: (codes: string[]) =>
+    http<Record<string, { pattern: string; label: string; score: number; scanned_at: string }[]>>(
+      `/screener/by_codes?codes=${encodeURIComponent(codes.join(","))}`,
+    ),
+  triggerScan: (pattern?: string) =>
+    http<{ status: string; message: string }>(
+      `/screener/scan${pattern ? `?pattern=${encodeURIComponent(pattern)}` : ""}`,
+      { method: "POST" },
+    ),
   screenerHistory: (pattern: string) =>
     http<{ ts: string; scanned_at: string; total: number; scanned: number }[]>(`/screener/history/${pattern}`),
   screenerSnapshot: (pattern: string, ts: string, limit = 200) =>
@@ -220,15 +227,234 @@ export const api = {
       task_id: string; scope: string; status: string; progress: number;
       message: string; total: number; scanned: number;
       started_at: number; ended_at: number | null;
-      results: Array<{
-        code: string; name: string; model: string; action: string;
-        confidence: number; current_price: number; entry_price: number;
-        stop_loss: number; target_price: number; risk_reward: number;
-        trend: string; reason: string;
-      }>;
+      results: AiScanHit[];
     }>>("/strategy/scan_progress"),
   aiScanCancel: (taskId: string) =>
     http<{ status: string }>(`/strategy/scan_progress/${taskId}`, { method: "DELETE" }),
   aiScanClear: () =>
     http<{ removed: number }>("/strategy/scan_progress", { method: "DELETE" }),
+  aiScanHistory: (limit = 50) =>
+    http<Array<{
+      ts: string; scope: string; scope_code: string; model_types: string[];
+      scanned: number; total: number; hits_total: number;
+      started_at: number | null; ended_at: number | null;
+    }>>(`/strategy/scan_history?limit=${limit}`),
+  aiScanSnapshot: (ts: string) =>
+    http<{
+      ts: string; scope: string; model_types: string[];
+      scanned: number; total: number; hits_total: number;
+      started_at: number; ended_at: number;
+      results: AiScanHit[];
+      error?: string;
+    }>(`/strategy/scan_history/${ts}`),
+
+  // ── Recommender (v2 strategy) ──
+  recommendStyles: () =>
+    http<{ key: string; label: string }[]>("/recommend/styles"),
+  recommendScan: (opts?: { styles?: string[]; top_n?: number; min_score?: number }) => {
+    const q = new URLSearchParams();
+    if (opts?.styles?.length) q.set("styles", opts.styles.join(","));
+    if (opts?.top_n) q.set("top_n", String(opts.top_n));
+    if (opts?.min_score !== undefined) q.set("min_score", String(opts.min_score));
+    const qs = q.toString();
+    return http<{ scan_id: string; status: string; styles?: string[] }>(
+      `/recommend/scan${qs ? "?" + qs : ""}`, { method: "POST" },
+    );
+  },
+  recommendScanProgress: (scanId: string) =>
+    http<import("../types").RecommendScanProgress>(`/recommend/scan/${scanId}`),
+  recommendCurrentScan: () =>
+    http<{ running: boolean } & Partial<import("../types").RecommendScanProgress>>(
+      "/recommend/scan",
+    ),
+  recommendList: (opts?: { style?: string; scan_date?: string; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (opts?.style) q.set("style", opts.style);
+    if (opts?.scan_date) q.set("scan_date", opts.scan_date);
+    if (opts?.limit) q.set("limit", String(opts.limit));
+    const qs = q.toString();
+    return http<import("../types").RecommendListResp>(
+      `/recommend/list${qs ? "?" + qs : ""}`,
+    );
+  },
+  recommendDetail: (code: string, rebuild = false) =>
+    http<{ code: string; from: "db" | "live"; items: import("../types").Recommendation[] }>(
+      `/recommend/stock/${code}${rebuild ? "?rebuild=true" : ""}`,
+    ),
+
+  // ── Recommender ML training ──
+  recommendTrain: (
+    model: import("../types").MlModelKey,
+    params?: {
+      horizon_days?: number;
+      universe_limit?: number;
+      history_years?: number;
+      epochs?: number;
+      total_timesteps?: number;
+    },
+  ) => {
+    const q = new URLSearchParams();
+    if (params) for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null) q.set(k, String(v));
+    }
+    const qs = q.toString();
+    return http<{ job_id: string; status: string; model: string; params: Record<string, unknown> }>(
+      `/recommend/train/${model}${qs ? "?" + qs : ""}`, { method: "POST" },
+    );
+  },
+  recommendTrainProgress: (jobId: string) =>
+    http<import("../types").MlTrainProgress>(`/recommend/train/${jobId}`),
+  recommendTrainStatus: () =>
+    http<import("../types").MlTrainStatusResp>("/recommend/trainings"),
+  recommendMarketEnv: () =>
+    http<{
+      code: string; trend: number; atr_pct: number; verdict: string;
+      recent_closes: [string, number][];
+    }>("/recommend/index/env"),
+  recommendSyncIndices: () =>
+    http<Record<string, number>>("/recommend/sync_indices", { method: "POST" }),
+  recommendLifecycleStats: (style?: string, days = 90) =>
+    http<{
+      n: number; completed?: number; by_state: Record<string, number>;
+      win_rate?: number; avg_return?: number; best?: number; worst?: number;
+    }>(`/recommend/lifecycle/stats?days=${days}${style ? `&style=${style}` : ""}`),
+  recommendLifecycleUpdate: (lookbackDays = 60) =>
+    http<{ n_processed: number; states: Record<string, number> }>(
+      `/recommend/lifecycle/update?lookback_days=${lookbackDays}`,
+      { method: "POST" },
+    ),
+  recommendLifecycleRecent: (style?: string, state?: string, limit = 50) => {
+    const qs = new URLSearchParams();
+    if (style) qs.set("style", style);
+    if (state) qs.set("state", state);
+    qs.set("limit", String(limit));
+    return http<Array<{
+      id: number; code: string; name: string; style: string; scan_date: string;
+      state: string; exit_reason: string;
+      buy_low: number; buy_high: number; stop_loss: number;
+      take_profit_1: number; take_profit_2: number; initial_price: number;
+      triggered_date: string; triggered_price: number;
+      exit_date: string; exit_price: number;
+      max_favorable_pct: number; max_adverse_pct: number;
+      realized_return_pct: number;
+      days_to_trigger: number; days_held: number;
+    }>>(`/recommend/lifecycle/recent?${qs.toString()}`);
+  },
+
+  // ── Dragon Strategy (龙头战法) ──
+  dragonStatus: () => http<import("../types").DragonStatus>("/dragon/status"),
+  dragonMarketCycle: (date?: string) =>
+    http<import("../types").MarketCycle>(
+      `/dragon/market-cycle${date ? `?date=${date}` : ""}`,
+    ),
+  dragonZtPool: (params?: { date?: string; pool_type?: "zt" | "zb" | "dt"; min_consecutive?: number; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.date) q.set("date", params.date);
+    if (params?.pool_type) q.set("pool_type", params.pool_type);
+    if (params?.min_consecutive !== undefined) q.set("min_consecutive", String(params.min_consecutive));
+    if (params?.limit) q.set("limit", String(params.limit));
+    const qs = q.toString();
+    return http<{ trade_date: string; pool_type: string; count: number; items: import("../types").ZtPoolItem[] }>(
+      `/dragon/zt-pool${qs ? "?" + qs : ""}`,
+    );
+  },
+  dragonLhb: (code: string, limit = 30) =>
+    http<{
+      code: string;
+      records: import("../types").LhbRecord[];
+      seats: Record<string, import("../types").LhbSeat[]>;
+    }>(`/dragon/lhb/${code}?limit=${limit}`),
+  dragonBoardHeat: (params?: { date?: string; limit?: number; history_days?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.date) q.set("date", params.date);
+    if (params?.limit) q.set("limit", String(params.limit));
+    if (params?.history_days) q.set("history_days", String(params.history_days));
+    const qs = q.toString();
+    return http<{ trade_date: string; items: import("../types").BoardHeatItem[] }>(
+      `/dragon/board-heat${qs ? "?" + qs : ""}`,
+    );
+  },
+  dragonKnowledge: () =>
+    http<{ buy: Record<string, string>; sell: Record<string, string>; cycle: Record<string, string> }>(
+      "/dragon/knowledge",
+    ),
+  dragonTrain: (params: { start_date: string; end_date: string; epochs?: number; train_stage2?: boolean }) =>
+    http<{ task_id: string; status: string }>("/dragon/train", {
+      method: "POST", body: JSON.stringify(params),
+    }),
+  dragonTrainProgress: () =>
+    http<import("../types").DragonTrainJob[]>("/dragon/train_progress"),
+  dragonTrainClear: (tid?: string) =>
+    http<{ status?: string; removed?: number }>(
+      `/dragon/train_progress${tid ? `/${tid}` : ""}`,
+      { method: "DELETE" },
+    ),
+  dragonScan: (params?: { date?: string; threshold?: number; top_n?: number; persist?: boolean }) =>
+    http<{ task_id: string; status: string }>("/dragon/scan", {
+      method: "POST", body: JSON.stringify(params || {}),
+    }),
+  dragonScanProgress: () =>
+    http<import("../types").DragonScanJob[]>("/dragon/scan_progress"),
+  dragonScanClear: (tid?: string) =>
+    http<{ status?: string; removed?: number }>(
+      `/dragon/scan_progress${tid ? `/${tid}` : ""}`,
+      { method: "DELETE" },
+    ),
+  dragonTodaySignals: (date?: string, limit = 50) =>
+    http<{ trade_date: string; items: import("../types").DragonSignalRow[] }>(
+      `/dragon/scan/today?limit=${limit}${date ? `&date=${date}` : ""}`,
+    ),
+  dragonSignal: (code: string, date?: string) =>
+    http<import("../types").DragonSignalDetail>(
+      `/dragon/signal/${code}${date ? `?date=${date}` : ""}`,
+    ),
+  dragonBacktest: (params: Record<string, unknown>) =>
+    http<import("../types").DragonBacktestResult>("/dragon/backtest", {
+      method: "POST", body: JSON.stringify(params),
+    }),
+  dragonSync: (task: "zt_pool" | "lhb" | "concept_heat_history" | "dragon_all", date_str?: string) =>
+    http<{ task: string; status: string }>("/dragon/sync", {
+      method: "POST", body: JSON.stringify({ task, date_str }),
+    }),
+  dragonBackfill: (params: {
+    start_date?: string; end_date?: string; days?: number;
+    include_zt?: boolean; include_lhb?: boolean; include_concept?: boolean;
+    sleep_sec?: number;
+  }) =>
+    http<{ task: string; status: string }>("/dragon/backfill", {
+      method: "POST", body: JSON.stringify(params),
+    }),
+};
+
+export type AiScanHit = {
+  code: string;
+  name: string;
+  action: "buy" | "sell";
+  confidence: number;
+  agreement: number;
+  models_total: number;
+  models_agree: number;
+  rating: number;
+  current_price: number;
+  entry_price: number;
+  stop_loss: number;
+  target_price: number;
+  risk_reward: number;
+  trend: string;
+  sparkline: number[];
+  industry: string;
+  market: string;
+  concepts: string[];
+  pe: number | null;
+  roe: number | null;
+  market_cap: number | null;
+  change_pct: number | null;
+  amount: number | null;
+  turnover_rate: number | null;
+  fundamental_status: string;
+  triggers: string[];
+  model_hits: { model: string; action: string; confidence: number; rr: number }[];
+  // Legacy
+  model: string;
+  reason: string;
 };
