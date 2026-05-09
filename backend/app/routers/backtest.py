@@ -27,6 +27,11 @@ def _run(code: str, strategy: str, period: str, cfg: BacktestConfig) -> dict:
         "stats": result.stats,
         "levels_used": result.levels_used,
         "config": result.config,
+        "candles": [
+            {"date": c.date, "open": c.open, "high": c.high,
+             "low": c.low, "close": c.close, "volume": c.volume}
+            for c in candles
+        ],
     }
 
 

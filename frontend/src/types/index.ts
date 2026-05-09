@@ -232,6 +232,7 @@ export type BacktestResponse = {
   };
   config: Record<string, number | boolean>;
   levels_used: { price: number; kind: string; score: number; label: string }[];
+  candles?: Candle[];
 };
 
 // ── Algo module types ──

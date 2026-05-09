@@ -382,6 +382,40 @@ def _group_levels(
 # ────────────────────────────────────────────────────────────
 #  Per-touch accumulation scoring (with all factors)
 # ────────────────────────────────────────────────────────────
+_VP_DENSITY_BONUS = 3.0         # bonus when level sits in high-volume zone
+_VP_BINS = 60                   # number of price bins for volume profile
+
+
+def _compute_volume_profile(candles: list[Candle]) -> tuple[np.ndarray, float, float]:
+    """Compute volume profile bins from candles.
+    Returns (bins_array, price_min, price_max)."""
+    if len(candles) < 10:
+        return np.zeros(_VP_BINS), 0.0, 1.0
+    p_min = min(c.low for c in candles)
+    p_max = max(c.high for c in candles)
+    if p_max <= p_min:
+        return np.zeros(_VP_BINS), p_min, p_max + 1
+    bins = np.zeros(_VP_BINS)
+    p_range = p_max - p_min
+    for c in candles:
+        lo = max(0, int((c.low - p_min) / p_range * _VP_BINS))
+        hi = min(_VP_BINS - 1, int((c.high - p_min) / p_range * _VP_BINS))
+        span = hi - lo + 1
+        per_bin = c.volume / span
+        for b in range(lo, hi + 1):
+            bins[b] += per_bin
+    return bins, p_min, p_max
+
+
+def _vp_density_at(price: float, vp_bins: np.ndarray, vp_min: float, vp_max: float) -> float:
+    """Return normalised VP density (0-1) at a given price."""
+    vp_range = vp_max - vp_min
+    if vp_range <= 0 or vp_bins.max() <= 0:
+        return 0.0
+    idx = int((price - vp_min) / vp_range * _VP_BINS)
+    idx = max(0, min(_VP_BINS - 1, idx))
+    return float(vp_bins[idx] / vp_bins.max())
+
 
 def _score_level(
     price: float,
@@ -392,6 +426,7 @@ def _score_level(
     multi_window_overlap: int = 1,
     higher_levels: list[float] | None = None,
     structure_candidates: list[dict] | None = None,
+    volume_profile: tuple[np.ndarray, float, float] | None = None,
 ) -> dict | None:
     """Score a single candidate level using per-touch accumulation.
 
@@ -504,6 +539,15 @@ def _score_level(
     # ── MA resonance ──
     ma_bonus = _ma_resonance_bonus(candles, price)
 
+    # ── VP density ──
+    vp_density = 0.0
+    vp_bonus = 0.0
+    if volume_profile is not None:
+        vp_bins, vp_min, vp_max = volume_profile
+        vp_density = _vp_density_at(price, vp_bins, vp_min, vp_max)
+        if vp_density >= 0.5:
+            vp_bonus = _VP_DENSITY_BONUS * vp_density
+
     # ── Weekly confluence ──
     weekly_confluence = any(
         abs(price - hl) / max(hl, 1) <= max(tolerance, 0.012)
@@ -526,6 +570,7 @@ def _score_level(
         + reversal_bonus
         + round_bonus
         + structure_bonus
+        + vp_bonus
     )
     trend_adjusted = base_score * trend_coeff
     confluence_adjusted = trend_adjusted * confluence_mult
@@ -546,6 +591,8 @@ def _score_level(
         reasons.append("触线后反应明确")
     if vol_confirm_count >= 2:
         reasons.append("放量确认")
+    if vp_bonus > 0:
+        reasons.append("筹码密集")
     if dwell_bars >= 10:
         reasons.append("横盘沉淀")
     if false_breaks >= 2:
@@ -569,6 +616,8 @@ def _score_level(
             "reversal_bonus": round(reversal_bonus, 1),
             "round_bonus": round(round_bonus, 1),
             "ma_bonus": round(ma_bonus, 1),
+            "vp_density": round(vp_density, 3),
+            "vp_bonus": round(vp_bonus, 2),
             "trend_coeff": round(trend_coeff, 2),
             "weekly_confluence": weekly_confluence,
             "confluence_mult": round(confluence_mult, 1),
@@ -707,6 +756,7 @@ def detect_levels_multifactor(
     sup_grouped = _group_with_overlap(sup_raw, tol=tolerance)
 
     # 6. Score each level with all factors
+    vp = _compute_volume_profile(data)
     res_scored: list[dict] = []
     for price, cnt, ovlp in res_grouped:
         result = _score_level(
@@ -714,6 +764,7 @@ def detect_levels_multifactor(
             multi_window_overlap=ovlp,
             higher_levels=higher_levels["resistance"],
             structure_candidates=structure["resistance"],
+            volume_profile=vp,
         )
         if result:
             res_scored.append(result)
@@ -725,6 +776,7 @@ def detect_levels_multifactor(
             multi_window_overlap=ovlp,
             higher_levels=higher_levels["support"],
             structure_candidates=structure["support"],
+            volume_profile=vp,
         )
         if result:
             sup_scored.append(result)

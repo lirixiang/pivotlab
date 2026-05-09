@@ -1079,23 +1079,20 @@ def sync_concepts(_task_id: int = None) -> int:
     try:
         # ── Phase 1: EM F10 batch API (primary, covers all A-shares) ──
         logger.info("sync_concepts: phase 1 — EM F10 batch API")
-        with _get_session() as s:
-            s.execute(delete(StockConcept))
-            s.execute(delete(ConceptBoard))
-            s.commit()
 
         f10_url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
         f10_page = 1
         f10_added = 0
+        PAGE_SIZE = 10000  # EM supports up to 10000 per page
         while True:
             params = {
                 "reportName": "RPT_F10_CORETHEME_BOARDTYPE",
                 "columns": "SECURITY_CODE,BOARD_NAME",
-                "pageSize": 500,
+                "pageSize": PAGE_SIZE,
                 "pageNumber": f10_page,
             }
             try:
-                resp = requests.get(f10_url, params=params, headers=headers, timeout=15)
+                resp = requests.get(f10_url, params=params, headers=headers, timeout=30)
                 data = resp.json()
                 result = data.get("result")
                 if not result or not result.get("data"):
@@ -1106,29 +1103,33 @@ def sync_concepts(_task_id: int = None) -> int:
                 logger.warning("sync_concepts: F10 page %d error: %s", f10_page, e)
                 break
 
+            rows = result["data"]
             now = datetime.utcnow()
             with _get_session() as s:
-                for item in result["data"]:
+                batch = []
+                for item in rows:
                     code = item.get("SECURITY_CODE", "")
                     board = (item.get("BOARD_NAME") or "").strip()
                     if not code or not board:
                         continue
+                    batch.append({"code": code, "concept": board, "ts": now})
+                if batch:
                     s.execute(
                         text("INSERT INTO stock_concepts (code, concept, source, updated_at) "
                              "VALUES (:code, :concept, 'eastmoney', :ts) "
                              "ON CONFLICT (code, concept) DO NOTHING"),
-                        {"code": code, "concept": board, "ts": now},
+                        batch,
                     )
-                    f10_added += 1
+                    f10_added += len(batch)
                 s.commit()
 
-            if f10_page % 50 == 0:
-                logger.info("sync_concepts: F10 page %d, %d mappings", f10_page, f10_added)
+            logger.info("sync_concepts: F10 page %d/%d, %d mappings",
+                        f10_page, result.get("pages", 1), f10_added)
             _update_task_progress(task_id, f10_page, result.get("pages", 1))
             if f10_page >= result.get("pages", 1):
                 break
             f10_page += 1
-            time.sleep(0.15)
+            time.sleep(0.3)
 
         concept_count += f10_added
         logger.info("sync_concepts: F10 done — %d pages, %d mappings", f10_page, f10_added)
@@ -1192,38 +1193,20 @@ def sync_concepts(_task_id: int = None) -> int:
                 s.commit()
             logger.info("sync_concepts: upserted %d concept_boards", len(board_with_rank))
 
-            # Step 2: for each board, fetch constituent stocks
-            for idx, (board_code, board_name) in enumerate(boards):
-                try:
-                    url = f"http://q.10jqka.com.cn/gn/detail/code/{board_code}/"
-                    r = requests.get(url, headers=ths_headers, timeout=10)
-                    r.encoding = "gbk"
-                    codes = re.findall(r'(?<!\d)(\d{6})(?!\d)', r.text)
-                    stock_codes = set()
-                    for c in codes:
-                        if c[0] in ('0', '3', '6') and c != board_code:
-                            stock_codes.add(c)
-
-                    if stock_codes:
-                        now = datetime.utcnow()
-                        with _get_session() as s:
-                            for sc in stock_codes:
-                                s.execute(
-                                    text("INSERT INTO stock_concepts (code, concept, board_code, source, updated_at) "
-                                         "VALUES (:code, :concept, :bc, 'ths', :ts) "
-                                         "ON CONFLICT (code, concept) DO UPDATE SET "
-                                         "board_code=:bc, source='ths', updated_at=:ts"),
-                                    {"code": sc, "concept": board_name, "bc": board_code, "ts": now},
-                                )
-                            s.commit()
-                            ths_added += len(stock_codes)
-                except Exception:
-                    pass
-
-                if (idx + 1) % 50 == 0:
-                    logger.info("sync_concepts: THS %d/%d boards, %d mappings",
-                                idx + 1, len(boards), ths_added)
-                time.sleep(0.2)
+            # Step 2: match existing stock_concepts to boards by concept name
+            board_map = {bn: bc for bc, bn in boards}  # concept_name → board_code
+            now = datetime.utcnow()
+            with _get_session() as s:
+                for concept_name, board_code in board_map.items():
+                    result = s.execute(
+                        text("UPDATE stock_concepts SET board_code = :bc, updated_at = :ts "
+                             "WHERE concept = :concept AND (board_code IS NULL OR board_code != :bc)"),
+                        {"bc": board_code, "concept": concept_name, "ts": now},
+                    )
+                    ths_added += result.rowcount
+                s.commit()
+            logger.info("sync_concepts: matched %d stock_concepts to %d boards by name",
+                        ths_added, len(board_map))
 
         except Exception as e:
             logger.warning("sync_concepts: THS phase error: %s", e)

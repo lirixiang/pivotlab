@@ -8,6 +8,7 @@ type Props = {
   showMA?: boolean;
   showResistance?: boolean;
   showSupport?: boolean;
+  showVP?: boolean;
   minScore?: number;
 };
 
@@ -41,7 +42,7 @@ function fmtVol(v: number) {
 }
 function fmtDate(s: string) { return s.length >= 10 ? s.slice(5) : s; }
 
-export function ChartCanvas({ candles, levels, consensus, showMA, showResistance = true, showSupport = true, minScore = 80 }: Props) {
+export function ChartCanvas({ candles, levels, consensus, showMA, showResistance = true, showSupport = true, showVP = false, minScore = 80 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const cvRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef(0);
@@ -162,7 +163,8 @@ export function ChartCanvas({ candles, levels, consensus, showMA, showResistance
       ctx.beginPath(); ctx.moveTo(x, PAD_T); ctx.lineTo(x, PAD_T + priceH); ctx.stroke();
     }
 
-    /* ── levels (strength-based visuals) ── */
+    /* ── levels: draw lines only (labels drawn after candles) ── */
+    const levelLabels: { y: number; txt: string; color: string; score: number; kind: string }[] = [];
     for (const l of visibleLevels) {
       const y = priceY(l.price);
       if (y < PAD_T - 10 || y > PAD_T + priceH + 10) continue;
@@ -198,22 +200,14 @@ export function ChartCanvas({ candles, levels, consensus, showMA, showResistance
       ctx.setLineDash(dashPattern);
       ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - padR, y); ctx.stroke();
       ctx.setLineDash([]);
+      ctx.restore();
 
-      // Label with score and stars
-      ctx.font = "10px 'JetBrains Mono', monospace";
-      ctx.fillStyle = color;
+      // Collect label for later rendering (after candles)
       const stars = "★".repeat(l.strength) + "☆".repeat(Math.max(0, 5 - l.strength));
       const scoreTxt = score > 0 ? ` ${score.toFixed(0)}分` : "";
-      const noteTxt = l.note ? ` · ${l.note}` : "";
-      const txt = `${l.label}  ${l.price.toFixed(2)}  ${stars}${scoreTxt}${noteTxt}`;
-      if (l.kind === "resistance") {
-        ctx.textAlign = "left";
-        ctx.fillText(txt, PAD_L + 4, y - 5);
-      } else {
-        ctx.textAlign = "right";
-        ctx.fillText(txt, W - padR - 4, y - 5);
-      }
-      ctx.restore();
+      const noteTxt = l.note ? ` ${l.note}` : "";
+      const txt = `${l.label} ${l.price.toFixed(2)} ${stars}${scoreTxt}${noteTxt}`;
+      levelLabels.push({ y, txt, color, score, kind: l.kind });
     }
 
     /* ── consensus target price line (single) ── */
@@ -236,12 +230,79 @@ export function ChartCanvas({ candles, levels, consensus, showMA, showResistance
         ctx.setLineDash([8, 4]);
         ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - padR, y); ctx.stroke();
         ctx.setLineDash([]);
-        // Label
+        // Label in right axis area
         ctx.font = "10px 'JetBrains Mono', monospace";
         ctx.fillStyle = PURPLE;
         ctx.globalAlpha = 0.9;
         ctx.textAlign = "right";
-        ctx.fillText(`◎ 一致目标价  ${price.toFixed(2)}`, W - padR - 4, y - 5);
+        const cTxt = `◎ 一致目标价 ${price.toFixed(2)}`;
+        const cTxtW = ctx.measureText(cTxt).width;
+        // Background box
+        ctx.fillStyle = "rgba(11,15,25,0.82)";
+        ctx.beginPath();
+        ctx.roundRect(W - padR - cTxtW - 12, y - 7, cTxtW + 10, 14, 3);
+        ctx.fill();
+        ctx.fillStyle = PURPLE;
+        ctx.globalAlpha = 0.6;
+        ctx.fillRect(W - padR - 4, y - 7, 2.5, 14);
+        ctx.globalAlpha = 0.95;
+        ctx.textAlign = "right";
+        ctx.fillText(cTxt, W - padR - 4, y + 3.5);
+        ctx.restore();
+      }
+    }
+
+    /* ── Volume Profile (horizontal bars from right edge) ── */
+    if (showVP && n > 10) {
+      const VP_BINS = 60;
+      const vpBins = new Float64Array(VP_BINS);
+      // Distribute each candle's volume across the price bins it spans
+      for (const c of slice) {
+        const lo = Math.max(0, Math.floor(((c.low - pMin) / pRange) * VP_BINS));
+        const hi = Math.min(VP_BINS - 1, Math.floor(((c.high - pMin) / pRange) * VP_BINS));
+        const span = hi - lo + 1;
+        const perBin = c.volume / span;
+        for (let b = lo; b <= hi; b++) vpBins[b] += perBin;
+      }
+      // Find max bin and POC (Point of Control)
+      let vpMax = 0, pocIdx = 0;
+      for (let b = 0; b < VP_BINS; b++) {
+        if (vpBins[b] > vpMax) { vpMax = vpBins[b]; pocIdx = b; }
+      }
+      if (vpMax > 0) {
+        const vpBarMaxW = plotW * 0.22; // max bar width = 22% of chart
+        for (let b = 0; b < VP_BINS; b++) {
+          if (vpBins[b] <= 0) continue;
+          const ratio = vpBins[b] / vpMax;
+          const barW = ratio * vpBarMaxW;
+          const binTop = PAD_T + ((VP_BINS - 1 - b) / VP_BINS) * priceH;
+          const binH = Math.max(1, priceH / VP_BINS - 0.5);
+          const isPOC = b === pocIdx;
+          // Color: POC = bright, high volume area = brighter
+          if (isPOC) {
+            ctx.fillStyle = "rgba(251,191,36,0.35)";
+          } else if (ratio > 0.7) {
+            ctx.fillStyle = "rgba(251,191,36,0.18)";
+          } else {
+            ctx.fillStyle = "rgba(100,130,180,0.12)";
+          }
+          // Draw from right edge leftward
+          ctx.fillRect(W - padR - barW, binTop, barW, binH);
+        }
+        // POC line
+        const pocY = PAD_T + ((VP_BINS - 1 - pocIdx) / VP_BINS) * priceH + (priceH / VP_BINS) / 2;
+        ctx.save();
+        ctx.strokeStyle = "rgba(251,191,36,0.45)";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath(); ctx.moveTo(PAD_L, pocY); ctx.lineTo(W - padR, pocY); ctx.stroke();
+        ctx.setLineDash([]);
+        // POC label
+        ctx.font = "9px 'JetBrains Mono', monospace";
+        ctx.fillStyle = "rgba(251,191,36,0.6)";
+        ctx.textAlign = "right";
+        const pocPrice = pMin + ((pocIdx + 0.5) / VP_BINS) * pRange;
+        ctx.fillText(`POC ${pocPrice.toFixed(2)}`, W - padR - 3, pocY - 4);
         ctx.restore();
       }
     }
@@ -288,6 +349,56 @@ export function ChartCanvas({ candles, levels, consensus, showMA, showResistance
     ctx.font = "10px 'JetBrains Mono', monospace";
     ctx.textAlign = "center";
     ctx.fillText(last.toFixed(2), bx + bw / 2, lastY + 4);
+
+    /* ── level labels (drawn after candles so they're on top) ── */
+    {
+      // Deconflict overlapping labels
+      levelLabels.sort((a, b) => a.y - b.y);
+      const LBL_H = 14;
+      const LBL_GAP = 2;
+      for (let i = 1; i < levelLabels.length; i++) {
+        const prev = levelLabels[i - 1];
+        const cur = levelLabels[i];
+        const needed = LBL_H + LBL_GAP;
+        if (cur.y - prev.y < needed) {
+          const mid = (prev.y + cur.y) / 2;
+          prev.y = mid - needed / 2;
+          cur.y = mid + needed / 2;
+        }
+      }
+      for (const lb of levelLabels) {
+        lb.y = clamp(lb.y, PAD_T + LBL_H / 2, PAD_T + priceH - LBL_H / 2);
+      }
+      ctx.font = "10px 'JetBrains Mono', monospace";
+      for (const lb of levelLabels) {
+        ctx.save();
+        const txtW = ctx.measureText(lb.txt).width;
+        const boxW = txtW + 10;
+        const boxH = LBL_H;
+        // Resistance: label on left side, Support: label on right side
+        const isRes = lb.kind === "resistance";
+        const lx = isRes ? PAD_L + 2 : W - padR - boxW - 2;
+        // Background box
+        ctx.fillStyle = "rgba(11,15,25,0.82)";
+        ctx.beginPath();
+        ctx.roundRect(lx, lb.y - boxH / 2, boxW, boxH, 3);
+        ctx.fill();
+        // Left/right color accent bar
+        ctx.fillStyle = lb.color;
+        ctx.globalAlpha = 0.6;
+        if (isRes) {
+          ctx.fillRect(lx, lb.y - boxH / 2, 2.5, boxH);
+        } else {
+          ctx.fillRect(lx + boxW - 2.5, lb.y - boxH / 2, 2.5, boxH);
+        }
+        // Text
+        ctx.globalAlpha = 0.95;
+        ctx.fillStyle = lb.color;
+        ctx.textAlign = "left";
+        ctx.fillText(lb.txt, lx + 5, lb.y + 3.5);
+        ctx.restore();
+      }
+    }
 
     /* ── volume bars ── */
     // vol grid line
@@ -345,11 +456,16 @@ export function ChartCanvas({ candles, levels, consensus, showMA, showResistance
       const up = c.close >= c.open;
       ctx.font = "11px 'JetBrains Mono', monospace";
       ctx.textAlign = "left";
+      // compute change % from previous close
+      const prevClose = ci > 0 ? slice[ci - 1].close : (vp.start > 0 ? candles[vp.start - 1].close : c.open);
+      const chgPct = ((c.close - prevClose) / prevClose) * 100;
+      const chgUp = chgPct >= 0;
       const items = [
         { l: "开", v: c.open.toFixed(2) },
         { l: "高", v: c.high.toFixed(2) },
         { l: "低", v: c.low.toFixed(2) },
         { l: "收", v: c.close.toFixed(2) },
+        { l: "涨跌", v: (chgUp ? "+" : "") + chgPct.toFixed(2) + "%", color: chgUp ? UP : DN },
         { l: "量", v: fmtVol(c.volume) },
       ];
       let tx = PAD_L + 8;
@@ -357,13 +473,13 @@ export function ChartCanvas({ candles, levels, consensus, showMA, showResistance
       for (const it of items) {
         ctx.fillStyle = TEXT;
         ctx.fillText(it.l, tx, ty);
-        tx += 14;
-        ctx.fillStyle = up ? UP : DN;
+        tx += it.l.length > 1 ? 24 : 14;
+        ctx.fillStyle = (it as any).color ?? (up ? UP : DN);
         ctx.fillText(it.v, tx, ty);
         tx += ctx.measureText(it.v).width + 12;
       }
     }
-  }, [candles, levels, consensus, showMA, showResistance, showSupport, minScore, ensureVp]);
+  }, [candles, levels, consensus, showMA, showResistance, showSupport, showVP, minScore, ensureVp]);
 
   /* ── schedule draw ── */
   const scheduleDraw = useCallback(() => {

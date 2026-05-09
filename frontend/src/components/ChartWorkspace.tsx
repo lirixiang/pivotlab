@@ -49,6 +49,7 @@ export function ChartWorkspace({ data, loading, period, onPeriodChange, refreshi
   const [showMA, setShowMA] = useState(false);
   const [showRes, setShowRes] = useState(true);
   const [showSup, setShowSup] = useState(true);
+  const [showVP, setShowVP] = useState(false);
   return (
     <section className="bg-ink-950 flex flex-col flex-1">
       {/* ─── Header row 1: stock info + price + change ─── */}
@@ -123,13 +124,13 @@ export function ChartWorkspace({ data, loading, period, onPeriodChange, refreshi
             <span className={"dot " + (showMA ? "bg-purple-400" : "bg-ink-500")} />
             均线
           </button>
+          <button className={"chip flex items-center gap-1.5" + (showVP ? " chip-on" : "")} onClick={() => setShowVP(!showVP)}>
+            <span className={"dot " + (showVP ? "bg-amber-400" : "bg-ink-500")} />
+            筹码
+          </button>
         </div>
 
         <div className="flex-1" />
-
-        <button className="px-3 py-1.5 rounded-md grad-gold text-ink-950 text-[12px] font-semibold flex items-center gap-1.5">
-          <i className="fas fa-wand-magic-sparkles text-[11px]" /> 重新画线
-        </button>
 
         <button
           className="px-3 py-1.5 rounded-md bg-ink-800 ring-soft text-[12px] text-ink-200 hover:text-white flex items-center gap-1.5 disabled:opacity-50"
@@ -151,7 +152,7 @@ export function ChartWorkspace({ data, loading, period, onPeriodChange, refreshi
               <i className="fas fa-circle-notch fa-spin mr-2" /> 正在加载行情与画线...
             </div>
           ) : (
-            <ChartCanvas candles={data.candles} levels={data.levels} consensus={q?.analyst_consensus} showMA={showMA} showResistance={showRes} showSupport={showSup} minScore={minScore} />
+            <ChartCanvas candles={data.candles} levels={data.levels} consensus={q?.analyst_consensus} showMA={showMA} showResistance={showRes} showSupport={showSup} showVP={showVP} minScore={minScore} />
           )}
         </div>
 
