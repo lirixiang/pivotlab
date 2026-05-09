@@ -27,7 +27,7 @@ function fmtQuarter(period: string) {
 export function FinancialHistoryPanel({ code }: { code: string }) {
   const [data, setData] = useState<HistoryItem[]>([]);
   const [loading, setLoading] = useState(false);
-  const [metric, setMetric] = useState<"eps" | "revenue" | "net_profit" | "roe" | "net_profit_yoy" | "revenue_yoy">("net_profit");
+  const [metric, setMetric] = useState<"eps" | "revenue" | "net_profit" | "roe" | "net_profit_yoy" | "revenue_yoy">("net_profit_yoy");
 
   useEffect(() => {
     if (!code) return;

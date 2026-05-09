@@ -19,4 +19,4 @@ scikit-learn>=1.4
 hmmlearn>=0.3
 stable-baselines3>=2.3
 gymnasium>=0.29
-ray[train]>=2.44
+ray[default,train]>=2.44

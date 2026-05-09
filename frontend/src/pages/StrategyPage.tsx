@@ -9,10 +9,12 @@ import type {
   AiTrainResult,
   Candle,
   LabeledPoint,
+  RegimeFitResult,
+  PatternResult,
 } from "../types";
 
 type ModelType = "lightgbm" | "transformer" | "lstm" | "cnn_lstm" | "rl_ppo" | "ensemble";
-type Tab = "train" | "signal" | "backtest" | "scan";
+type Tab = "train" | "signal" | "backtest" | "scan" | "regime" | "position" | "pattern";
 
 export function StrategyPage({ defaultCode }: { defaultCode: string }) {
   const [tab, setTab] = useState<Tab>("train");
@@ -32,6 +34,9 @@ export function StrategyPage({ defaultCode }: { defaultCode: string }) {
     { k: "signal", l: "信号预测", icon: "fa-crosshairs" },
     { k: "backtest", l: "AI回测", icon: "fa-chart-line" },
     { k: "scan", l: "AI选股", icon: "fa-radar" },
+    { k: "regime", l: "市场状态", icon: "fa-chart-area" },
+    { k: "position", l: "RL仓位", icon: "fa-robot" },
+    { k: "pattern", l: "形态识别", icon: "fa-shapes" },
   ];
 
   return (
@@ -43,8 +48,8 @@ export function StrategyPage({ defaultCode }: { defaultCode: string }) {
             <i className="fas fa-brain text-white text-sm" />
           </div>
           <div>
-            <h2 className="text-sm font-semibold text-white">AI 策略</h2>
-            <p className="text-[10px] text-ink-500">ZigZag 标注 → 特征工程 → 模型训练 → 信号预测</p>
+            <h2 className="text-sm font-semibold text-white">策略引擎</h2>
+            <p className="text-[10px] text-ink-500 -mt-0.5 tracking-wide">信号训练 · 市场感知 · 仓位管理 · 形态识别</p>
           </div>
         </div>
         <div className="flex items-center gap-1 ml-4">
@@ -130,6 +135,9 @@ export function StrategyPage({ defaultCode }: { defaultCode: string }) {
         {tab === "scan" && (
           <ScanPanel code={code} modelType={modelType} status={status} setCode={setCode} />
         )}
+        {tab === "regime" && <RegimePanel />}
+        {tab === "position" && <RlPositionPanel />}
+        {tab === "pattern" && <PatternPanel />}
       </div>
     </div>
   );
@@ -1537,6 +1545,229 @@ function ScanPanel({
             <i className="fas fa-satellite-dish text-4xl mb-3 opacity-30" />
             <div className="text-sm">点击"开始扫描"寻找交易机会</div>
             <div className="text-[11px] mt-1">AI模型将逐一分析股票并筛选出买卖信号</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────── HMM 市场状态 ─────────────────────── */
+
+function RegimePanel() {
+  const [code, setCode] = useState("000001");
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<RegimeFitResult | null>(null);
+
+  const fit = async () => {
+    setLoading(true);
+    try { setResult(await api.regimeFit({ code })); } finally { setLoading(false); }
+  };
+
+  const COLORS = ["text-emerald-400", "text-amber-400", "text-red-400"];
+  const BG = ["bg-emerald-900/30", "bg-amber-900/30", "bg-red-900/30"];
+
+  return (
+    <div className="p-5 max-w-3xl">
+      <h3 className="text-[14px] font-semibold text-white mb-1">
+        <i className="fas fa-chart-area mr-2 text-amber-400" />HMM 市场状态识别
+      </h3>
+      <p className="text-[11px] text-ink-400 mb-4">
+        隐马尔可夫模型将市场分为趋势/震荡/危机三种状态，辅助策略选择和仓位调整。
+      </p>
+      <div className="flex items-end gap-3 mb-5">
+        <div>
+          <div className="text-[10px] text-ink-500 mb-1">指数/股票代码</div>
+          <input className="inp w-28" value={code} onChange={(e) => setCode(e.target.value)} />
+        </div>
+        <button className="btn-gold" onClick={fit} disabled={loading}>
+          {loading ? <><i className="fas fa-circle-notch fa-spin mr-1" />拟合中...</> : "拟合 HMM"}
+        </button>
+      </div>
+      {result && (
+        <div className="bg-ink-900 rounded-lg p-4 ring-soft">
+          <div className="flex items-center gap-2 mb-4">
+            <span className="text-[11px] text-ink-400">当前状态:</span>
+            <span className={"text-lg font-bold " + COLORS[result.current_regime.id]}>{result.current_regime.name}</span>
+          </div>
+          <div className="grid grid-cols-3 gap-3 mb-4">
+            {result.regimes.map((r) => (
+              <div key={r.id} className={"rounded-lg p-3 ring-soft " + BG[r.id] + (r.id === result.current_regime.id ? " ring-2 ring-gold/30" : "")}>
+                <div className={"text-[13px] font-semibold mb-1 " + COLORS[r.id]}>{r.name}</div>
+                <div className="text-[10px] text-ink-400 space-y-0.5">
+                  <div>日均收益: <span className="num">{r.mean_return.toFixed(3)}%</span></div>
+                  <div>波动率: <span className="num">{r.mean_vol.toFixed(3)}%</span></div>
+                  <div>占比: <span className="num">{r.pct.toFixed(1)}%</span></div>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="mb-3">
+            <div className="tag text-ink-500 mb-1">近30日状态序列</div>
+            <div className="flex gap-0.5">
+              {result.regime_sequence.map((s, i) => (
+                <div key={i} className={"w-2.5 h-4 rounded-sm " + (s === 0 ? "bg-emerald-500" : s === 1 ? "bg-amber-500" : "bg-red-500")}
+                  title={`Day ${i + 1}: ${["趋势", "震荡", "危机"][s]}`} />
+              ))}
+            </div>
+          </div>
+          <details>
+            <summary className="text-[11px] text-ink-400 cursor-pointer hover:text-ink-200">转移矩阵</summary>
+            <table className="text-[10px] num mt-2">
+              <thead><tr><th className="text-ink-500 font-normal px-2">→</th><th className="text-ink-500 font-normal px-2">趋势</th><th className="text-ink-500 font-normal px-2">震荡</th><th className="text-ink-500 font-normal px-2">危机</th></tr></thead>
+              <tbody>{result.transition_matrix.map((row, i) => (
+                <tr key={i}><td className={"px-2 " + COLORS[i]}>{["趋势", "震荡", "危机"][i]}</td>
+                  {row.map((v, j) => <td key={j} className="px-2 text-ink-200">{(v * 100).toFixed(1)}%</td>)}
+                </tr>
+              ))}</tbody>
+            </table>
+          </details>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─────────────────────── RL 仓位管理 ─────────────────────── */
+
+function RlPositionPanel() {
+  const [codes, setCodes] = useState("000001,600036");
+  const [steps, setSteps] = useState(50000);
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<Record<string, unknown> | null>(null);
+  const [posCode, setPosCode] = useState("000001");
+  const [pos, setPos] = useState<{ allocation: number } | null>(null);
+
+  const train = async () => {
+    setLoading(true);
+    try { setResult(await api.rlTrain({ codes: codes.split(",").map((s) => s.trim()), total_timesteps: steps })); } finally { setLoading(false); }
+  };
+  const predict = async () => {
+    const r = await api.rlPosition(posCode);
+    if (!r.error) setPos({ allocation: r.allocation });
+  };
+  const ALLOC = ["空仓", "25%", "50%", "75%", "满仓"];
+
+  return (
+    <div className="p-5 max-w-3xl">
+      <h3 className="text-[14px] font-semibold text-white mb-1">
+        <i className="fas fa-robot mr-2 text-emerald-400" />RL 动态仓位 (PPO)
+      </h3>
+      <p className="text-[11px] text-ink-400 mb-4">
+        强化学习代理学习动态仓位管理，输出 0%/25%/50%/75%/100% 五档仓位建议。
+      </p>
+      <div className="flex items-end gap-3 mb-4">
+        <div><div className="text-[10px] text-ink-500 mb-1">训练股票池</div>
+          <input className="inp w-56" value={codes} onChange={(e) => setCodes(e.target.value)} /></div>
+        <div><div className="text-[10px] text-ink-500 mb-1">训练步数</div>
+          <input className="inp w-28" type="number" value={steps} onChange={(e) => setSteps(Number(e.target.value))} /></div>
+        <button className="btn-gold" onClick={train} disabled={loading}>
+          {loading ? <><i className="fas fa-circle-notch fa-spin mr-1" />训练中...</> : "训练 RL"}
+        </button>
+      </div>
+      {result && !(result as any).error && (
+        <div className="bg-ink-900 rounded-lg p-4 ring-soft mb-5">
+          <div className="grid grid-cols-3 gap-3">
+            <div className="bg-ink-850 rounded-md p-2 text-center"><div className="num text-[14px] font-semibold text-gold">{String(result.eval_total_reward)}</div><div className="text-[9px] text-ink-500 mt-0.5">累计奖励</div></div>
+            <div className="bg-ink-850 rounded-md p-2 text-center"><div className="num text-[14px] font-semibold text-sky2">{String((result.eval_final_equity as number)?.toFixed(4))}</div><div className="text-[9px] text-ink-500 mt-0.5">最终权益</div></div>
+            <div className="bg-ink-850 rounded-md p-2 text-center"><div className="num text-[14px] font-semibold text-ink-200">{String(result.eval_trades)}</div><div className="text-[9px] text-ink-500 mt-0.5">交易次数</div></div>
+          </div>
+        </div>
+      )}
+      <div className="border-t border-ink-800 pt-4">
+        <div className="tag text-ink-500 mb-2">实时仓位建议</div>
+        <div className="flex items-end gap-3">
+          <div><div className="text-[10px] text-ink-500 mb-1">股票代码</div>
+            <input className="inp w-28" value={posCode} onChange={(e) => setPosCode(e.target.value)} /></div>
+          <button className="btn-outline" onClick={predict}>查询仓位</button>
+          {pos && (
+            <div className="flex items-center gap-2">
+              <div className="flex gap-0.5">
+                {[0, 0.25, 0.5, 0.75, 1.0].map((lvl, i) => (
+                  <div key={lvl} className={"w-6 h-6 rounded text-[9px] flex items-center justify-center " + (pos.allocation >= lvl ? "bg-emerald-500 text-white" : "bg-ink-800 text-ink-500")}>{ALLOC[i]}</div>
+                ))}
+              </div>
+              <span className="num text-lg font-bold text-emerald-400">{(pos.allocation * 100).toFixed(0)}%</span>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────── 形态识别 (DTW+CNN) ─────────────────────── */
+
+function PatternPanel() {
+  const [code, setCode] = useState("000001");
+  const [dtwResult, setDtwResult] = useState<PatternResult | null>(null);
+  const [cnnResult, setCnnResult] = useState<PatternResult | null>(null);
+  const [trainResult, setTrainResult] = useState<Record<string, unknown> | null>(null);
+  const [loading, setLoading] = useState<string | null>(null);
+
+  const runDtw = async () => { setLoading("dtw"); try { setDtwResult(await api.patternDtw(code)); } finally { setLoading(null); } };
+  const runCnn = async () => { setLoading("cnn"); try { setCnnResult(await api.patternCnn(code)); } finally { setLoading(null); } };
+  const trainCnn = async () => { setLoading("train"); try { setTrainResult(await api.patternCnnTrain({})); } finally { setLoading(null); } };
+
+  return (
+    <div className="p-5 max-w-3xl">
+      <h3 className="text-[14px] font-semibold text-white mb-1">
+        <i className="fas fa-shapes mr-2 text-purple-400" />形态识别 (DTW + CNN)
+      </h3>
+      <p className="text-[11px] text-ink-400 mb-4">
+        DTW模板匹配可直接使用，CNN需要先训练（基于合成数据，约30秒）。
+      </p>
+      <div className="flex items-end gap-3 mb-5">
+        <div><div className="text-[10px] text-ink-500 mb-1">股票代码</div>
+          <input className="inp w-28" value={code} onChange={(e) => setCode(e.target.value)} /></div>
+        <button className="btn-gold" onClick={runDtw} disabled={loading === "dtw"}>
+          {loading === "dtw" ? <i className="fas fa-circle-notch fa-spin" /> : <i className="fas fa-ruler mr-1" />} DTW 匹配
+        </button>
+        <button className="btn-outline" onClick={runCnn} disabled={loading === "cnn"}>
+          {loading === "cnn" ? <i className="fas fa-circle-notch fa-spin" /> : <i className="fas fa-network-wired mr-1" />} CNN 预测
+        </button>
+        <button className="btn-outline" onClick={trainCnn} disabled={loading === "train"}>
+          {loading === "train" ? <><i className="fas fa-circle-notch fa-spin mr-1" />训练中</> : "训练 CNN"}
+        </button>
+      </div>
+      {trainResult && !(trainResult as any).error && (
+        <div className="bg-ink-900 rounded-lg p-3 ring-soft mb-4 text-[11px]">
+          <span className="text-ink-400">CNN训练完成 · </span>
+          <span className="text-gold num">准确率 {((trainResult.accuracy as number) * 100).toFixed(1)}%</span>
+          <span className="text-ink-500"> · 样本 {trainResult.samples as number}</span>
+        </div>
+      )}
+      <div className="grid grid-cols-2 gap-4">
+        {dtwResult && (
+          <div className="bg-ink-900 rounded-lg p-4 ring-soft">
+            <div className="tag text-ink-500 mb-2">DTW 模板匹配</div>
+            {dtwResult.patterns.map((p) => (
+              <div key={p.pattern_id} className="flex items-center justify-between py-1.5 border-b border-ink-850 last:border-0">
+                <span className="text-[12px] text-ink-200">{p.pattern_name}</span>
+                <div className="flex items-center gap-2">
+                  <div className="w-20 h-1.5 bg-ink-800 rounded-full overflow-hidden">
+                    <div className="h-full rounded-full bg-purple-400" style={{ width: Math.max(0, p.similarity ?? 0) + "%" }} />
+                  </div>
+                  <span className="num text-[11px] text-purple-400 w-8 text-right">{(p.similarity ?? 0).toFixed(0)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        {cnnResult && (
+          <div className="bg-ink-900 rounded-lg p-4 ring-soft">
+            <div className="tag text-ink-500 mb-2">CNN 深度学习</div>
+            {cnnResult.patterns.map((p) => (
+              <div key={p.pattern_id} className="flex items-center justify-between py-1.5 border-b border-ink-850 last:border-0">
+                <span className="text-[12px] text-ink-200">{p.pattern_name}</span>
+                <div className="flex items-center gap-2">
+                  <div className="w-20 h-1.5 bg-ink-800 rounded-full overflow-hidden">
+                    <div className="h-full rounded-full bg-sky-400" style={{ width: Math.max(0, p.probability ?? 0) + "%" }} />
+                  </div>
+                  <span className="num text-[11px] text-sky-400 w-8 text-right">{(p.probability ?? 0).toFixed(0)}%</span>
+                </div>
+              </div>
+            ))}
           </div>
         )}
       </div>

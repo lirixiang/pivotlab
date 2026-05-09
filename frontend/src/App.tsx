@@ -5,7 +5,6 @@ import { ScreenerPage } from "./pages/ScreenerPage";
 import { BacktestPage } from "./pages/BacktestPage";
 import { MonitorPage } from "./pages/MonitorPage";
 import { SyncPage } from "./pages/SyncPage";
-import { AlgoPage } from "./pages/AlgoPage";
 import { StrategyPage } from "./pages/StrategyPage";
 import type { ScreenerItem } from "./types";
 
@@ -14,7 +13,6 @@ const TAB_PATHS: Record<TabKey, string> = {
   workspace: "/",
   screener: "/screener",
   backtest: "/backtest",
-  algo: "/algo",
   strategy: "/strategy",
   monitor: "/monitor",
   sync: "/sync",
@@ -28,6 +26,8 @@ function parseLocation(): { tab: TabKey; code: string } {
   // /stock/600519 → workspace with code
   const stockMatch = p.match(/^\/stock\/(\d{6})$/);
   if (stockMatch) return { tab: "workspace", code: stockMatch[1] };
+  // /algo → redirect to strategy (merged)
+  if (p === "/algo") return { tab: "strategy", code: "" };
   return { tab: PATH_TO_TAB[p] ?? "workspace", code: "" };
 }
 
@@ -119,7 +119,6 @@ export default function App() {
 
       {tab === "screener" && <ScreenerPage onPickStock={goWorkspace} />}
       {tab === "backtest" && <BacktestPage defaultCode={code} />}
-      {tab === "algo" && <AlgoPage />}
       {tab === "strategy" && <StrategyPage defaultCode={code} />}
       {tab === "monitor" && <MonitorPage onPickStock={goWorkspace} />}
       {tab === "sync" && <SyncPage />}
