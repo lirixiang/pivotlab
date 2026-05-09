@@ -2023,12 +2023,18 @@ def get_db_stats() -> dict:
         candle_min = s.execute(text("SELECT MIN(trade_date) FROM daily_candles")).scalar() or ""
         candle_max = s.execute(text("SELECT MAX(trade_date) FROM daily_candles")).scalar() or ""
         candle_codes = s.execute(text("SELECT COUNT(DISTINCT code) FROM daily_candles")).scalar() or 0
+        # quote_cache: count rows in quote_cache table if it exists, otherwise 0
+        try:
+            quote_cache_count = s.execute(text("SELECT COUNT(*) FROM quote_cache")).scalar() or 0
+        except Exception:
+            quote_cache_count = 0
         return {
             "stocks": s.execute(text("SELECT COUNT(*) FROM stocks")).scalar() or 0,
             "daily_candles": s.execute(text("SELECT COUNT(*) FROM daily_candles")).scalar() or 0,
             "candle_codes": candle_codes,
             "candle_min_date": candle_min,
             "candle_max_date": candle_max,
+            "quote_cache": quote_cache_count,
             "financial_snapshots": s.execute(text("SELECT COUNT(*) FROM financial_snapshots")).scalar() or 0,
             "stock_concepts": s.execute(text("SELECT COUNT(*) FROM stock_concepts")).scalar() or 0,
             "analyst_consensus": s.execute(text("SELECT COUNT(*) FROM analyst_consensus")).scalar() or 0,

@@ -60,7 +60,8 @@ function statusBadge(status: string) {
   );
 }
 
-function fmtCount(n: number) {
+function fmtCount(n: number | undefined | null) {
+  if (n == null) return "—";
   if (n >= 10000) return `${(n / 10000).toFixed(1)}万`;
   return n.toLocaleString("zh-CN");
 }
