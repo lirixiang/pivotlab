@@ -1,4 +1,0 @@
- id | code | trade_date | open | high | low | close | volume | amount | change_pct | change_amt | prev_close | turnover_rate | pe_ratio | market_cap | updated_at 
-----+------+------------+------+------+-----+-------+--------+--------+------------+------------+------------+---------------+----------+------------+------------
-(0 rows)
-

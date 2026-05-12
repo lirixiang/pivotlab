@@ -1,0 +1,708 @@
+import { useCallback, useEffect, useRef, useState, type MouseEvent as RME } from "react";
+
+// ── Types ──
+interface Provider {
+  provider: string;
+  available: boolean;
+  default_model: string;
+  models: string[];
+}
+
+interface Session {
+  id: string;
+  title: string;
+  llm_provider: string;
+  llm_model: string;
+  created_at: string;
+}
+
+interface Msg {
+  role: string;
+  content: string;
+  tool_calls?: { id: string; name: string; arguments: Record<string, unknown> }[];
+  tool_call_id?: string;
+  name?: string;
+}
+
+// stream event types
+interface ToolCardState {
+  call_id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+  status: "running" | "ok" | "err";
+  result?: unknown;
+}
+
+interface ApprovalState {
+  call_id: string;
+  tool_name: string;
+  arguments: Record<string, unknown>;
+  summary: string;
+  permission: string;
+  resolved?: string;
+}
+
+const QUICK_PROMPTS = [
+  { t: "今日涨幅榜", d: "查一下数据库里今天涨幅前10的股票", q: "今天涨幅最大的10只股票是哪些？带名称、涨幅、换手率，并按涨幅排序。" },
+  { t: "连板情况", d: "统计当前涨停池的连板分布", q: "今天涨停池里2连板及以上的股票有哪些？按连板数排序。" },
+  { t: "形态筛选", d: "运行突破回踩筛选器", q: "帮我用突破回踩模型筛选一下，列出得分最高的10只股票。" },
+  { t: "支撑压力", d: "计算个股关键价位", q: "帮我算一下600519贵州茅台的支撑位和压力位。" },
+];
+
+// ── Markdown rendering (lightweight) ──
+function md(s: string): string {
+  // Basic: bold, code blocks, inline code, tables, links, lists
+  let out = s
+    .replace(/```(\w*)\n([\s\S]*?)```/g, (_m, lang, code) =>
+      `<pre class="bg-ink-950 border border-ink-700 rounded-lg p-3 my-2 overflow-x-auto text-xs font-mono"><code class="language-${lang}">${esc(code.trim())}</code></pre>`
+    )
+    .replace(/`([^`]+)`/g, '<code class="bg-ink-700 px-1.5 py-0.5 rounded text-sky2 text-xs font-mono">$1</code>')
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/^### (.+)$/gm, '<h3 class="text-sm font-semibold text-ink-100 mt-3 mb-1">$1</h3>')
+    .replace(/^## (.+)$/gm, '<h2 class="text-base font-semibold text-ink-100 mt-4 mb-1">$2</h2>')
+    .replace(/^> (.+)$/gm, '<blockquote class="border-l-2 border-sky2 pl-3 text-ink-300 my-1">$1</blockquote>')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" class="text-sky2 hover:underline">$1</a>');
+
+  // Tables
+  out = out.replace(/^(\|.+\|)\n(\|[-| :]+\|)\n((?:\|.+\|\n?)+)/gm, (_m, header, _sep, body) => {
+    const ths = header.split("|").filter(Boolean).map((h: string) => `<th class="px-3 py-1.5 text-left text-xs text-ink-300 font-semibold bg-ink-800">${h.trim()}</th>`).join("");
+    const rows = body.trim().split("\n").map((row: string) => {
+      const tds = row.split("|").filter(Boolean).map((c: string) => `<td class="px-3 py-1.5 border-t border-ink-700 text-sm">${c.trim()}</td>`).join("");
+      return `<tr class="hover:bg-ink-850">${tds}</tr>`;
+    }).join("");
+    return `<div class="overflow-x-auto my-2"><table class="w-full border-collapse border border-ink-700 rounded-lg text-sm"><thead><tr>${ths}</tr></thead><tbody>${rows}</tbody></table></div>`;
+  });
+
+  // Paragraphs
+  out = out.replace(/\n{2,}/g, "</p><p>");
+  if (!out.startsWith("<")) out = "<p>" + out + "</p>";
+
+  return out;
+}
+
+function esc(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function jsonPreview(obj: unknown): string {
+  const s = JSON.stringify(obj);
+  return s.length > 80 ? s.slice(0, 77) + "..." : s;
+}
+
+// ── Main Component ──
+export function AgentPage() {
+  const [providers, setProviders] = useState<Provider[]>([]);
+  const [provider, setProvider] = useState("");
+  const [model, setModel] = useState("");
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [searchQ, setSearchQ] = useState("");
+  const [sid, setSid] = useState<string | null>(null);
+  const [input, setInput] = useState("");
+  const [running, setRunning] = useState(false);
+  const [connected, setConnected] = useState(false);
+
+  // Chat items: union of user msg, assistant text, tool cards, approval cards, system notes
+  const [items, setItems] = useState<any[]>([]);
+  const [streamBuf, setStreamBuf] = useState("");
+  const [streaming, setStreaming] = useState(false);
+  const [totalTokens, setTotalTokens] = useState(0);
+
+  const [pickerOpen, setPickerOpen] = useState(false);
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const pickerRef = useRef<HTMLDivElement>(null);
+
+  // Close picker on outside click
+  useEffect(() => {
+    if (!pickerOpen) return;
+    const handler = (e: globalThis.MouseEvent) => {
+      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) setPickerOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [pickerOpen]);
+
+  // Auto-scroll
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
+  }, [items, streamBuf]);
+
+  // Load providers
+  useEffect(() => {
+    fetch("/api/agent/providers").then(r => r.json()).then(d => {
+      setProviders(d.providers);
+      const avail = d.providers.filter((p: Provider) => p.available);
+      if (avail.length) {
+        setProvider(d.default_provider || avail[0].provider);
+        setModel(d.default_model || avail[0].default_model);
+      }
+      setConnected(true);
+    }).catch(() => setConnected(false));
+  }, []);
+
+  // Load sessions
+  const loadSessions = useCallback(async (q?: string) => {
+    try {
+      const url = q ? `/api/agent/sessions?q=${encodeURIComponent(q)}` : "/api/agent/sessions";
+      const d = await fetch(url).then(r => r.json());
+      setSessions(d.sessions || []);
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { loadSessions(); }, [loadSessions]);
+
+  // Debounced search
+  useEffect(() => {
+    const t = setTimeout(() => loadSessions(searchQ || undefined), 300);
+    return () => clearTimeout(t);
+  }, [searchQ, loadSessions]);
+
+  // Provider change → update model list
+  const curProvider = providers.find(p => p.provider === provider);
+  useEffect(() => {
+    if (curProvider && !curProvider.models.includes(model)) {
+      setModel(curProvider.default_model || curProvider.models[0] || "");
+    }
+  }, [provider, curProvider]);
+
+  // Open session → load history
+  const openSession = useCallback(async (id: string) => {
+    setSid(id);
+    setTotalTokens(0);
+    try {
+      const d = await fetch(`/api/agent/sessions/${id}/messages`).then(r => r.json());
+      const msgs: Msg[] = (d.messages || []).filter((m: Msg) => m.role !== "system");
+      const newItems: any[] = [];
+      msgs.forEach(m => {
+        if (m.role === "user") {
+          newItems.push({ type: "user", text: m.content });
+        } else if (m.role === "assistant") {
+          if (m.tool_calls?.length) {
+            m.tool_calls.forEach(tc => {
+              newItems.push({ type: "tool", call_id: tc.id, name: tc.name, arguments: tc.arguments, status: "ok" });
+            });
+          }
+          if (m.content) {
+            newItems.push({ type: "assistant", text: m.content });
+          }
+        }
+      });
+      setItems(newItems);
+    } catch { setItems([]); }
+  }, []);
+
+  // Auto-open most recent session
+  useEffect(() => {
+    if (sessions.length && !sid) {
+      openSession(sessions[0].id);
+    }
+  }, [sessions, sid, openSession]);
+
+  // New session
+  const newSession = useCallback(async () => {
+    if (!provider) return;
+    const d = await fetch("/api/agent/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider, model }),
+    }).then(r => r.json());
+    await loadSessions();
+    setSid(d.session_id);
+    setItems([]);
+  }, [provider, model, loadSessions]);
+
+  // Send message via SSE
+  const send = useCallback(async (text?: string) => {
+    const msg = (text || input).trim();
+    if (!msg || running) return;
+
+    // Auto-create session if none
+    let currentSid = sid;
+    if (!currentSid) {
+      const d = await fetch("/api/agent/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider, model }),
+      }).then(r => r.json());
+      currentSid = d.session_id;
+      setSid(currentSid);
+      await loadSessions();
+    }
+
+    setInput("");
+    setRunning(true);
+    setStreaming(false);
+    setStreamBuf("");
+    setItems(prev => [...prev, { type: "user", text: msg }]);
+
+    const abort = new AbortController();
+    abortRef.current = abort;
+
+    try {
+      const resp = await fetch(`/api/agent/chat/${currentSid}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: msg }),
+        signal: abort.signal,
+      });
+
+      if (!resp.ok || !resp.body) {
+        setItems(prev => [...prev, { type: "system", text: `Error: ${resp.status}` }]);
+        setRunning(false);
+        return;
+      }
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      let accDelta = "";
+
+      const flushDelta = () => {
+        if (accDelta) {
+          setItems(prev => [...prev, { type: "assistant", text: accDelta }]);
+          setStreamBuf("");
+          setStreaming(false);
+          accDelta = "";
+        }
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+
+        const parts = buf.split("\n\n");
+        buf = parts.pop() || "";
+
+        for (const part of parts) {
+          const eventMatch = part.match(/^event:\s*(\S+)/m);
+          const dataMatch = part.match(/^data:\s*(.*)/m);
+          if (!eventMatch || !dataMatch) continue;
+          const etype = eventMatch[1];
+          let data: any;
+          try { data = JSON.parse(dataMatch[1]); } catch { continue; }
+
+          switch (etype) {
+            case "step_start":
+              break;
+            case "assistant_delta":
+              accDelta += data.delta || "";
+              setStreamBuf(accDelta);
+              setStreaming(true);
+              break;
+            case "assistant_text":
+              flushDelta();
+              if (data.text) setItems(prev => [...prev, { type: "assistant", text: data.text }]);
+              break;
+            case "tool_call":
+              flushDelta();
+              setItems(prev => [...prev, { type: "tool", ...data, status: "running" }]);
+              break;
+            case "tool_result":
+              setItems(prev => prev.map(it =>
+                it.type === "tool" && it.call_id === data.call_id
+                  ? { ...it, status: data.ok ? "ok" : "err", result: data.result }
+                  : it
+              ));
+              break;
+            case "approval_request":
+              flushDelta();
+              setItems(prev => [...prev, { type: "approval", ...data }]);
+              break;
+            case "usage":
+              setTotalTokens(prev => prev + (data.total_tokens || 0));
+              break;
+            case "done":
+              flushDelta();
+              break;
+            case "final":
+              // Server sends final with complete text — use it directly
+              accDelta = "";
+              setStreamBuf("");
+              setStreaming(false);
+              if (data.text) setItems(prev => [...prev, { type: "assistant", text: data.text }]);
+              break;
+            case "cancelled":
+              flushDelta();
+              setItems(prev => [...prev, { type: "system", text: "已停止" }]);
+              break;
+            case "error":
+              flushDelta();
+              setItems(prev => [...prev, { type: "system", text: `⚠️ ${data.error}` }]);
+              break;
+          }
+        }
+      }
+      flushDelta();
+    } catch (e: any) {
+      if (e.name !== "AbortError") {
+        setItems(prev => [...prev, { type: "system", text: `Error: ${e.message}` }]);
+      }
+    } finally {
+      setRunning(false);
+      setStreaming(false);
+      abortRef.current = null;
+    }
+  }, [input, running, sid, provider, model, loadSessions]);
+
+  // Cancel
+  const cancel = useCallback(async () => {
+    abortRef.current?.abort();
+    if (sid) {
+      fetch(`/api/agent/cancel/${sid}`, { method: "POST" }).catch(() => {});
+    }
+    setRunning(false);
+  }, [sid]);
+
+  // Approve
+  const approve = useCallback(async (callId: string, decision: string) => {
+    if (!sid) return;
+    await fetch("/api/agent/approve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: sid, call_id: callId, decision }),
+    }).catch(() => {});
+    setItems(prev => prev.map(it =>
+      it.type === "approval" && it.call_id === callId
+        ? { ...it, resolved: decision }
+        : it
+    ));
+  }, [sid]);
+
+  // Keyboard
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      if (running) cancel(); else send();
+    }
+  };
+
+  return (
+    <div className="flex-1 flex overflow-hidden bg-ink-950">
+      {/* Sidebar */}
+      <aside className="w-56 flex-shrink-0 border-r border-ink-800 grad-head flex flex-col">
+        <div className="px-3 py-3 border-b border-ink-800 space-y-2">
+          <button
+            onClick={newSession}
+            className="w-full px-3 py-2 bg-gold text-ink-950 rounded-md text-sm font-medium hover:opacity-90 transition"
+          >
+            ＋ 新建会话
+          </button>
+          <div className="relative">
+            <input
+              type="text"
+              value={searchQ}
+              onChange={e => setSearchQ(e.target.value)}
+              placeholder="搜索会话…"
+              className="w-full bg-ink-800 border border-ink-700 rounded-md pl-7 pr-2 py-1.5 text-xs text-ink-200 placeholder:text-ink-500 focus:border-sky2 outline-none"
+            />
+            <span className="absolute left-2 top-1/2 -translate-y-1/2 text-ink-500 text-xs">🔍</span>
+            {searchQ && (
+              <button
+                onClick={() => setSearchQ("")}
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 text-ink-500 hover:text-ink-300 text-xs leading-none"
+              >✕</button>
+            )}
+          </div>
+        </div>
+        <div className="flex-1 overflow-y-auto px-2 py-1 space-y-0.5">
+          {sessions.map(s => (
+            <button
+              key={s.id}
+              onClick={() => openSession(s.id)}
+              className={`w-full text-left px-3 py-2 rounded-md text-sm transition ${
+                s.id === sid ? "bg-ink-800 text-white" : "text-ink-300 hover:bg-ink-800/60"
+              }`}
+            >
+              <div className="truncate">{s.title || "新会话"}</div>
+              <div className="text-[10px] text-ink-500 mt-0.5 truncate">
+                <span className="bg-ink-700/60 px-1.5 py-0.5 rounded text-[9px]">{s.llm_provider}</span>
+                {" "}{s.llm_model}
+              </div>
+            </button>
+          ))}
+        </div>
+      </aside>
+
+      {/* Main chat area */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Top bar */}
+        <div className="flex items-center justify-between px-5 py-2.5 border-b border-ink-800 grad-head flex-shrink-0">
+          {/* Model picker button */}
+          <div className="relative" ref={pickerRef}>
+            <button
+              onClick={() => setPickerOpen(o => !o)}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-ink-800 transition text-sm"
+            >
+              <span className="w-5 h-5 rounded-md bg-gradient-to-br from-sky2 to-purple-400 flex items-center justify-center text-[10px] text-white font-bold">AI</span>
+              <span className="text-ink-200 font-medium max-w-[200px] truncate">{model || "选择模型"}</span>
+              <svg className={`w-3.5 h-3.5 text-ink-500 transition ${pickerOpen ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" /></svg>
+            </button>
+            {pickerOpen && (
+              <ModelPicker
+                providers={providers}
+                provider={provider}
+                model={model}
+                onSelect={(p, m) => { setProvider(p); setModel(m); setPickerOpen(false); }}
+              />
+            )}
+          </div>
+          <div className="flex items-center gap-3 text-xs text-ink-500">
+            <span className="flex items-center gap-1.5">
+              <span className={`dot ${connected ? "bg-cn-dn" : "bg-ink-500"}`} />
+              {connected ? "已连接" : "未连接"}
+            </span>
+            {totalTokens > 0 && <span className="num">{totalTokens.toLocaleString()} tokens</span>}
+          </div>
+        </div>
+
+        {/* Messages */}
+        <div ref={scrollRef} className="flex-1 overflow-y-auto min-h-0">
+          <div className="max-w-4xl mx-auto px-4 py-6 space-y-4">
+            {items.length === 0 && !streaming && (
+              <div className="flex flex-col items-center justify-center py-20 text-center">
+                <div className="text-3xl mb-3 opacity-50">💬</div>
+                <h2 className="text-lg font-semibold text-ink-200 mb-1">开始对话</h2>
+                <p className="text-sm text-ink-500 max-w-md mb-6">
+                  问我任何关于 A 股的事 — 数据查询、技术分析、形态筛选、AI 推荐...
+                </p>
+                <div className="grid grid-cols-2 gap-2 w-full max-w-lg">
+                  {QUICK_PROMPTS.map(p => (
+                    <button
+                      key={p.t}
+                      onClick={() => send(p.q)}
+                      className="text-left px-3 py-2.5 bg-ink-900 border border-ink-800 rounded-lg hover:border-gold/40 transition"
+                    >
+                      <div className="text-sm font-medium text-ink-200">{p.t}</div>
+                      <div className="text-xs text-ink-500 mt-0.5">{p.d}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {items.map((item, i) => {
+              if (item.type === "user") return <UserBubble key={i} text={item.text} />;
+              if (item.type === "assistant") return <AssistantBubble key={i} text={item.text} />;
+              if (item.type === "tool") return <ToolCard key={i} {...item} />;
+              if (item.type === "approval") return <ApprovalCard key={i} {...item} onApprove={approve} />;
+              if (item.type === "system") return <SystemNote key={i} text={item.text} />;
+              return null;
+            })}
+
+            {streaming && streamBuf && (
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 text-[10px] text-ink-500 uppercase tracking-wider">
+                  <span className="w-4 h-4 rounded bg-gradient-to-br from-sky2 to-purple-400 flex items-center justify-center text-[8px] text-white font-bold">A</span>
+                  Assistant
+                </div>
+                <div className="bg-ink-900 border border-ink-700 rounded-lg px-4 py-3 text-sm text-ink-200">
+                  <div dangerouslySetInnerHTML={{ __html: md(streamBuf) }} />
+                  <span className="inline-block w-2 h-4 bg-sky2 animate-pulse ml-0.5" />
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Composer */}
+        <div className="border-t border-ink-800 grad-head px-4 py-3 flex-shrink-0">
+          <div className="max-w-4xl mx-auto">
+            <div className="bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 focus-within:border-gold/60 transition">
+              <textarea
+                ref={inputRef}
+                value={input}
+                onChange={e => setInput(e.target.value)}
+                onKeyDown={onKeyDown}
+                placeholder="问点什么..."
+                rows={1}
+                className="w-full bg-transparent text-sm text-ink-200 placeholder:text-ink-500 outline-none resize-none"
+                style={{ minHeight: 24, maxHeight: 200 }}
+              />
+              <div className="flex items-center justify-between mt-1.5">
+                <span className="text-[11px] text-ink-600">
+                  <span className="kbd">Enter</span> 发送 · <span className="kbd">Shift+Enter</span> 换行
+                </span>
+                <button
+                  onClick={() => running ? cancel() : send()}
+                  disabled={!running && !input.trim()}
+                  className={`px-4 py-1.5 rounded-md text-sm font-medium transition ${
+                    running
+                      ? "bg-red-500/20 text-red-400 hover:bg-red-500/30"
+                      : "bg-gold text-ink-950 hover:opacity-90 disabled:opacity-30 disabled:cursor-not-allowed"
+                  }`}
+                >
+                  {running ? "停止" : "发送"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Sub-components ──
+
+function UserBubble({ text }: { text: string }) {
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center gap-2 text-[10px] text-ink-500 uppercase tracking-wider">
+        <span className="w-4 h-4 rounded bg-sky2 flex items-center justify-center text-[8px] text-white font-bold">U</span>
+        You
+      </div>
+      <div className="bg-sky2/5 border border-sky2/20 rounded-lg px-4 py-3 text-sm text-ink-200 whitespace-pre-wrap">
+        {text}
+      </div>
+    </div>
+  );
+}
+
+function AssistantBubble({ text }: { text: string }) {
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center gap-2 text-[10px] text-ink-500 uppercase tracking-wider">
+        <span className="w-4 h-4 rounded bg-gradient-to-br from-sky2 to-purple-400 flex items-center justify-center text-[8px] text-white font-bold">A</span>
+        Assistant
+      </div>
+      <div className="bg-ink-900 border border-ink-700 rounded-lg px-4 py-3 text-sm text-ink-200 prose-agent" dangerouslySetInnerHTML={{ __html: md(text) }} />
+    </div>
+  );
+}
+
+function ToolCard({ name, arguments: args, status, result, call_id }: ToolCardState) {
+  const [open, setOpen] = useState(status === "err");
+
+  const iconClass = status === "running"
+    ? "bg-yellow-500/15 text-yellow-400"
+    : status === "ok"
+    ? "bg-cn-dn/15 text-cn-dn"
+    : "bg-red-500/15 text-red-400";
+
+  const icon = status === "running" ? "⟳" : status === "ok" ? "✓" : "✕";
+  const statusText = status === "running" ? "运行中" : status === "ok" ? "完成" : "失败";
+
+  return (
+    <div className="border border-ink-700 rounded-lg bg-ink-900 overflow-hidden text-xs">
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center gap-2.5 px-3 py-2 hover:bg-ink-800 transition text-left"
+      >
+        <span className={`w-5 h-5 rounded flex items-center justify-center text-[10px] font-bold ${iconClass}`}>
+          {status === "running" ? <span className="animate-spin">⟳</span> : icon}
+        </span>
+        <span className="font-mono font-semibold text-ink-200">{name}</span>
+        <span className="flex-1 font-mono text-ink-500 truncate">{jsonPreview(args)}</span>
+        <span className={`text-[10px] ${status === "ok" ? "text-cn-dn" : status === "err" ? "text-red-400" : "text-yellow-400"}`}>
+          {statusText}
+        </span>
+        <span className={`text-ink-500 text-[8px] transition ${open ? "rotate-90" : ""}`}>▶</span>
+      </button>
+      {open && (
+        <div className="border-t border-ink-700 px-3 py-2.5 space-y-2">
+          <div>
+            <div className="text-[9px] text-ink-500 uppercase tracking-wider mb-1">参数</div>
+            <pre className="bg-ink-950 rounded-md p-2 overflow-x-auto text-ink-300 font-mono">{JSON.stringify(args, null, 2)}</pre>
+          </div>
+          {result !== undefined && (
+            <div>
+              <div className="text-[9px] text-ink-500 uppercase tracking-wider mb-1">结果</div>
+              <pre className="bg-ink-950 rounded-md p-2 overflow-x-auto text-ink-300 font-mono max-h-80 overflow-y-auto">
+                {typeof result === "string" ? result : JSON.stringify(result, null, 2)}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ApprovalCard({
+  call_id, tool_name, arguments: args, summary, permission, resolved, onApprove,
+}: ApprovalState & { onApprove: (id: string, d: string) => void }) {
+  const isDanger = permission === "dangerous";
+  return (
+    <div className={`border rounded-lg overflow-hidden ${isDanger ? "border-red-500/50" : "border-yellow-500/50"}`}>
+      <div className={`px-3 py-2 flex items-center gap-2 font-semibold text-sm ${isDanger ? "bg-red-500/10 text-red-400" : "bg-yellow-500/10 text-yellow-400"}`}>
+        {isDanger ? "⚠️ 危险操作" : "🔐 权限请求"}
+        <span className="text-ink-500 font-normal">— <code className="text-inherit bg-transparent">{tool_name}</code></span>
+      </div>
+      <div className="px-3 py-2 bg-ink-900">
+        {summary && <div className="text-sm text-ink-300 mb-2">{summary}</div>}
+        <pre className="bg-ink-950 rounded-md p-2 text-xs overflow-x-auto font-mono text-ink-300 max-h-48 overflow-y-auto">
+          {JSON.stringify(args, null, 2)}
+        </pre>
+      </div>
+      <div className="px-3 py-2 bg-ink-800 border-t border-ink-700 flex gap-2">
+        {resolved ? (
+          <span className="text-sm text-ink-500">
+            {{ allow: "✓ 已允许", always_allow_tool: "✓ 始终允许", deny: "✕ 已拒绝" }[resolved] || resolved}
+          </span>
+        ) : (
+          <>
+            <button onClick={() => onApprove(call_id, "allow")} className="px-3 py-1 rounded-md bg-cn-dn text-ink-950 text-sm font-semibold">允许本次</button>
+            {!isDanger && <button onClick={() => onApprove(call_id, "always_allow_tool")} className="px-3 py-1 rounded-md bg-sky2 text-ink-950 text-sm font-semibold">始终允许</button>}
+            <button onClick={() => onApprove(call_id, "deny")} className="px-3 py-1 rounded-md bg-ink-700 text-ink-200 text-sm font-semibold border border-ink-600">拒绝</button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SystemNote({ text }: { text: string }) {
+  return <div className="text-center text-xs text-ink-500 py-2">{text}</div>;
+}
+
+// ── Model Picker Popover ──
+function ModelPicker({
+  providers, provider, model, onSelect,
+}: {
+  providers: Provider[];
+  provider: string;
+  model: string;
+  onSelect: (provider: string, model: string) => void;
+}) {
+  const available = providers.filter(p => p.available);
+  return (
+    <div className="absolute top-full left-0 mt-1.5 w-72 bg-ink-900 border border-ink-700 rounded-xl shadow-2xl shadow-black/50 z-50 overflow-hidden">
+      <div className="px-3 py-2.5 border-b border-ink-800">
+        <span className="text-xs text-ink-400 font-medium">选择模型</span>
+      </div>
+      <div className="max-h-80 overflow-y-auto py-1">
+        {available.map(p => (
+          <div key={p.provider}>
+            <div className="px-3 py-1.5 text-[10px] text-ink-500 uppercase tracking-wider font-semibold flex items-center gap-2">
+              <span className={`w-1.5 h-1.5 rounded-full ${p.provider === provider ? "bg-sky2" : "bg-ink-600"}`} />
+              {p.provider}
+            </div>
+            {p.models.map(m => {
+              const active = p.provider === provider && m === model;
+              return (
+                <button
+                  key={m}
+                  onClick={() => onSelect(p.provider, m)}
+                  className={`w-full text-left px-3 py-2 text-sm flex items-center justify-between transition ${
+                    active
+                      ? "bg-sky2/10 text-sky2"
+                      : "text-ink-300 hover:bg-ink-800"
+                  }`}
+                >
+                  <span className="pl-4 truncate">{m}</span>
+                  {active && <span className="text-sky2 text-xs flex-shrink-0">✓</span>}
+                </button>
+              );
+            })}
+          </div>
+        ))}
+        {available.length === 0 && (
+          <div className="px-3 py-4 text-center text-sm text-ink-500">暂无可用模型</div>
+        )}
+      </div>
+    </div>
+  );
+}

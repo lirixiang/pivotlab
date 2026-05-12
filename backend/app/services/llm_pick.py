@@ -367,19 +367,16 @@ def validate_candidates(
     return [_to_dict(r) for r in results]
 
 
-# ── LLM caller ───────────────────────────────────────────────────────────
+# ── LLM caller (uses agent's unified LLM factory) ───────────────────────
 
 def get_available_providers() -> list[dict]:
-    """Return list of configured LLM providers."""
-    available = []
-    for key, cfg in LLM_PROVIDERS.items():
-        api_key = os.getenv(cfg["env_key"], "")
-        available.append({
-            "key": key,
-            "label": cfg["label"],
-            "configured": bool(api_key),
-        })
-    return available
+    """Return list of configured LLM providers from agent factory."""
+    from app.agent.llm.factory import list_available_providers as _list
+    providers = _list()
+    return [
+        {"key": p["provider"], "label": p["provider"], "configured": p["available"]}
+        for p in providers
+    ]
 
 
 def call_llm(
@@ -388,62 +385,51 @@ def call_llm(
     *,
     timeout: float = 60.0,
 ) -> dict[str, Any]:
-    """Call LLM API and parse stock candidates from response.
+    """Call LLM API via agent factory and parse stock candidates from response.
     Returns {"candidates": [...], "raw_response": str, "provider": str, "error": str|None}
     """
-    cfg = LLM_PROVIDERS.get(provider)
-    if not cfg:
-        return {"candidates": [], "raw_response": "", "provider": provider, "error": f"未知提供商: {provider}"}
-
-    api_key = os.getenv(cfg["env_key"], "")
-    if not api_key:
-        return {"candidates": [], "raw_response": "", "provider": provider,
-                "error": f"未配置 {cfg['env_key']} 环境变量"}
-
-    model = cfg["model"]
-    if cfg.get("model_env"):
-        model = os.getenv(cfg["model_env"], model)
-    if not model:
-        return {"candidates": [], "raw_response": "", "provider": provider,
-                "error": f"未配置模型ID ({cfg.get('model_env', '')})"}
+    import asyncio
+    from app.agent.llm.factory import build_llm
+    from app.agent.core.types import Message
 
     user_prompt = prompt or DEFAULT_PROMPT
 
     try:
-        with httpx.Client(timeout=timeout) as client:
-            resp = client.post(
-                f"{cfg['base_url']}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": "你是一位资深A股投资研究员，专注于基本面分析和市场趋势研判。请用中文回答。"},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    "temperature": 0.3,
-                    "max_tokens": 4096,
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        llm = build_llm(provider=provider)
+    except RuntimeError as e:
+        return {"candidates": [], "raw_response": "", "provider": provider, "error": str(e)}
 
-        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    messages = [
+        Message(role="system", content="你是一位资深A股投资研究员，专注于基本面分析和市场趋势研判。请用中文回答。"),
+        Message(role="user", content=user_prompt),
+    ]
 
-        # Parse JSON from response (might be wrapped in ```json ... ```)
+    try:
+        # build_llm returns async client — run in event loop
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            # Already in async context — create a new thread
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                resp = pool.submit(
+                    lambda: asyncio.run(llm.chat(messages, temperature=0.3, max_tokens=4096))
+                ).result(timeout=timeout)
+        else:
+            resp = asyncio.run(llm.chat(messages, temperature=0.3, max_tokens=4096))
+
+        content = resp.message.content or ""
         candidates = _parse_candidates(content)
         return {
             "candidates": candidates,
             "raw_response": content,
             "provider": provider,
-            "model": model,
+            "model": llm.model,
             "error": None,
         }
-    except httpx.HTTPStatusError as e:
-        return {"candidates": [], "raw_response": "", "provider": provider,
-                "error": f"API错误 {e.response.status_code}: {e.response.text[:200]}"}
     except Exception as e:
         return {"candidates": [], "raw_response": "", "provider": provider,
                 "error": f"调用失败: {str(e)[:200]}"}

@@ -1,0 +1,43 @@
+# Golden regression questions for pivotlab-agent
+# Run with:  python -m agent.evals.runner [--provider qwen] [--model qwen-max]
+
+- id: q001
+  prompt: "数据库里现在一共有多少只 A 股？"
+  expect_tools: ["query_db"]
+  expect: ["股", "数"]
+  tags: [smoke, db]
+
+- id: q002
+  prompt: "贵州茅台（600519）最近 5 个交易日的涨跌幅是多少？"
+  expect_tools: ["query_db"]
+  expect: ["600519"]
+  tags: [stock, recent]
+
+- id: q003
+  prompt: "今天涨停板里有几只是 2 连板以上的？"
+  expect_tools: ["query_db"]
+  expect: ["连板"]
+  tags: [zt, db]
+
+- id: q004
+  prompt: "帮我算一下 000001 平安银行的支撑位和压力位"
+  expect_tools: ["calc_sr_levels"]
+  expect: ["支撑", "压力"]
+  tags: [sr]
+
+- id: q005
+  prompt: "最近概念板块里资金净流入最多的前 5 个是什么？"
+  expect_tools: ["query_db"]
+  expect: ["概念", "净流入"]
+  tags: [concept]
+
+- id: q006
+  prompt: "拉一下当前涨幅最大的 10 只股票实时行情"
+  expect_tools: ["get_realtime_quote"]
+  tags: [realtime]
+
+- id: q007
+  prompt: "搜索一下知识库里关于宁德时代的最新研报观点"
+  expect_tools: ["kb_search"]
+  expect: ["宁德"]
+  tags: [rag]

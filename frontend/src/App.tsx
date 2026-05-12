@@ -9,6 +9,7 @@ import { SyncPage } from "./pages/SyncPage";
 import { StrategyPage } from "./pages/StrategyPage";
 import { RecommendPage } from "./pages/RecommendPage";
 import { LLMPickPage } from "./pages/LLMPickPage";
+import { AgentPage } from "./pages/AgentPage";
 
 // ── URL ↔ state helpers ──
 const TAB_PATHS: Record<TabKey, string> = {
@@ -17,6 +18,7 @@ const TAB_PATHS: Record<TabKey, string> = {
   screener: "/screener",
   aiscan: "/aiscan",
   llmpick: "/llmpick",
+  agent: "/agent",
   backtest: "/backtest",
   strategy: "/strategy",
   monitor: "/monitor",
@@ -105,7 +107,7 @@ export default function App() {
   }, []);
 
   return (
-    <div className="min-h-screen flex flex-col">
+    <div className="h-screen flex flex-col overflow-hidden">
       <header className="grad-head border-b border-ink-700 sticky top-0 z-30">
         <TopBar tab={tab} onTabChange={handleTabChange} onSearch={goWorkspace} />
         <IndexStrip />
@@ -127,6 +129,7 @@ export default function App() {
       {tab === "strategy" && <StrategyPage defaultCode={code} />}
       {tab === "monitor" && <MonitorPage onPickStock={goWorkspace} />}
       {tab === "sync" && <SyncPage />}
+      {tab === "agent" && <AgentPage />}
       {tab === "recommend" && (
         <RecommendPage
           onPickStock={goWorkspace}

@@ -12,7 +12,8 @@ FROM ${DOCKERHUB_LIBRARY_MIRROR}/python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app/backend
 
 WORKDIR /app
 
@@ -24,14 +25,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY backend/requirements.txt ./requirements.txt
 RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --upgrade pip \
-    && pip install torch --index-url https://download.pytorch.org/whl/cu128 \
+    # && pip install torch --index-url https://download.pytorch.org/whl/cu128 \
     && pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
 
 COPY backend ./backend
 COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=frontend-builder /build/frontend/dist /usr/share/nginx/html
 
-RUN mkdir -p /app/backend/data
+RUN mkdir -p /app/backend/data /workspace
 RUN rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default
 
 COPY <<'EOF' /app/start.sh

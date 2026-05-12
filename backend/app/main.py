@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import init_db
-from .routers import market, screener, stocks, watchlist, sync, settings, backtest, algo, strategy, dragon, recommend, llmpick
+from .routers import market, screener, stocks, watchlist, sync, settings, backtest, algo, strategy, dragon, recommend, llmpick, agent
 from .services.data_provider import preload_candles
 from .services.sync_worker import spawn_sync
 
@@ -89,6 +89,14 @@ async def lifespan(app: FastAPI):
     global _scheduler
     await init_db()
 
+    # Init agent session tables
+    try:
+        from .agent.core.session import init_db as agent_init_db
+        await agent_init_db()
+        logger.info("Agent session tables ready")
+    except Exception as e:
+        logger.warning("Agent init skipped: %s", e)
+
     # Initialize Ray cluster (single node, all GPUs)
     import ray
     if not ray.is_initialized():
@@ -143,6 +151,7 @@ app.include_router(strategy.router)
 app.include_router(dragon.router)
 app.include_router(recommend.router)
 app.include_router(llmpick.router)
+app.include_router(agent.router)
 
 
 @app.get("/api/health")

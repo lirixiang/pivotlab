@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pivotlab-agent 架构图</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #0f1923; color: #c9d1d9; min-height: 100vh; overflow-x: hidden; }
+
+  h1 { text-align: center; padding: 32px 0 8px; font-size: 28px; color: #58a6ff; letter-spacing: 2px; }
+  .subtitle { text-align: center; font-size: 13px; color: #6e7681; margin-bottom: 28px; }
+
+  .canvas { position: relative; max-width: 1200px; margin: 0 auto; padding: 0 24px 60px; }
+
+  /* ── Layer ── */
+  .layer { border: 1.5px solid rgba(88,166,255,.25); border-radius: 14px; padding: 18px 16px 14px; margin-bottom: 22px; position: relative; background: rgba(22,27,34,.85); backdrop-filter: blur(6px); transition: box-shadow .3s; }
+  .layer:hover { box-shadow: 0 0 24px rgba(88,166,255,.12); }
+  .layer-title { position: absolute; top: -11px; left: 22px; background: #0f1923; padding: 0 10px; font-size: 13px; font-weight: 600; color: #58a6ff; letter-spacing: 1px; text-transform: uppercase; }
+
+  /* ── Node grid ── */
+  .nodes { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; }
+
+  .node { background: linear-gradient(135deg, #1c2733 0%, #161b22 100%); border: 1px solid rgba(110,118,129,.35); border-radius: 10px; padding: 14px 16px; min-width: 150px; max-width: 220px; flex: 1 1 150px; cursor: default; transition: transform .2s, border-color .3s, box-shadow .3s; position: relative; }
+  .node:hover { transform: translateY(-3px); border-color: rgba(88,166,255,.55); box-shadow: 0 6px 20px rgba(0,0,0,.4); }
+
+  .node .icon { font-size: 22px; margin-bottom: 6px; }
+  .node .name { font-size: 14px; font-weight: 700; color: #e6edf3; margin-bottom: 4px; }
+  .node .tech { font-size: 11px; color: #7ee787; margin-bottom: 4px; font-family: 'JetBrains Mono', 'Fira Code', monospace; }
+  .node .desc { font-size: 11.5px; color: #8b949e; line-height: 1.45; }
+
+  .node.highlight-green  { border-left: 3px solid #3fb950; }
+  .node.highlight-blue   { border-left: 3px solid #58a6ff; }
+  .node.highlight-purple { border-left: 3px solid #bc8cff; }
+  .node.highlight-orange { border-left: 3px solid #d29922; }
+  .node.highlight-red    { border-left: 3px solid #f85149; }
+  .node.highlight-cyan   { border-left: 3px solid #39d2c0; }
+  .node.highlight-pink   { border-left: 3px solid #f778ba; }
+
+  /* ── Arrows (SVG overlay) ── */
+  .arrows { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 0; }
+  .arrows line, .arrows path { stroke: rgba(88,166,255,.3); stroke-width: 1.5; }
+  .arrows marker path { fill: rgba(88,166,255,.4); }
+
+  /* ── Flow connectors (CSS) ── */
+  .flow { display: flex; justify-content: center; margin: -8px 0; position: relative; z-index: 1; }
+  .flow .arrow-down { width: 2px; height: 22px; background: linear-gradient(to bottom, rgba(88,166,255,.5), rgba(88,166,255,.15)); position: relative; }
+  .flow .arrow-down::after { content: ''; position: absolute; bottom: -5px; left: -4px; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 6px solid rgba(88,166,255,.45); }
+  .flow .label { font-size: 10px; color: #6e7681; margin-left: 8px; align-self: center; }
+
+  /* ── Permission badges ── */
+  .badge { display: inline-block; font-size: 10px; padding: 1px 7px; border-radius: 8px; font-weight: 600; margin-right: 4px; }
+  .badge-safe    { background: rgba(63,185,80,.18); color: #3fb950; border: 1px solid rgba(63,185,80,.3); }
+  .badge-confirm { background: rgba(210,153,34,.15); color: #d29922; border: 1px solid rgba(210,153,34,.3); }
+  .badge-danger  { background: rgba(248,81,73,.15); color: #f85149; border: 1px solid rgba(248,81,73,.3); }
+
+  /* ── Data flow legend ── */
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; justify-content: center; margin: 24px 0 12px; }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #8b949e; }
+  .legend-color { width: 14px; height: 4px; border-radius: 2px; }
+
+  /* ── Responsive ── */
+  @media (max-width: 768px) {
+    .node { min-width: 120px; max-width: 100%; flex: 1 1 100%; }
+    h1 { font-size: 22px; }
+  }
+</style>
+</head>
+<body>
+
+<h1>🏗️ pivotlab-agent 系统架构</h1>
+<p class="subtitle">LLM Agent for A-Share Stock Analysis &nbsp;·&nbsp; ReAct Loop + Function Calling + RAG</p>
+
+<div class="canvas">
+
+  <!-- ==================== 客户端层 ==================== -->
+  <div class="layer">
+    <span class="layer-title">① 客户端层 — Client</span>
+    <div class="nodes">
+      <div class="node highlight-blue">
+        <div class="icon">🌐</div>
+        <div class="name">Web UI</div>
+        <div class="tech">HTML / JavaScript</div>
+        <div class="desc">静态前端页面，通过 WebSocket 与 Agent 实时交互，支持流式输出和工具审批</div>
+      </div>
+      <div class="node highlight-purple">
+        <div class="icon">🔌</div>
+        <div class="name">MCP Client</div>
+        <div class="tech">Claude Desktop / Cursor</div>
+        <div class="desc">通过 MCP 协议（stdio/HTTP）将 Agent 工具暴露给外部 LLM 客户端</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow"><div class="arrow-down"></div><span class="label">WebSocket / HTTP / MCP JSON-RPC</span></div>
+
+  <!-- ==================== API 网关层 ==================== -->
+  <div class="layer">
+    <span class="layer-title">② API 网关层 — FastAPI :18090</span>
+    <div class="nodes">
+      <div class="node highlight-blue">
+        <div class="icon">📡</div>
+        <div class="name">REST API</div>
+        <div class="tech">FastAPI + Pydantic</div>
+        <div class="desc">/api/health · /api/providers · /api/sessions<br>会话 CRUD、健康检查、LLM 可用列表</div>
+      </div>
+      <div class="node highlight-green">
+        <div class="icon">⚡</div>
+        <div class="name">WebSocket</div>
+        <div class="tech">FastAPI WebSocket</div>
+        <div class="desc">双向实时通信，流式推送 token delta、工具调用事件、审批请求与决策</div>
+      </div>
+      <div class="node highlight-purple">
+        <div class="icon">🔗</div>
+        <div class="name">MCP Endpoint</div>
+        <div class="tech">JSON-RPC 2.0</div>
+        <div class="desc">/mcp 端点，遵循 Model Context Protocol 规范，支持 tools/list 和 tools/call</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow"><div class="arrow-down"></div><span class="label">事件流 AsyncGenerator</span></div>
+
+  <!-- ==================== 核心引擎层 ==================== -->
+  <div class="layer">
+    <span class="layer-title">③ 核心引擎层 — ReAct Agent</span>
+    <div class="nodes">
+      <div class="node highlight-cyan">
+        <div class="icon">🔄</div>
+        <div class="name">ReAct Loop</div>
+        <div class="tech">agent.core.loop</div>
+        <div class="desc">推理→行动→观察 循环，最多 20 步。LLM 决定调工具还是输出答案。AsyncGenerator 产出事件流</div>
+      </div>
+      <div class="node highlight-orange">
+        <div class="icon">🛡️</div>
+        <div class="name">审批机制</div>
+        <div class="tech">三级权限模型</div>
+        <div class="desc">
+          <span class="badge badge-safe">safe</span> 自动执行<br>
+          <span class="badge badge-confirm">confirm</span> 用户确认<br>
+          <span class="badge badge-danger">dangerous</span> 强制确认
+        </div>
+      </div>
+      <div class="node highlight-blue">
+        <div class="icon">💾</div>
+        <div class="name">Session 管理</div>
+        <div class="tech">SQLAlchemy + asyncpg</div>
+        <div class="desc">会话元数据、消息历史、工具调用完整持久化到 PostgreSQL</div>
+      </div>
+      <div class="node highlight-green">
+        <div class="icon">📨</div>
+        <div class="name">事件模型</div>
+        <div class="tech">8 种 dataclass 事件</div>
+        <div class="desc">AssistantDelta · ToolCall · ApprovalRequest · ToolResult · Final · Usage · StepStart</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow"><div class="arrow-down"></div><span class="label">Function Calling (tool_calls)</span></div>
+
+  <!-- ==================== 双列：LLM + Tools ==================== -->
+  <div style="display:flex; gap:16px; flex-wrap:wrap;">
+
+    <!-- LLM 适配层 -->
+    <div class="layer" style="flex:1; min-width:280px;">
+      <span class="layer-title">④ LLM 适配层</span>
+      <div class="nodes" style="flex-direction:column;">
+        <div class="node highlight-purple">
+          <div class="icon">🏭</div>
+          <div class="name">LLM Factory</div>
+          <div class="tech">build_llm(provider, model)</div>
+          <div class="desc">统一工厂函数，所有 Provider 继承 BaseLLM 抽象类</div>
+        </div>
+        <div style="display:flex; flex-wrap:wrap; gap:8px;">
+          <div class="node highlight-green" style="min-width:120px; flex:1;">
+            <div class="name" style="font-size:13px;">Qwen</div>
+            <div class="tech">阿里 DashScope</div>
+            <div class="desc">qwen-turbo · plus · max · qwen3-max</div>
+          </div>
+          <div class="node highlight-blue" style="min-width:120px; flex:1;">
+            <div class="name" style="font-size:13px;">DeepSeek</div>
+            <div class="tech">DeepSeek API</div>
+            <div class="desc">deepseek-chat · reasoner</div>
+          </div>
+          <div class="node highlight-orange" style="min-width:120px; flex:1;">
+            <div class="name" style="font-size:13px;">SiliconFlow</div>
+            <div class="tech">硅基流动</div>
+            <div class="desc">Qwen2.5 · GLM-4 · LLaMA-3.1</div>
+          </div>
+          <div class="node highlight-pink" style="min-width:120px; flex:1;">
+            <div class="name" style="font-size:13px;">OpenAI</div>
+            <div class="tech">兼容端点</div>
+            <div class="desc">gpt-4o-mini 等</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 工具层 -->
+    <div class="layer" style="flex:1.4; min-width:380px;">
+      <span class="layer-title">⑤ 工具层 — Function Calling</span>
+      <div class="nodes">
+        <div class="node highlight-orange" style="width:100%; max-width:100%; flex:1 1 100%;">
+          <div class="icon">📦</div>
+          <div class="name">Tool Registry</div>
+          <div class="tech">@registry.register() 装饰器</div>
+          <div class="desc">统一工具注册表，每个工具定义 name / description / parameters / permission，自动生成 OpenAI function schema</div>
+        </div>
+        <div class="node highlight-blue">
+          <div class="icon">🗃️</div>
+          <div class="name">db_query</div>
+          <div class="desc">只读 SQL 查询<br><span class="badge badge-confirm">confirm</span></div>
+        </div>
+        <div class="node highlight-green">
+          <div class="icon">📈</div>
+          <div class="name">akshare_fetch</div>
+          <div class="desc">A 股实时行情<br><span class="badge badge-safe">safe</span></div>
+        </div>
+        <div class="node highlight-red">
+          <div class="icon">💻</div>
+          <div class="name">bash_exec</div>
+          <div class="desc">沙箱 Shell 执行<br><span class="badge badge-danger">dangerous</span></div>
+        </div>
+        <div class="node highlight-green">
+          <div class="icon">🔍</div>
+          <div class="name">web_search</div>
+          <div class="desc">网页搜索引擎<br><span class="badge badge-safe">safe</span></div>
+        </div>
+        <div class="node highlight-cyan">
+          <div class="icon">📚</div>
+          <div class="name">kb_search</div>
+          <div class="desc">知识库向量检索<br><span class="badge badge-safe">safe</span></div>
+        </div>
+        <div class="node highlight-green">
+          <div class="icon">🔌</div>
+          <div class="name">pivotlab_api</div>
+          <div class="desc">后端 REST 接口<br><span class="badge badge-safe">safe</span></div>
+        </div>
+        <div class="node highlight-green">
+          <div class="icon">📊</div>
+          <div class="name">sr_levels</div>
+          <div class="desc">支撑/压力位计算<br><span class="badge badge-safe">safe</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow"><div class="arrow-down"></div><span class="label">数据读写</span></div>
+
+  <!-- ==================== 三列底层 ==================== -->
+  <div style="display:flex; gap:16px; flex-wrap:wrap;">
+
+    <!-- 知识库层 -->
+    <div class="layer" style="flex:1; min-width:260px;">
+      <span class="layer-title">⑥ 知识库 — RAG</span>
+      <div class="nodes" style="flex-direction:column;">
+        <div class="node highlight-cyan">
+          <div class="icon">🧠</div>
+          <div class="name">Embedder</div>
+          <div class="tech">text-embedding-v3 (1024d)</div>
+          <div class="desc">文本切片 + 向量化</div>
+        </div>
+        <div class="node highlight-cyan">
+          <div class="icon">📦</div>
+          <div class="name">pgvector Store</div>
+          <div class="tech">kb_documents + kb_chunks</div>
+          <div class="desc">文档元数据 + 向量切片存储，支持相似度检索</div>
+        </div>
+        <div class="node highlight-cyan">
+          <div class="icon">⬇️</div>
+          <div class="name">Ingest CLI</div>
+          <div class="tech">python -m agent.knowledge.ingest_cli</div>
+          <div class="desc">批量导入公告/研报</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 安全层 -->
+    <div class="layer" style="flex:0.7; min-width:200px;">
+      <span class="layer-title">⑦ 安全层</span>
+      <div class="nodes" style="flex-direction:column;">
+        <div class="node highlight-red">
+          <div class="icon">🔒</div>
+          <div class="name">SQL Guard</div>
+          <div class="tech">sqlglot AST 解析</div>
+          <div class="desc">解析语法树，仅允许 SELECT / WITH / UNION，禁止所有 DDL/DML，拒绝多语句注入</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 可观测性 -->
+    <div class="layer" style="flex:0.8; min-width:220px;">
+      <span class="layer-title">⑧ 可观测性</span>
+      <div class="nodes" style="flex-direction:column;">
+        <div class="node highlight-green">
+          <div class="icon">📝</div>
+          <div class="name">structlog</div>
+          <div class="tech">结构化 JSON 日志</div>
+          <div class="desc">全链路结构化日志，支持 JSON 格式输出</div>
+        </div>
+        <div class="node highlight-green">
+          <div class="icon">🔍</div>
+          <div class="name">agent_traces</div>
+          <div class="tech">PostgreSQL 表</div>
+          <div class="desc">每个 ReAct 步骤的完整 payload，用于调试回溯</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow"><div class="arrow-down"></div></div>
+
+  <!-- ==================== 基础设施层 ==================== -->
+  <div class="layer">
+    <span class="layer-title">⑨ 基础设施 — Infrastructure</span>
+    <div class="nodes">
+      <div class="node highlight-blue">
+        <div class="icon">🐘</div>
+        <div class="name">PostgreSQL :5433</div>
+        <div class="tech">pivotlab 数据库</div>
+        <div class="desc">
+          <strong>业务表:</strong> stocks · daily_candles · stock_concepts<br>
+          <strong>Agent 表:</strong> agent_sessions · agent_messages · agent_traces<br>
+          <strong>知识库:</strong> kb_documents · kb_chunks (pgvector)
+        </div>
+      </div>
+      <div class="node highlight-purple">
+        <div class="icon">🐳</div>
+        <div class="name">Docker</div>
+        <div class="tech">docker-compose.yml</div>
+        <div class="desc">单容器部署 pivotlab-agent:latest，挂载 /workspace 沙箱目录，host-gateway 连接宿主机 PG</div>
+      </div>
+      <div class="node highlight-orange">
+        <div class="icon">📋</div>
+        <div class="name">System Prompt</div>
+        <div class="tech">agent/prompts/system.md</div>
+        <div class="desc">A 股分析专用指令集，包含完整数据库 Schema、行为准则、数据驱动策略</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== Data Flow Legend ==================== -->
+  <div class="legend">
+    <div class="legend-item"><div class="legend-color" style="background:#58a6ff;"></div> 请求/响应流</div>
+    <div class="legend-item"><div class="legend-color" style="background:#3fb950;"></div> 数据流</div>
+    <div class="legend-item"><div class="legend-color" style="background:#bc8cff;"></div> 协议适配</div>
+    <div class="legend-item"><div class="legend-color" style="background:#d29922;"></div> 工具调用</div>
+    <div class="legend-item"><div class="legend-color" style="background:#f85149;"></div> 安全防护</div>
+    <div class="legend-item"><div class="legend-color" style="background:#39d2c0;"></div> RAG 检索</div>
+  </div>
+
+  <!-- ==================== 数据流说明 ==================== -->
+  <div class="layer" style="margin-top:12px; border-color:rgba(110,118,129,.2);">
+    <span class="layer-title">核心数据流</span>
+    <div style="padding:8px 4px; font-size:13px; line-height:2; color:#8b949e;">
+      <div><strong style="color:#e6edf3;">① 用户提问:</strong> Web UI → <span style="color:#58a6ff;">WebSocket</span> → FastAPI → <span style="color:#39d2c0;">ReAct Loop</span></div>
+      <div><strong style="color:#e6edf3;">② LLM 推理:</strong> ReAct Loop → <span style="color:#bc8cff;">LLM Factory</span> → Qwen/DeepSeek/SiliconFlow → 返回 tool_calls 或 text</div>
+      <div><strong style="color:#e6edf3;">③ 工具执行:</strong> ReAct Loop → 权限检查 → <span style="color:#d29922;">Tool Registry</span> → 执行工具 → <span style="color:#f85149;">SQL Guard</span> → 查询 PG</div>
+      <div><strong style="color:#e6edf3;">④ 结果返回:</strong> 工具结果 → ReAct Loop → LLM 综合分析 → <span style="color:#58a6ff;">WebSocket 流式推送</span> → 用户看到答案</div>
+      <div><strong style="color:#e6edf3;">⑤ 知识增强:</strong> kb_search → <span style="color:#39d2c0;">pgvector 向量相似度</span> → 注入上下文 → LLM 生成更准确的回答</div>
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>
