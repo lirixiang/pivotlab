@@ -48,30 +48,6 @@ SCREENER_CONFIG: dict[str, ModelConfig] = {
         min_support_score=75,
         min_total_score=60,
     ),
-    "stabilize": ModelConfig(
-        label="下跌企稳",
-        min_candles=120,
-        max_dist_support_pct=8.0,
-        min_support_score=60,
-        min_total_score=52,
-        min_touch_count=2,
-    ),
-    "box_support": ModelConfig(
-        label="箱体支撑",
-        min_candles=120,
-        max_dist_support_pct=4.5,
-        min_support_score=55,
-        min_total_score=50,
-        min_touch_count=2,
-    ),
-    "volume_breakout": ModelConfig(
-        label="放量突破",
-        min_candles=120,
-        max_dist_support_pct=5.0,
-        min_support_score=50,
-        min_total_score=75,
-        min_touch_count=1,
-    ),
     "macd_divergence": ModelConfig(
         label="MACD底背离",
         min_candles=120,
@@ -1694,9 +1670,6 @@ def detect_high_tight_flag(code: str, name: str, candles: list[Candle], weekly_c
 
 PATTERN_DETECTORS = {
     "breakout_pullback": detect_breakout_pullback,
-    "stabilize": detect_stabilize,
-    "box_support": detect_box_support,
-    "volume_breakout": detect_volume_breakout,
     "macd_divergence": detect_macd_divergence,
     "stage2_breakout": detect_stage2_breakout,
     "vcp": detect_vcp,
@@ -1707,9 +1680,6 @@ PATTERN_DETECTORS = {
 
 MODEL_LABELS = {
     "breakout_pullback": "突破回踩",
-    "stabilize": "下跌企稳",
-    "box_support": "箱体支撑",
-    "volume_breakout": "放量突破",
     "macd_divergence": "MACD底背离",
     "stage2_breakout": "Stage 2 突破",
     "vcp": "VCP 波动收缩",

@@ -32,9 +32,9 @@ find_setups(
 | `high_tight_flag` | 5-10 | 30% | **强爆发**（罕见，龙头题材）。用户说"龙头/暴涨/旗形/翻倍/HTF" |
 | `breakout_pullback` | 1.5-2 | 55% | 回踩补仓位。用户说"回踩/缩量/支撑" |
 | `macd_divergence` | 2-3 | 40% | 抄底用。用户说"底背离/超跌反弹/MACD" |
-| `stabilize` | 2-4 | 35% | 探底用，⚠️ 高 RR 多为基本面垃圾股，搭配 `expectation_filter="medium"` |
-| `box_support` | 1.5-2 | 50% | 区间套利。用户说"箱体/震荡" |
-| `volume_breakout` | 0.5-1.2 | 50% | ⚠️ 追涨型，RR 普遍偏低，慎用 |
+
+**默认建议**：用户没明说形态时，按问题侧重选 — 长线/稳健 → `stage2_breakout`；短线/爆发 → `vcp`；回调介入 → `breakout_pullback`。
+**多形态对比**：用户说"看看今天哪种形态机会最多" → 依次跑 `stage2_breakout` / `vcp` / `cup_handle` 三个 + 比较 `recommendations` 数量和 RR。
 
 **默认建议**：用户没明说形态时，按问题侧重选 — 长线/稳健 → `stage2_breakout`；短线/爆发 → `vcp`；回调介入 → `breakout_pullback`。
 **多形态对比**：用户说"看看今天哪种形态机会最多" → 依次跑 `stage2_breakout` / `vcp` / `cup_handle` 三个 + 比较 `recommendations` 数量和 RR。

@@ -51,9 +51,7 @@ async def _ensure_candles(code: str, min_bars: int = 60, days: int = 250):
     name="pl_screener",
     description=(
         "Run pattern screener on the full A-share universe. Patterns: "
-        "'breakout_pullback' (突破回踩), 'stabilize' (下跌企稳), "
-        "'box_support' (箱体支撑), 'volume_breakout' (放量突破), "
-        "'macd_divergence' (MACD底背离), "
+        "'breakout_pullback' (突破回踩), 'macd_divergence' (MACD底背离), "
         "'stage2_breakout' (Stage 2 趋势突破—赵败似老 Weinstein 机制), "
         "'vcp' (Mark Minervini 波动收缩高 RR 突破), "
         "'pivot_breakout' (William O'Neil base 点突破), "
@@ -66,8 +64,7 @@ async def _ensure_candles(code: str, min_bars: int = 60, days: int = 250):
         "properties": {
             "pattern": {
                 "type": "string",
-                "enum": ["breakout_pullback", "stabilize", "box_support",
-                         "volume_breakout", "macd_divergence",
+                "enum": ["breakout_pullback", "macd_divergence",
                          "stage2_breakout", "vcp", "pivot_breakout",
                          "cup_handle", "high_tight_flag"],
                 "description": "Pattern to scan for",
@@ -723,12 +720,11 @@ async def verify_signal_batch(args: dict[str, Any]) -> Any:
         "properties": {
             "pattern": {
                 "type": "string",
-                "enum": ["breakout_pullback", "stabilize", "box_support",
-                         "volume_breakout", "macd_divergence",
+                "enum": ["breakout_pullback", "macd_divergence",
                          "stage2_breakout", "vcp", "pivot_breakout",
                          "cup_handle", "high_tight_flag"],
                 "default": "breakout_pullback",
-                "description": "形态: breakout_pullback(突破回踩,默认) | stabilize(下跌企稳) | box_support(箱体支撑) | volume_breakout(放量突破) | macd_divergence(MACD底背离) | stage2_breakout(Stage 2 趋势突破—高败率主仓) | vcp(Minervini 波动收缩—高 RR) | pivot_breakout(O'Neil base 点突破) | cup_handle(杯柄经典) | high_tight_flag(高位紧旗—龙头独享)",
+                "description": "形态: breakout_pullback(突破回踩,默认) | macd_divergence(MACD底背离) | stage2_breakout(Stage 2 趋势突破—高败率主仓) | vcp(Minervini 波动收缩—高 RR) | pivot_breakout(O'Neil base 点突破) | cup_handle(杯柄经典) | high_tight_flag(高位紧旗—龙头独享)",
             },
             "n": {
                 "type": "integer",
@@ -904,9 +900,6 @@ async def find_setups(args: dict[str, Any]) -> dict[str, Any]:
         "pattern": pattern,
         "pattern_name": {
             "breakout_pullback": "突破回踩",
-            "stabilize": "下跌企稳",
-            "box_support": "箱体支撑",
-            "volume_breakout": "放量突破",
             "macd_divergence": "MACD底背离",
             "stage2_breakout": "Stage 2 突破",
             "vcp": "VCP 波动收缩",

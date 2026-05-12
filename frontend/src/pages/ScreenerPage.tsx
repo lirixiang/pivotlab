@@ -5,9 +5,6 @@ import type { ScreenerItem, ScreenerResponse, SyncTask } from "../types";
 
 const PATTERNS = [
   { key: "breakout_pullback", label: "突破回踩", color: "gold" },
-  { key: "stabilize", label: "下跌企稳", color: "sky" },
-  { key: "box_support", label: "箱体支撑", color: "gold" },
-  { key: "volume_breakout", label: "放量突破", color: "emerald" },
   { key: "macd_divergence", label: "MACD底背离", color: "violet" },
   { key: "stage2_breakout", label: "Stage 2 突破", color: "blue" },
   { key: "vcp", label: "VCP 波动收缩", color: "indigo" },
