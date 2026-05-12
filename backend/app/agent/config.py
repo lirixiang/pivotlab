@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     glm_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
 
     # Agent
-    agent_max_steps: int = 20
+    agent_max_steps: int = 30
     agent_max_tokens_per_step: int = 4096
     session_context_limit: int = 32000
 

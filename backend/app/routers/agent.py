@@ -2,6 +2,7 @@
 
 Protocol (SSE events):
   event: step_start     data: {"step": 1}
+  event: thinking_delta data: {"delta": "..."}
   event: delta          data: {"delta": "..."}
   event: tool_call      data: {"call_id": "...", "name": "...", "arguments": {...}}
   event: tool_result    data: {"call_id": "...", "ok": true, "result": ...}
@@ -166,6 +167,13 @@ async def chat_sse(sid: str, req: ChatReq, request: Request):
                 if await request.is_disconnected():
                     break
                 yield _event_to_sse(ev)
+                # Synthetic plan_update event: when update_plan tool succeeds,
+                # also emit a plan_update SSE so the frontend can render the plan card.
+                if (isinstance(ev, ToolResultEvent) and ev.name == "update_plan"
+                        and ev.ok and isinstance(ev.result, dict)):
+                    steps = ev.result.get("steps")
+                    if steps:
+                        yield _event_to_sse_raw("plan_update", {"steps": steps})
                 if isinstance(ev, FinalEvent):
                     break
         except asyncio.CancelledError:

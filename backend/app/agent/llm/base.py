@@ -13,6 +13,7 @@ from app.agent.core.types import LLMResponse, Message, ToolCall, ToolSchema, Usa
 class StreamDelta:
     """Incremental update from a streaming LLM response."""
     text_delta: str = ""
+    thinking_delta: str = ""
     tool_call_delta: dict[str, Any] | None = None  # {index, id?, name?, args_delta?}
     finish_reason: str | None = None
     usage: Usage | None = None

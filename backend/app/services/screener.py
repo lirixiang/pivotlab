@@ -80,6 +80,42 @@ SCREENER_CONFIG: dict[str, ModelConfig] = {
         min_total_score=72,
         min_touch_count=1,
     ),
+    # ─── New patterns (high-RR, US growth-stock playbooks) ───
+    "stage2_breakout": ModelConfig(
+        label="Stage 2 突破",
+        min_candles=180,        # need ~9 months of data
+        max_dist_support_pct=8.0,
+        min_support_score=40,
+        min_total_score=60,
+    ),
+    "vcp": ModelConfig(
+        label="VCP 波动收缩",
+        min_candles=120,
+        max_dist_support_pct=5.0,
+        min_support_score=40,
+        min_total_score=60,
+    ),
+    "pivot_breakout": ModelConfig(
+        label="Pivot 点突破",
+        min_candles=120,
+        max_dist_support_pct=6.0,
+        min_support_score=40,
+        min_total_score=60,
+    ),
+    "cup_handle": ModelConfig(
+        label="杯柄形态",
+        min_candles=180,        # cup typically spans 7-30 weeks
+        max_dist_support_pct=6.0,
+        min_support_score=40,
+        min_total_score=60,
+    ),
+    "high_tight_flag": ModelConfig(
+        label="高位紧旗",
+        min_candles=120,
+        max_dist_support_pct=10.0,
+        min_support_score=30,
+        min_total_score=65,
+    ),
 }
 
 
@@ -1026,6 +1062,633 @@ def detect_box_support(code: str, name: str, candles: list[Candle], weekly_candl
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Model: stage2_breakout (Stan Weinstein Stage 2 突破)
+# ─────────────────────────────────────────────────────────────────────
+# 思路: 长期均线（MA150 模拟周线 MA30）拐头向上 + 价格站上 MA150 + 突破近 N 日新高 + 量能放大。
+# 这是趋势跟随的入场信号，目标是抓 Stage 1→Stage 2 的转换点。
+
+def detect_stage2_breakout(code: str, name: str, candles: list[Candle], weekly_candles: list[Candle] | None = None) -> ScreenerItem | None:
+    cfg = SCREENER_CONFIG["stage2_breakout"]
+    if not cfg.enabled or len(candles) < cfg.min_candles:
+        return None
+
+    closes = np.array([c.close for c in candles])
+    highs = np.array([c.high for c in candles])
+    volumes = np.array([c.volume for c in candles])
+    cur = float(closes[-1])
+    n = len(candles)
+
+    # ── A) 长期均线状态: MA50 / MA150 / MA200 ──
+    ma50 = float(np.mean(closes[-50:]))
+    ma150 = float(np.mean(closes[-150:]))
+    ma200_window = min(n, 200)
+    ma200 = float(np.mean(closes[-ma200_window:]))
+
+    # 价格必须在 MA50 + MA150 上方
+    if cur < ma150 or cur < ma50:
+        return None
+
+    # MA50 > MA150 (短中期共振向上)
+    if ma50 < ma150:
+        return None
+
+    # MA150 上行 (拐头): 与 30 日前的 MA150 比较
+    if n < 180:
+        return None
+    ma150_30d_ago = float(np.mean(closes[-180:-30]))
+    if ma150 < ma150_30d_ago:  # MA150 必须在过去 30 天上行
+        return None
+
+    # ── B) 突破近 N 日新高 (近 50 日内是新高) ──
+    high50 = float(np.max(highs[-50:-1]))   # 不含今日
+    breakout_pct = (cur - high50) / max(high50, 1)
+    # -1% (即将突破) ~ +8% (刚突破不久)
+    if breakout_pct < -0.01 or breakout_pct > 0.08:
+        return None
+
+    # ── C) 距 52 周高点不远 (Minervini Trend Template: 距 52 周高 < 25%) ──
+    high52w = float(np.max(highs[-min(n, 250):]))
+    dist_from_high = (high52w - cur) / max(high52w, 1)
+    if dist_from_high > 0.25:
+        return None
+
+    # ── D) 距 52 周低点足够远 (>= 30%) ──
+    low52w = float(np.min(closes[-min(n, 250):]))
+    above_low = (cur - low52w) / max(low52w, 1)
+    if above_low < 0.30:
+        return None
+
+    # ── E) 突破当天量能放大 (>= 1.5 倍 50日均量) ──
+    avg_vol_50 = float(np.mean(volumes[-50:-1]))
+    if avg_vol_50 <= 0:
+        return None
+    cur_vol = float(volumes[-1])
+    vol_mult = cur_vol / avg_vol_50
+    # 量能不一定要爆，但至少不能萎缩
+    if vol_mult < 0.8:
+        return None
+
+    # ── SR 上下文 ──
+    ctx = get_sr_context(code, candles, cur, weekly_candles)
+
+    # ── 打分 ──
+    score_trend = 25  # 通过了所有趋势模板检查
+    score_breakout = 15 if breakout_pct >= 0 else 8  # 已突破 vs 即将突破
+    score_volume = min((vol_mult - 0.8) * 15, 20)
+    score_dist_high = max(0, (0.25 - dist_from_high) / 0.25) * 10
+    score_above_low = min((above_low - 0.30) / 0.70 * 10, 10)
+    weekly_bonus = 10 if ctx.weekly_trend.get("direction") == "up" else 5
+    score_support = min(ctx.sup_score, 100) * 0.10 if ctx.sup_price else 0
+
+    total = score_trend + score_breakout + score_volume + score_dist_high + score_above_low + weekly_bonus + score_support
+    total = round(min(total, 100), 1)
+    if total < cfg.min_total_score:
+        return None
+
+    triggers = [
+        f"突破{50}日新高{high50:.2f} (+{breakout_pct*100:.1f}%)",
+        f"MA50>MA150 多头排列",
+        f"MA150 30日上行 ({(ma150/ma150_30d_ago-1)*100:+.1f}%)",
+        f"距52周高{dist_from_high*100:.0f}% / 距52周低+{above_low*100:.0f}%",
+    ]
+    if vol_mult >= 1.5:
+        triggers.append(f"放量突破 {vol_mult:.1f}x")
+    if ctx.weekly_trend.get("direction") == "up":
+        triggers.append("周线向上")
+
+    last = candles[-1]
+    change_pct = (last.close / candles[-2].close - 1) * 100 if n >= 2 else 0.0
+    sup_for_rr = ctx.sup_price if ctx.sup_price else high50  # 突破回测位作止损
+    target = cur + (cur - sup_for_rr) * 3  # Stage 2 目标 RR=3
+    rr = _rr_ratio(cur, sup_for_rr, target)
+    dist_pct = abs(cur - sup_for_rr) / sup_for_rr * 100
+
+    return ScreenerItem(
+        code=code, name=name, pattern="stage2_breakout",
+        score=total, price=round(cur, 2),
+        change_pct=round(change_pct, 2),
+        volume_ratio=round(vol_mult, 2),
+        breakout_price=round(high50, 2),
+        pullback_price=round(sup_for_rr, 2),
+        distance_to_support_pct=round(dist_pct, 2),
+        triggers=triggers,
+        rr_ratio=round(rr, 2),
+        support_score=round(ctx.sup_score, 1),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Model: vcp (Mark Minervini Volatility Contraction Pattern)
+# ─────────────────────────────────────────────────────────────────────
+# 思路: 在过去 60 天内有 2-4 次回撤，每次回撤幅度递减，量能也递减。
+# 关键特征:
+#   - 收缩序列: pullback1 > pullback2 > pullback3
+#   - 量能干涸: 最近 5 日均量 < 50 日均量的 70%
+#   - 现价贴近最后一段整理的高点 (pivot point) 准备突破
+
+def _find_swing_points(highs: np.ndarray, lows: np.ndarray, window: int = 5) -> list[tuple[int, str, float]]:
+    """找出局部高点(H)和局部低点(L)。返回按时间顺序: (idx, kind, price)。"""
+    points = []
+    n = len(highs)
+    for i in range(window, n - window):
+        if highs[i] == max(highs[i - window:i + window + 1]):
+            points.append((i, "H", float(highs[i])))
+        elif lows[i] == min(lows[i - window:i + window + 1]):
+            points.append((i, "L", float(lows[i])))
+    return points
+
+
+def detect_vcp(code: str, name: str, candles: list[Candle], weekly_candles: list[Candle] | None = None) -> ScreenerItem | None:
+    cfg = SCREENER_CONFIG["vcp"]
+    if not cfg.enabled or len(candles) < cfg.min_candles:
+        return None
+
+    closes = np.array([c.close for c in candles])
+    highs = np.array([c.high for c in candles])
+    lows = np.array([c.low for c in candles])
+    volumes = np.array([c.volume for c in candles])
+    cur = float(closes[-1])
+    n = len(candles)
+
+    # ── A) 必须处于上升趋势 (MA50 > MA150) ──
+    ma50 = float(np.mean(closes[-50:]))
+    ma150 = float(np.mean(closes[-min(n, 150):]))
+    if ma50 < ma150:
+        return None
+    if cur < ma50 * 0.95:  # 价格不能远低于 MA50
+        return None
+
+    # ── B) 在最近 60 天里寻找 swing points，识别收缩序列 ──
+    look = min(n, 70)
+    sub_highs = highs[-look:]
+    sub_lows = lows[-look:]
+    points = _find_swing_points(sub_highs, sub_lows, window=4)
+
+    if len(points) < 4:  # 至少 2 个 H + 2 个 L
+        return None
+
+    # ── C) 提取连续的 (H, L) 回撤序列 ──
+    contractions = []  # (high_price, low_price, pullback_pct)
+    last_high = None
+    for idx, kind, price in points:
+        if kind == "H":
+            last_high = price
+        elif kind == "L" and last_high is not None and price < last_high:
+            pb = (last_high - price) / last_high
+            if pb >= 0.03:  # 至少 3% 才算一次有意义的回撤
+                contractions.append((last_high, price, pb))
+            last_high = None
+
+    if len(contractions) < 2:
+        return None
+
+    # ── D) 收缩序列: 后一次回撤幅度 < 前一次的 80% ──
+    last_n = contractions[-3:] if len(contractions) >= 3 else contractions[-2:]
+    is_contracting = True
+    for i in range(1, len(last_n)):
+        if last_n[i][2] >= last_n[i - 1][2] * 0.85:
+            is_contracting = False
+            break
+    if not is_contracting:
+        return None
+
+    final_pullback_pct = last_n[-1][2]
+    if final_pullback_pct > 0.15:  # 最后一次回撤不能 >15%
+        return None
+
+    # ── E) 量能干涸: 最近 5 日均量 < 50 日均量的 75% ──
+    avg_vol_50 = float(np.mean(volumes[-50:-5])) if n >= 55 else float(np.mean(volumes[-50:]))
+    avg_vol_5 = float(np.mean(volumes[-5:]))
+    if avg_vol_50 <= 0:
+        return None
+    vol_dryup_ratio = avg_vol_5 / avg_vol_50
+    if vol_dryup_ratio > 0.75:
+        return None
+
+    # ── F) 现价贴近 pivot point (最后一次回撤前的高点) ──
+    pivot = last_n[-1][0]
+    dist_to_pivot = (pivot - cur) / max(pivot, 1)
+    # 距 pivot < 8% (允许在 pivot 附近的整理或突破)
+    if dist_to_pivot < -0.05 or dist_to_pivot > 0.08:
+        return None
+
+    # ── SR 上下文 ──
+    ctx = get_sr_context(code, candles, cur, weekly_candles)
+
+    # ── 打分 ──
+    score_contraction = 25 + min(len(last_n) - 2, 2) * 5  # 2-4 次收缩加分
+    score_pullback_size = max(0, (0.15 - final_pullback_pct) / 0.15) * 20  # 越小越好
+    score_volume_dryup = max(0, (0.75 - vol_dryup_ratio) / 0.75) * 20
+    score_pivot_proximity = max(0, (0.08 - abs(dist_to_pivot)) / 0.08) * 15
+    score_trend = 10 if ma50 >= ma150 * 1.02 else 5
+    weekly_bonus = 5 if ctx.weekly_trend.get("direction") == "up" else 0
+
+    total = score_contraction + score_pullback_size + score_volume_dryup + score_pivot_proximity + score_trend + weekly_bonus
+    total = round(min(total, 100), 1)
+    if total < cfg.min_total_score:
+        return None
+
+    triggers = [
+        f"{len(last_n)}次收缩 ({'/'.join(f'{c[2]*100:.0f}%' for c in last_n)})",
+        f"量能干涸 5日/50日={vol_dryup_ratio:.0%}",
+        f"距 pivot {pivot:.2f} {dist_to_pivot*100:+.1f}%",
+    ]
+    if ma50 >= ma150 * 1.02:
+        triggers.append("MA50>MA150 强趋势")
+    if ctx.weekly_trend.get("direction") == "up":
+        triggers.append("周线向上")
+
+    last = candles[-1]
+    change_pct = (last.close / candles[-2].close - 1) * 100 if n >= 2 else 0.0
+    stop = last_n[-1][1]  # 最后一次回撤的低点作止损
+    target = pivot + (pivot - stop) * 2.5  # VCP 目标 RR=2.5+
+    rr = _rr_ratio(cur, stop, target)
+    dist_pct = abs(cur - stop) / stop * 100
+
+    return ScreenerItem(
+        code=code, name=name, pattern="vcp",
+        score=total, price=round(cur, 2),
+        change_pct=round(change_pct, 2),
+        volume_ratio=round(vol_dryup_ratio, 2),
+        breakout_price=round(pivot, 2),
+        pullback_price=round(stop, 2),
+        distance_to_support_pct=round(dist_pct, 2),
+        triggers=triggers,
+        rr_ratio=round(rr, 2),
+        support_score=round(ctx.sup_score, 1),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Model: pivot_breakout (William O'Neil Pivot Point Breakout)
+# ─────────────────────────────────────────────────────────────────────
+# 思路: 找一个 5-10 周的 base (高低差 <25%)，当前价格突破 base 高点 0~3%，量能放大。
+# 与 stage2_breakout 区别: 不要求长期均线，但要求严格的 base 形态 + 突破当天量能。
+
+def detect_pivot_breakout(code: str, name: str, candles: list[Candle], weekly_candles: list[Candle] | None = None) -> ScreenerItem | None:
+    cfg = SCREENER_CONFIG["pivot_breakout"]
+    if not cfg.enabled or len(candles) < cfg.min_candles:
+        return None
+
+    closes = np.array([c.close for c in candles])
+    highs = np.array([c.high for c in candles])
+    lows = np.array([c.low for c in candles])
+    volumes = np.array([c.volume for c in candles])
+    cur = float(closes[-1])
+    n = len(candles)
+
+    # ── 寻找最优 base 长度: 25-50 个交易日 (5-10 周) ──
+    best_base = None  # (base_len, base_high, base_low, base_range_pct)
+    for base_len in (25, 35, 50):
+        if n < base_len + 5:
+            continue
+        base_highs = highs[-base_len-1:-1]  # 不含今日
+        base_lows = lows[-base_len-1:-1]
+        bh = float(np.max(base_highs))
+        bl = float(np.min(base_lows))
+        rng = (bh - bl) / max(bl, 1)
+        if rng > 0.30:  # 整理太宽不算 base
+            continue
+        # 选择宽度最小的 base
+        if best_base is None or rng < best_base[3]:
+            best_base = (base_len, bh, bl, rng)
+
+    if best_base is None:
+        return None
+    base_len, pivot_high, base_low, base_range = best_base
+
+    # ── 现价必须 >= pivot_high * 0.99 (即将突破) 且 <= pivot_high * 1.05 (刚突破) ──
+    breakout_pct = (cur - pivot_high) / max(pivot_high, 1)
+    if breakout_pct < -0.01 or breakout_pct > 0.05:
+        return None
+
+    # ── 量能放大: 当日量 > 1.4x base 期间均量 ──
+    avg_vol_base = float(np.mean(volumes[-base_len-1:-1]))
+    if avg_vol_base <= 0:
+        return None
+    cur_vol = float(volumes[-1])
+    vol_mult = cur_vol / avg_vol_base
+    if vol_mult < 1.2:
+        return None
+
+    # ── base 的最后 1/3 不应该是大跌 (深 V 不算 base) ──
+    last_third_low = float(np.min(lows[-base_len // 3:]))
+    if (pivot_high - last_third_low) / pivot_high > 0.20:
+        return None
+
+    # ── 趋势确认: 现价应在 MA50 上方 ──
+    if n >= 50:
+        ma50 = float(np.mean(closes[-50:]))
+        if cur < ma50:
+            return None
+
+    ctx = get_sr_context(code, candles, cur, weekly_candles)
+
+    # ── 打分 ──
+    score_base_quality = max(0, (0.30 - base_range) / 0.30) * 25  # 越窄越好
+    score_breakout = 20 if breakout_pct >= 0 else 10
+    score_volume = min((vol_mult - 1.0) * 15, 25)
+    score_base_len = min(base_len / 50 * 10, 10)  # 越长越好
+    weekly_bonus = 10 if ctx.weekly_trend.get("direction") == "up" else 5
+    score_support = min(ctx.sup_score, 100) * 0.10 if ctx.sup_price else 0
+
+    total = score_base_quality + score_breakout + score_volume + score_base_len + weekly_bonus + score_support
+    total = round(min(total, 100), 1)
+    if total < cfg.min_total_score:
+        return None
+
+    triggers = [
+        f"突破 {base_len}日 base 高点 {pivot_high:.2f} ({breakout_pct*100:+.1f}%)",
+        f"base 宽度 {base_range*100:.1f}%",
+        f"放量 {vol_mult:.1f}x base 均量",
+    ]
+    if ctx.weekly_trend.get("direction") == "up":
+        triggers.append("周线向上")
+
+    last = candles[-1]
+    change_pct = (last.close / candles[-2].close - 1) * 100 if n >= 2 else 0.0
+    stop = base_low * 1.01  # base 低点为止损
+    target = cur + (pivot_high - base_low)  # 目标 = 突破点 + base 高度
+    rr = _rr_ratio(cur, stop, target)
+    dist_pct = abs(cur - stop) / stop * 100
+
+    return ScreenerItem(
+        code=code, name=name, pattern="pivot_breakout",
+        score=total, price=round(cur, 2),
+        change_pct=round(change_pct, 2),
+        volume_ratio=round(vol_mult, 2),
+        breakout_price=round(pivot_high, 2),
+        pullback_price=round(stop, 2),
+        distance_to_support_pct=round(dist_pct, 2),
+        triggers=triggers,
+        rr_ratio=round(rr, 2),
+        support_score=round(ctx.sup_score, 1),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Model: cup_handle (William O'Neil Cup & Handle)
+# ─────────────────────────────────────────────────────────────────────
+# 思路: 找出 7-30 周 (35-150 日) 的圆弧底:
+#   - 杯左沿 H1 (前期高点)
+#   - 杯底 L (在 H1 之后，回撤 12-35%)
+#   - 杯右沿 H2 (近期回升到接近 H1, 与 H1 差异 <8%)
+#   - 然后 handle: 1-4 周浅回撤 (3-15%)，现价接近 handle 高点准备突破
+
+def detect_cup_handle(code: str, name: str, candles: list[Candle], weekly_candles: list[Candle] | None = None) -> ScreenerItem | None:
+    cfg = SCREENER_CONFIG["cup_handle"]
+    if not cfg.enabled or len(candles) < cfg.min_candles:
+        return None
+
+    closes = np.array([c.close for c in candles])
+    highs = np.array([c.high for c in candles])
+    lows = np.array([c.low for c in candles])
+    volumes = np.array([c.volume for c in candles])
+    cur = float(closes[-1])
+    n = len(candles)
+
+    # ── handle 应该在最近 5-25 日 ──
+    handle_len = 0
+    handle_high_idx = None
+    handle_high = None
+    handle_low = None
+
+    # handle 高点 = 最近 5-25 日内的某个局部高
+    for hl in range(5, min(26, n - 30)):
+        ph_idx = n - 1 - hl
+        ph = float(highs[ph_idx])
+        # 后续 hl 天没有创出新高
+        if max(highs[ph_idx + 1:]) <= ph * 1.005:
+            handle_len = hl
+            handle_high_idx = ph_idx
+            handle_high = ph
+            handle_low = float(np.min(lows[ph_idx + 1:]))
+            handle_pullback = (ph - handle_low) / ph
+            if 0.03 <= handle_pullback <= 0.15:  # handle 浅回撤
+                break
+    else:
+        return None
+
+    if handle_high_idx is None or handle_high is None:
+        return None
+
+    # ── 杯部分: handle 之前的 30-130 个交易日 ──
+    cup_search_start = max(0, handle_high_idx - 130)
+    cup_segment_highs = highs[cup_search_start:handle_high_idx]
+    cup_segment_lows = lows[cup_search_start:handle_high_idx]
+    if len(cup_segment_highs) < 30:
+        return None
+
+    # 杯底 = cup segment 中的最低点
+    cup_low_relative_idx = int(np.argmin(cup_segment_lows))
+    cup_low = float(cup_segment_lows[cup_low_relative_idx])
+    cup_low_idx = cup_search_start + cup_low_relative_idx
+
+    # 杯左沿 = 杯底之前的最高点
+    if cup_low_idx <= cup_search_start + 5:
+        return None
+    left_segment = highs[cup_search_start:cup_low_idx]
+    cup_left_high = float(np.max(left_segment))
+
+    # 杯右沿 = 杯底之后, handle 之前的最高点 (应该接近 handle_high)
+    right_segment = highs[cup_low_idx:handle_high_idx + 1]
+    cup_right_high = float(np.max(right_segment))
+
+    # ── 形态校验 ──
+    # 1. 杯深: 12-35%
+    cup_depth = (cup_left_high - cup_low) / cup_left_high
+    if not (0.12 <= cup_depth <= 0.40):
+        return None
+
+    # 2. 左右沿对称: 差异 <10%
+    rim_diff = abs(cup_left_high - cup_right_high) / cup_left_high
+    if rim_diff > 0.10:
+        return None
+
+    # 3. 杯长 (从左沿到右沿): 30-130 日
+    cup_length = handle_high_idx - cup_search_start
+    if not (30 <= cup_length <= 130):
+        return None
+
+    # 4. 现价靠近 handle_high (突破点)
+    breakout_pct = (cur - handle_high) / max(handle_high, 1)
+    if breakout_pct < -0.03 or breakout_pct > 0.05:
+        return None
+
+    # 5. 量能: 突破当日 > 1.3x handle 期间均量
+    avg_vol_handle = float(np.mean(volumes[handle_high_idx + 1:])) if handle_len > 0 else 1
+    cur_vol = float(volumes[-1])
+    vol_mult = cur_vol / max(avg_vol_handle, 1)
+    if vol_mult < 1.0:
+        return None
+
+    ctx = get_sr_context(code, candles, cur, weekly_candles)
+
+    # ── 打分 ──
+    score_symmetry = max(0, (0.10 - rim_diff) / 0.10) * 25
+    score_depth = 20 if 0.15 <= cup_depth <= 0.30 else 10  # 理想杯深 15-30%
+    score_handle_quality = max(0, (0.15 - (handle_high - handle_low) / handle_high) / 0.15) * 15
+    score_breakout = 15 if breakout_pct >= 0 else 8
+    score_volume = min((vol_mult - 1.0) * 10, 15)
+    weekly_bonus = 10 if ctx.weekly_trend.get("direction") == "up" else 5
+
+    total = score_symmetry + score_depth + score_handle_quality + score_breakout + score_volume + weekly_bonus
+    total = round(min(total, 100), 1)
+    if total < cfg.min_total_score:
+        return None
+
+    triggers = [
+        f"杯深{cup_depth*100:.0f}% / 杯长{cup_length}日",
+        f"左右沿对称 (差{rim_diff*100:.1f}%)",
+        f"handle {handle_len}日浅回撤 {(handle_high-handle_low)/handle_high*100:.1f}%",
+        f"现价距突破点 {handle_high:.2f} {breakout_pct*100:+.1f}%",
+    ]
+    if vol_mult >= 1.3:
+        triggers.append(f"放量 {vol_mult:.1f}x")
+    if ctx.weekly_trend.get("direction") == "up":
+        triggers.append("周线向上")
+
+    last = candles[-1]
+    change_pct = (last.close / candles[-2].close - 1) * 100 if n >= 2 else 0.0
+    stop = handle_low * 0.99  # handle 低点为止损
+    target = handle_high + (handle_high - cup_low)  # 目标 = 突破点 + 杯深
+    rr = _rr_ratio(cur, stop, target)
+    dist_pct = abs(cur - stop) / stop * 100
+
+    return ScreenerItem(
+        code=code, name=name, pattern="cup_handle",
+        score=total, price=round(cur, 2),
+        change_pct=round(change_pct, 2),
+        volume_ratio=round(vol_mult, 2),
+        breakout_price=round(handle_high, 2),
+        pullback_price=round(stop, 2),
+        distance_to_support_pct=round(dist_pct, 2),
+        triggers=triggers,
+        rr_ratio=round(rr, 2),
+        support_score=round(ctx.sup_score, 1),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Model: high_tight_flag (高位紧旗 — 强爆发型)
+# ─────────────────────────────────────────────────────────────────────
+# 思路: 8-12 周内涨幅 >=80%，然后 3-5 周窄幅整理 (回撤 <25%)，现价突破整理上沿。
+# 这是 RR 极高、胜率偏低的强爆发形态，最适合龙头股、热门题材。
+
+def detect_high_tight_flag(code: str, name: str, candles: list[Candle], weekly_candles: list[Candle] | None = None) -> ScreenerItem | None:
+    cfg = SCREENER_CONFIG["high_tight_flag"]
+    if not cfg.enabled or len(candles) < cfg.min_candles:
+        return None
+
+    closes = np.array([c.close for c in candles])
+    highs = np.array([c.high for c in candles])
+    lows = np.array([c.low for c in candles])
+    volumes = np.array([c.volume for c in candles])
+    cur = float(closes[-1])
+    n = len(candles)
+
+    # ── A) 寻找近期整理段 (15-30 日) ──
+    flag_high = None
+    flag_low = None
+    flag_len = 0
+    flag_start_idx = None
+    for fl in (15, 20, 25):
+        if n < fl + 50:
+            continue
+        seg_highs = highs[-fl:]
+        seg_lows = lows[-fl:]
+        fh = float(np.max(seg_highs))
+        fl_low = float(np.min(seg_lows))
+        flag_range = (fh - fl_low) / max(fl_low, 1)
+        # 旗形必须紧 (range <25%)
+        if flag_range > 0.25:
+            continue
+        flag_high = fh
+        flag_low = fl_low
+        flag_len = fl
+        flag_start_idx = n - fl
+        break
+
+    if flag_high is None or flag_start_idx is None or flag_low is None:
+        return None
+
+    # ── B) 旗杆: 整理段之前的 35-65 日内涨幅 >= 80% ──
+    pole_search_start = max(0, flag_start_idx - 65)
+    pole_search_end = flag_start_idx
+    if pole_search_end - pole_search_start < 35:
+        return None
+
+    pole_low = float(np.min(lows[pole_search_start:pole_search_end]))
+    pole_high = float(np.max(highs[pole_search_start:pole_search_end]))
+    pole_gain = (pole_high - pole_low) / max(pole_low, 1)
+    if pole_gain < 0.80:  # 旗杆涨幅 >= 80%
+        return None
+
+    # 旗杆高点应接近 flag 高点 (差异 <10%)
+    if abs(pole_high - flag_high) / pole_high > 0.15:
+        return None
+
+    # ── C) 突破: 现价 >= flag_high * 0.98 ──
+    breakout_pct = (cur - flag_high) / max(flag_high, 1)
+    if breakout_pct < -0.02 or breakout_pct > 0.08:
+        return None
+
+    # ── D) 量能: 当日 > 1.5x 旗形期间均量 ──
+    avg_vol_flag = float(np.mean(volumes[flag_start_idx:]))
+    if avg_vol_flag <= 0:
+        return None
+    cur_vol = float(volumes[-1])
+    vol_mult = cur_vol / avg_vol_flag
+    if vol_mult < 1.3:
+        return None
+
+    ctx = get_sr_context(code, candles, cur, weekly_candles)
+
+    # ── 打分 ──
+    score_pole = min((pole_gain - 0.80) / 1.20 * 25 + 15, 30)  # 旗杆越强越好
+    flag_pullback = (flag_high - flag_low) / flag_high
+    score_flag_tightness = max(0, (0.25 - flag_pullback) / 0.25) * 20  # 旗越紧越好
+    score_breakout = 15 if breakout_pct >= 0 else 8
+    score_volume = min((vol_mult - 1.0) * 10, 20)
+    weekly_bonus = 10 if ctx.weekly_trend.get("direction") == "up" else 5
+
+    total = score_pole + score_flag_tightness + score_breakout + score_volume + weekly_bonus
+    total = round(min(total, 100), 1)
+    if total < cfg.min_total_score:
+        return None
+
+    triggers = [
+        f"旗杆涨幅 {pole_gain*100:.0f}% (~{pole_search_end-pole_search_start}日)",
+        f"旗形 {flag_len}日紧整理 (回撤{flag_pullback*100:.1f}%)",
+        f"突破旗形上沿 {flag_high:.2f} ({breakout_pct*100:+.1f}%)",
+        f"放量 {vol_mult:.1f}x 旗形均量",
+    ]
+    if ctx.weekly_trend.get("direction") == "up":
+        triggers.append("周线向上")
+
+    last = candles[-1]
+    change_pct = (last.close / candles[-2].close - 1) * 100 if n >= 2 else 0.0
+    stop = flag_low * 1.01
+    # HTF 目标: 至少复制旗杆涨幅
+    target = flag_high * (1 + pole_gain * 0.7)
+    rr = _rr_ratio(cur, stop, target)
+    dist_pct = abs(cur - stop) / stop * 100
+
+    return ScreenerItem(
+        code=code, name=name, pattern="high_tight_flag",
+        score=total, price=round(cur, 2),
+        change_pct=round(change_pct, 2),
+        volume_ratio=round(vol_mult, 2),
+        breakout_price=round(flag_high, 2),
+        pullback_price=round(stop, 2),
+        distance_to_support_pct=round(dist_pct, 2),
+        triggers=triggers,
+        rr_ratio=round(rr, 2),
+        support_score=round(ctx.sup_score, 1),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Registry
 # ─────────────────────────────────────────────────────────────────────
 
@@ -1035,6 +1698,11 @@ PATTERN_DETECTORS = {
     "box_support": detect_box_support,
     "volume_breakout": detect_volume_breakout,
     "macd_divergence": detect_macd_divergence,
+    "stage2_breakout": detect_stage2_breakout,
+    "vcp": detect_vcp,
+    "pivot_breakout": detect_pivot_breakout,
+    "cup_handle": detect_cup_handle,
+    "high_tight_flag": detect_high_tight_flag,
 }
 
 MODEL_LABELS = {
@@ -1043,4 +1711,9 @@ MODEL_LABELS = {
     "box_support": "箱体支撑",
     "volume_breakout": "放量突破",
     "macd_divergence": "MACD底背离",
+    "stage2_breakout": "Stage 2 突破",
+    "vcp": "VCP 波动收缩",
+    "pivot_breakout": "Pivot 点突破",
+    "cup_handle": "杯柄形态",
+    "high_tight_flag": "高位紧旗",
 }

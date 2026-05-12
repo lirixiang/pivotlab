@@ -35,15 +35,13 @@ def _strip_html(html: str) -> str:
 @registry.register(
     name="web_search",
     description=(
-        "Search the public web for fresh information when the local database "
-        "has no answer (e.g. latest news, regulator announcements, sector "
-        "explanations, recent IPOs). Returns top results with title, url and "
-        "snippet. Use Chinese keywords for A-share topics."
+        "联网搜索。本地数据库只有历史行情/财务快照，凡是涉及「最新公告/业绩快报/股东减持/分红/收购重组/今天为什么涨跌/行业动态/政策监管/突发新闻」都必须调用这个工具联网验证，不能凭本地数据下结论。"
+        "返回顶部结果的 title/url/snippet。A 股话题用中文关键词，可加 site: 限定权威站点（如 site:cninfo.com.cn、site:cls.cn、site:eastmoney.com）。拿到结果后再用 fetch_url 读最相关的那一页详情。"
     ),
     parameters={
         "type": "object",
         "properties": {
-            "query": {"type": "string", "description": "Search keywords"},
+            "query": {"type": "string", "description": "中文关键词优先，可含 site: 操作符"},
             "max_results": {
                 "type": "integer", "default": 6, "minimum": 1, "maximum": 15,
             },

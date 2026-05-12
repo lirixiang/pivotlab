@@ -42,6 +42,13 @@ class AssistantDeltaEvent:
 
 
 @dataclass
+class ThinkingDeltaEvent:
+    """Thinking/reasoning token chunk (Qwen3 CoT)."""
+    delta: str
+    type: Literal["thinking_delta"] = "thinking_delta"
+
+
+@dataclass
 class StepStartEvent:
     step: int
     type: Literal["step_start"] = "step_start"
@@ -87,6 +94,12 @@ class FinalEvent:
     text: str
     steps: int
     type: Literal["final"] = "final"
+
+
+@dataclass
+class PlanUpdateEvent:
+    steps: list[dict]  # [{id:int, title:str, status:"not-started"|"in-progress"|"completed"}]
+    type: Literal["plan_update"] = "plan_update"
 
 
 @dataclass
@@ -151,6 +164,8 @@ class Agent:
             deltas = []
             async for d in self.llm.stream(state.messages, tools=tools):
                 deltas.append(d)
+                if d.thinking_delta:
+                    yield ThinkingDeltaEvent(delta=d.thinking_delta)
                 if d.text_delta:
                     yield AssistantDeltaEvent(delta=d.text_delta)
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent as RME } from "react";
-
+import { TradeChart } from "../components/TradeChart";
 // ── Types ──
 interface Provider {
   provider: string;
@@ -22,6 +22,12 @@ interface Msg {
   tool_calls?: { id: string; name: string; arguments: Record<string, unknown> }[];
   tool_call_id?: string;
   name?: string;
+}
+
+interface PlanStep {
+  id: number;
+  title: string;
+  status: "not-started" | "in-progress" | "completed";
 }
 
 // stream event types
@@ -73,6 +79,12 @@ function md(s: string): string {
     return `<div class="overflow-x-auto my-2"><table class="w-full border-collapse border border-ink-700 rounded-lg text-sm"><thead><tr>${ths}</tr></thead><tbody>${rows}</tbody></table></div>`;
   });
 
+  // Stock code links: match 6-digit codes (000xxx, 00xxxx, 3xxxxx, 6xxxxx, 688xxx)
+  // Only match when not already inside an HTML tag or href
+  out = out.replace(/(?<![\/\w"=])\b([036]\d{5})\b/g,
+    '<a href="/stock/$1" target="_blank" class="text-gold hover:underline cursor-pointer" title="查看 $1 K线">$1</a>'
+  );
+
   // Paragraphs
   out = out.replace(/\n{2,}/g, "</p><p>");
   if (!out.startsWith("<")) out = "<p>" + out + "</p>";
@@ -104,6 +116,7 @@ export function AgentPage() {
   // Chat items: union of user msg, assistant text, tool cards, approval cards, system notes
   const [items, setItems] = useState<any[]>([]);
   const [streamBuf, setStreamBuf] = useState("");
+  const [thinkBuf, setThinkBuf] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [totalTokens, setTotalTokens] = useState(0);
 
@@ -235,6 +248,7 @@ export function AgentPage() {
     setRunning(true);
     setStreaming(false);
     setStreamBuf("");
+    setThinkBuf("");
     setItems(prev => [...prev, { type: "user", text: msg }]);
 
     const abort = new AbortController();
@@ -258,14 +272,20 @@ export function AgentPage() {
       const decoder = new TextDecoder();
       let buf = "";
       let accDelta = "";
+      let accThink = "";
 
       const flushDelta = () => {
-        if (accDelta) {
-          setItems(prev => [...prev, { type: "assistant", text: accDelta }]);
-          setStreamBuf("");
-          setStreaming(false);
-          accDelta = "";
+        if (accThink) {
+          setItems(prev => [...prev, { type: "thinking", text: accThink }]);
+          setThinkBuf("");
+          accThink = "";
         }
+        if (accDelta.trim()) {
+          setItems(prev => [...prev, { type: "assistant", text: accDelta }]);
+        }
+        setStreamBuf("");
+        setStreaming(false);
+        accDelta = "";
       };
 
       while (true) {
@@ -287,6 +307,11 @@ export function AgentPage() {
           switch (etype) {
             case "step_start":
               break;
+            case "thinking_delta":
+              accThink += data.delta || "";
+              setThinkBuf(accThink);
+              setStreaming(true);
+              break;
             case "assistant_delta":
               accDelta += data.delta || "";
               setStreamBuf(accDelta);
@@ -307,6 +332,26 @@ export function AgentPage() {
                   : it
               ));
               break;
+            case "plan_update": {
+              const steps: PlanStep[] = data.steps || [];
+              // Replace the most recent plan item; otherwise append
+              setItems(prev => {
+                const lastPlanIdx = [...prev].reverse().findIndex(it => it.type === "plan");
+                if (lastPlanIdx >= 0) {
+                  const realIdx = prev.length - 1 - lastPlanIdx;
+                  // Only replace if it's the most recent non-tool item (i.e. still being updated this turn)
+                  // Heuristic: if any non-plan item came after it, append a new one instead
+                  const hasLaterNonPlan = prev.slice(realIdx + 1).some(it => it.type !== "tool");
+                  if (!hasLaterNonPlan) {
+                    const next = [...prev];
+                    next[realIdx] = { type: "plan", steps };
+                    return next;
+                  }
+                }
+                return [...prev, { type: "plan", steps }];
+              });
+              break;
+            }
             case "approval_request":
               flushDelta();
               setItems(prev => [...prev, { type: "approval", ...data }]);
@@ -319,6 +364,11 @@ export function AgentPage() {
               break;
             case "final":
               // Server sends final with complete text — use it directly
+              if (accThink) {
+                setItems(prev => [...prev, { type: "thinking", text: accThink }]);
+                setThinkBuf("");
+                accThink = "";
+              }
               accDelta = "";
               setStreamBuf("");
               setStreaming(false);
@@ -485,12 +535,20 @@ export function AgentPage() {
 
             {items.map((item, i) => {
               if (item.type === "user") return <UserBubble key={i} text={item.text} />;
+              if (item.type === "thinking") return <ThinkingBlock key={i} text={item.text} />;
               if (item.type === "assistant") return <AssistantBubble key={i} text={item.text} />;
+              // update_plan calls are surfaced via the sticky TodoPanel; hide the noisy tool cards.
+              if (item.type === "tool" && item.name === "update_plan") return null;
               if (item.type === "tool") return <ToolCard key={i} {...item} />;
               if (item.type === "approval") return <ApprovalCard key={i} {...item} onApprove={approve} />;
               if (item.type === "system") return <SystemNote key={i} text={item.text} />;
+              // type === "plan" intentionally not rendered inline; shown as sticky TodoPanel above composer
               return null;
             })}
+
+            {streaming && thinkBuf && !streamBuf && (
+              <ThinkingBlock text={thinkBuf} live />
+            )}
 
             {streaming && streamBuf && (
               <div className="space-y-1">
@@ -506,6 +564,9 @@ export function AgentPage() {
             )}
           </div>
         </div>
+
+        {/* Sticky Todo panel (latest plan_update) — sits right above the composer, like VS Code Todos */}
+        <TodoPanel items={items} />
 
         {/* Composer */}
         <div className="border-t border-ink-800 grad-head px-4 py-3 flex-shrink-0">
@@ -547,6 +608,30 @@ export function AgentPage() {
 
 // ── Sub-components ──
 
+function ThinkingBlock({ text, live }: { text: string; live?: boolean }) {
+  const [open, setOpen] = useState(!!live);
+  return (
+    <div className="space-y-1">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="flex items-center gap-2 text-[10px] text-ink-500 uppercase tracking-wider hover:text-ink-300 transition"
+      >
+        <span className="w-4 h-4 rounded bg-purple-500/20 flex items-center justify-center text-[8px]">
+          {live ? <span className="animate-pulse">🧠</span> : "🧠"}
+        </span>
+        {live ? "思考中…" : "思考过程"}
+        <span className="text-[9px]">{open ? "▾" : "▸"}</span>
+      </button>
+      {open && (
+        <div className="bg-ink-950 border border-ink-800 rounded-lg px-4 py-3 text-xs text-ink-400 max-h-60 overflow-y-auto whitespace-pre-wrap">
+          {text}
+          {live && <span className="inline-block w-1.5 h-3 bg-purple-400 animate-pulse ml-0.5" />}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function UserBubble({ text }: { text: string }) {
   return (
     <div className="space-y-1">
@@ -585,6 +670,9 @@ function ToolCard({ name, arguments: args, status, result, call_id }: ToolCardSt
   const icon = status === "running" ? "⟳" : status === "ok" ? "✓" : "✕";
   const statusText = status === "running" ? "运行中" : status === "ok" ? "完成" : "失败";
 
+  // Check if result is a chart payload
+  const chartData = result && typeof result === "object" && (result as any)._chart ? result as any : null;
+
   return (
     <div className="border border-ink-700 rounded-lg bg-ink-900 overflow-hidden text-xs">
       <button
@@ -601,13 +689,24 @@ function ToolCard({ name, arguments: args, status, result, call_id }: ToolCardSt
         </span>
         <span className={`text-ink-500 text-[8px] transition ${open ? "rotate-90" : ""}`}>▶</span>
       </button>
+      {/* Inline chart rendering */}
+      {chartData && (
+        <div className="border-t border-ink-700 px-2 py-2">
+          <TradeChart
+            candles={chartData.candles || []}
+            markers={[]}
+            title={chartData.title || ""}
+            hlines={chartData.hlines || []}
+          />
+        </div>
+      )}
       {open && (
         <div className="border-t border-ink-700 px-3 py-2.5 space-y-2">
           <div>
             <div className="text-[9px] text-ink-500 uppercase tracking-wider mb-1">参数</div>
             <pre className="bg-ink-950 rounded-md p-2 overflow-x-auto text-ink-300 font-mono">{JSON.stringify(args, null, 2)}</pre>
           </div>
-          {result !== undefined && (
+          {result !== undefined && !chartData && (
             <div>
               <div className="text-[9px] text-ink-500 uppercase tracking-wider mb-1">结果</div>
               <pre className="bg-ink-950 rounded-md p-2 overflow-x-auto text-ink-300 font-mono max-h-80 overflow-y-auto">
@@ -656,6 +755,97 @@ function ApprovalCard({
 
 function SystemNote({ text }: { text: string }) {
   return <div className="text-center text-xs text-ink-500 py-2">{text}</div>;
+}
+
+// Sticky Todos panel — VS Code "Todos" style. Picks the most recent plan
+// from the items stream and renders it just above the composer. Collapsible.
+// Auto-hides if no plan or if all steps are completed AND the latest item
+// after the plan is an assistant final message (i.e. the task is fully done).
+function TodoPanel({ items }: { items: any[] }) {
+  // Find latest plan
+  let plan: PlanStep[] | null = null;
+  let planIdx = -1;
+  for (let i = items.length - 1; i >= 0; i--) {
+    if (items[i].type === "plan") {
+      plan = items[i].steps as PlanStep[];
+      planIdx = i;
+      break;
+    }
+  }
+  // Default-collapsed state when fully done; user can re-expand
+  const completed = plan ? plan.filter(s => s.status === "completed").length : 0;
+  const total = plan ? plan.length : 0;
+  const allDone = total > 0 && completed === total;
+  // Hide entirely if a new user message arrived after the plan (= new task started)
+  const newerUserAfter = plan && items.slice(planIdx + 1).some(it => it.type === "user");
+
+  const [collapsed, setCollapsed] = useState(false);
+  // Auto-collapse when fully done
+  useEffect(() => {
+    if (allDone) setCollapsed(true);
+    else setCollapsed(false);
+  }, [allDone, planIdx]);
+
+  if (!plan || newerUserAfter) return null;
+
+  const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+  return (
+    <div className="border-t border-ink-800 px-4 py-2 flex-shrink-0 bg-ink-950/60 backdrop-blur">
+      <div className="max-w-4xl mx-auto">
+        <div className="bg-ink-900 border border-ink-800 rounded-lg overflow-hidden">
+          {/* Header */}
+          <button
+            onClick={() => setCollapsed(c => !c)}
+            className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-ink-850 transition text-left"
+          >
+            <span className={`text-ink-500 text-xs font-mono transition-transform ${collapsed ? "" : "rotate-90"}`}>▸</span>
+            <span className="text-xs font-semibold text-ink-200">Todos</span>
+            <span className="text-xs text-ink-500">({completed}/{total})</span>
+            {!allDone && (
+              <span className="ml-1 inline-flex items-center gap-1 text-[10px] text-amber-300 uppercase tracking-wider">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-300 animate-pulse" />
+                进行中
+              </span>
+            )}
+            {allDone && (
+              <span className="ml-1 text-[10px] text-emerald-400 uppercase tracking-wider">已完成</span>
+            )}
+            {/* Mini progress bar in the header (always visible) */}
+            <div className="ml-auto w-24 h-1 bg-ink-800 rounded-full overflow-hidden">
+              <div
+                className={`h-full transition-all duration-500 ${allDone ? "bg-emerald-500" : "bg-amber-400"}`}
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+          </button>
+
+          {/* Body */}
+          {!collapsed && (
+            <ol className="px-3 pb-2 pt-1 space-y-1 max-h-48 overflow-y-auto">
+              {plan.map(s => {
+                const icon = s.status === "completed" ? "✓" : s.status === "in-progress" ? "◐" : "○";
+                const iconCls =
+                  s.status === "completed" ? "text-emerald-400" :
+                  s.status === "in-progress" ? "text-amber-300" :
+                  "text-ink-600";
+                const titleCls =
+                  s.status === "completed" ? "text-ink-500 line-through decoration-emerald-500/40" :
+                  s.status === "in-progress" ? "text-ink-100" :
+                  "text-ink-400";
+                return (
+                  <li key={s.id} className="flex items-start gap-2 text-sm leading-tight">
+                    <span className={`mt-0.5 w-4 text-center font-mono text-xs ${iconCls}`}>{icon}</span>
+                    <span className={titleCls}>{s.title}</span>
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ── Model Picker Popover ──

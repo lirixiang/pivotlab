@@ -46,7 +46,16 @@ async def get_realtime_quote(args: dict[str, Any]) -> dict[str, Any]:
     quotes = await asyncio.to_thread(fetch_quotes, codes)
     if not quotes:
         return {"error": f"codes {','.join(codes)} not found or market closed"}
-    return {"quotes": quotes, "count": len(quotes)}
+    from datetime import datetime as _dt
+    return {
+        "quotes": quotes,
+        "count": len(quotes),
+        "_meta": {
+            "source": "tencent_realtime",
+            "fetched_at": _dt.now().isoformat(timespec="seconds"),
+            "note": "盘后返回的是收盘价快照",
+        },
+    }
 
 
 @registry.register(

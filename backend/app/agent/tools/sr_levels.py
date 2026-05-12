@@ -67,10 +67,16 @@ async def calc_sr_levels(args: dict[str, Any]) -> dict[str, Any]:
     supports.sort(key=lambda x: -x["price"])   # closest first
     resistances.sort(key=lambda x: x["price"])  # closest first
 
+    last_bar_date = candles[-1].date if candles else None
     return {
         "code": code,
         "last_close": round(last_close, 2),
         "lookback_days": lookback,
         "supports": supports[:5],
         "resistances": resistances[:5],
+        "_meta": {
+            "based_on_bar_date": last_bar_date,
+            "bars_used": len(candles),
+            "note": "如 last_bar_date 不是今天，结果反映的是历史状态",
+        },
     }

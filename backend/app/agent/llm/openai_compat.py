@@ -121,6 +121,11 @@ class OpenAICompatibleLLM(BaseLLM):
                     delta = ch.get("delta") or {}
                     finish = ch.get("finish_reason")
 
+                    # Qwen3 thinking content (reasoning_content field)
+                    thinking = delta.get("reasoning_content") or ""
+                    if thinking:
+                        yield StreamDelta(thinking_delta=thinking)
+
                     text = delta.get("content") or ""
                     if text:
                         yield StreamDelta(text_delta=text)
