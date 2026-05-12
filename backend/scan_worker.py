@@ -35,8 +35,15 @@ def wprog(path: str, **kw):
     write_progress(path, **merged)
 
 
-def _consolidate(agg: dict, available_models: list) -> list[dict]:
-    """Reduce per-stock model_hits into a single row with rating/agreement/triggers."""
+def _consolidate(agg: dict, available_models: list,
+                 min_agreement: float = 0.0,
+                 min_rating: float = 0.0) -> list[dict]:
+    """Reduce per-stock model_hits into a single row with rating/agreement/triggers.
+
+    Optional filters:
+      - min_agreement: drop rows where < this share of available models agree on direction.
+      - min_rating:    drop rows whose composite rating is below this threshold.
+    """
     out: list[dict] = []
     for code, cur in agg.items():
         mh = cur["model_hits"]
@@ -56,6 +63,11 @@ def _consolidate(agg: dict, available_models: list) -> list[dict]:
         agreement = len(same_dir) / max(len(available_models), 1)
         rr = rep["risk_reward"]
         rating = (avg_conf / 100.0) * 2.5 + agreement * 1.5 + min(rr, 3.0) / 3.0 * 1.0
+        # Strictness gates
+        if agreement < min_agreement:
+            continue
+        if rating < min_rating:
+            continue
         triggers: list[str] = []
         for h in same_dir:
             for f in h.get("factors", []):
@@ -111,8 +123,10 @@ def main():
     scope = task.get("scope", "watchlist")  # watchlist / industry / cached
     scope_code = task.get("scope_code", "")
     model_types = task.get("model_types", ["lightgbm"])
-    buy_threshold = task.get("buy_threshold", 0.35)
-    sell_threshold = task.get("sell_threshold", 0.35)
+    buy_threshold = task.get("buy_threshold", 0.55)
+    sell_threshold = task.get("sell_threshold", 0.55)
+    min_agreement = float(task.get("min_agreement", 0.5))
+    min_rating = float(task.get("min_rating", 2.0))
     pf = task["progress_file"]
     t0 = time.time()
 
@@ -260,7 +274,9 @@ def main():
             if scanned % 10 == 0 or scanned == len(codes_names):
                 wprog(pf, status="scanning", progress=pct, scanned=scanned,
                       message=f"扫描中 {scanned}/{len(codes_names)} ... 已发现 {len(agg)} 只股票",
-                      results=_consolidate(agg, available_models))
+                      results=_consolidate(agg, available_models,
+                                           min_agreement=min_agreement,
+                                           min_rating=min_rating))
 
             candles = _cache_read(code, limit=500)
             if not candles or len(candles) < 100:
@@ -317,7 +333,9 @@ def main():
                     logger.debug("Predict failed %s/%s: %s", code, mt, e)
 
         # ── Consolidate per-stock results: consensus action, avg confidence, ★ rating ──
-        hits = _consolidate(agg, available_models)
+        hits = _consolidate(agg, available_models,
+                            min_agreement=min_agreement,
+                            min_rating=min_rating)
 
         # ── Persist snapshot to history ──
         try:

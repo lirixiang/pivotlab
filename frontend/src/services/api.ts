@@ -424,6 +424,92 @@ export const api = {
     http<{ task: string; status: string }>("/dragon/backfill", {
       method: "POST", body: JSON.stringify(params),
     }),
+
+  // ── LLM精选 ──
+  llmProviders: () =>
+    http<{ providers: LlmProvider[] }>("/llmpick/providers"),
+  llmValidate: (params: {
+    candidates: { code: string; name?: string; logic?: string; risk?: string; theme?: string }[];
+    pe_max_pctile?: number;
+    crowding_max_pctile?: number;
+    require_above_ma20?: boolean;
+    require_positive_flow?: boolean;
+  }) =>
+    http<LlmPickResult>("/llmpick/validate", {
+      method: "POST", body: JSON.stringify(params),
+    }),
+  llmGenerate: (params: {
+    provider?: string;
+    prompt?: string;
+    auto_validate?: boolean;
+    pe_max_pctile?: number;
+    crowding_max_pctile?: number;
+    require_above_ma20?: boolean;
+    require_positive_flow?: boolean;
+  }) =>
+    http<LlmPickResult & { llm?: { provider: string; model: string; raw_response: string; candidate_count: number }; message?: string }>(
+      "/llmpick/generate", { method: "POST", body: JSON.stringify(params) },
+    ),
+  llmStatus: () =>
+    http<{ task: { status: string; provider?: string; message?: string; error?: string } | null }>("/llmpick/status"),
+  llmHistory: (limit = 20) =>
+    http<{ history: { ts: string; mode: string; total: number; passed: number; provider: string }[] }>(
+      `/llmpick/history?limit=${limit}`,
+    ),
+  llmHistoryDetail: (ts: string) =>
+    http<LlmPickResult>(`/llmpick/history/${ts}`),
+  llmDefaultPrompt: () =>
+    http<{ prompt: string }>("/llmpick/default_prompt"),
+};
+
+export type LlmProvider = {
+  key: string;
+  label: string;
+  configured: boolean;
+};
+
+export type LlmPickItem = {
+  code: string;
+  name: string;
+  logic: string;
+  risk: string;
+  theme: string;
+  close: number;
+  change_pct: number | null;
+  amount: number | null;
+  turnover_rate: number | null;
+  market_cap: number | null;
+  pe_ratio: number | null;
+  pe_percentile: number | null;
+  roe: number | null;
+  revenue_yoy: number | null;
+  net_profit_yoy: number | null;
+  amount_ratio: number | null;
+  amount_pctile: number | null;
+  vol_ma5_ratio: number | null;
+  ma5: number | null;
+  ma10: number | null;
+  ma20: number | null;
+  ma_aligned: boolean;
+  above_ma20: boolean;
+  pass_valuation: boolean;
+  pass_flow: boolean;
+  pass_crowding: boolean;
+  pass_technical: boolean;
+  passed: boolean;
+  total_score: number;
+  fail_reasons: string[];
+  industry: string;
+  market: string;
+  concepts: string[];
+  sparkline: number[];
+};
+
+export type LlmPickResult = {
+  total: number;
+  passed: number;
+  filtered: number;
+  results: LlmPickItem[];
 };
 
 export type AiScanHit = {

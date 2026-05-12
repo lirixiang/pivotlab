@@ -418,8 +418,10 @@ async def start_scan(body: dict):
     scope = body.get("scope", "watchlist")
     scope_code = body.get("scope_code", "")
     model_types = body.get("model_types", ["lightgbm"])
-    buy_threshold = float(body.get("buy_threshold", 0.35))
-    sell_threshold = float(body.get("sell_threshold", 0.35))
+    buy_threshold = float(body.get("buy_threshold", 0.55))
+    sell_threshold = float(body.get("sell_threshold", 0.55))
+    min_agreement = float(body.get("min_agreement", 0.5))
+    min_rating = float(body.get("min_rating", 2.0))
 
     # Check if a scan is already running
     for scan in _all_scans():
@@ -444,6 +446,7 @@ async def start_scan(body: dict):
         "task_id": task_id, "scope": scope, "scope_code": scope_code,
         "model_types": model_types,
         "buy_threshold": buy_threshold, "sell_threshold": sell_threshold,
+        "min_agreement": min_agreement, "min_rating": min_rating,
         "progress_file": progress_path,
     }
     task_file = str(_SCAN_DIR / f"{task_id}_task.json")

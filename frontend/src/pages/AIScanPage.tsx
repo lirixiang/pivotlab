@@ -94,8 +94,10 @@ export function AIScanPage({ defaultCode, onPickStock }: { defaultCode: string; 
   const [status, setStatus] = useState<AiModelStatus | null>(null);
   const [useAllModels, setUseAllModels] = useState(true);
   const [selectedModel, setSelectedModel] = useState<string>("lightgbm");
-  const [threshold, setThreshold] = useState(() => Number(localStorage.getItem("aiscan_thresh") || 0.4));
-  const [minConfidence, setMinConfidence] = useState(() => Number(localStorage.getItem("aiscan_minConf") || 0));
+  const [threshold, setThreshold] = useState(() => Number(localStorage.getItem("aiscan_thresh") || 0.55));
+  const [minConfidence, setMinConfidence] = useState(() => Number(localStorage.getItem("aiscan_minConf") || 60));
+  const [minAgreement, setMinAgreement] = useState(() => Number(localStorage.getItem("aiscan_minAgree") || 0.5));
+  const [minRating, setMinRating] = useState(() => Number(localStorage.getItem("aiscan_minRating") || 2.0));
   const [actionFilter, setActionFilter] = useUrlParam<"all" | "buy" | "sell">("act", "all");
   const [tasks, setTasks] = useState<Array<{
     task_id: string; scope: string; status: string; progress: number;
@@ -116,6 +118,8 @@ export function AIScanPage({ defaultCode, onPickStock }: { defaultCode: string; 
   // Persist (URL state handled by useUrlParam; only true preferences saved here)
   useEffect(() => { localStorage.setItem("aiscan_thresh", String(threshold)); }, [threshold]);
   useEffect(() => { localStorage.setItem("aiscan_minConf", String(minConfidence)); }, [minConfidence]);
+  useEffect(() => { localStorage.setItem("aiscan_minAgree", String(minAgreement)); }, [minAgreement]);
+  useEffect(() => { localStorage.setItem("aiscan_minRating", String(minRating)); }, [minRating]);
 
   // Load model status
   useEffect(() => { api.aiStatus().then(setStatus).catch(() => {}); }, []);
@@ -188,6 +192,7 @@ export function AIScanPage({ defaultCode, onPickStock }: { defaultCode: string; 
     api.aiScan({
       scope, scope_code: scopeCode, model_types: modelTypes,
       buy_threshold: threshold, sell_threshold: threshold,
+      min_agreement: minAgreement, min_rating: minRating,
     })
       .then(() => api.aiScanProgress().then(setTasks))
       .catch(() => {})
@@ -310,13 +315,31 @@ export function AIScanPage({ defaultCode, onPickStock }: { defaultCode: string; 
           </div>
 
           {/* Min confidence slider */}
-          <div className="flex items-center gap-2 text-[11px] text-ink-400">
-            <span>≥</span>
+          <div className="flex items-center gap-2 text-[11px] text-ink-400" title="客户端过滤：仅显示置信度≥该值的股票">
+            <span>信心≥</span>
             <input type="range" min={0} max={100} step={5} value={minConfidence}
                    onChange={(e) => setMinConfidence(Number(e.target.value))}
                    className="w-20 accent-gold" />
             <span className="num text-ink-200 w-7 text-right">{minConfidence}</span>
             <span>分</span>
+          </div>
+
+          {/* Min agreement slider (server-side) */}
+          <div className="flex items-center gap-2 text-[11px] text-ink-400" title="服务端筛选：多模型型一致性门槛（必须重新扫描生效）">
+            <span>共识≥</span>
+            <input type="range" min={0} max={1} step={0.1} value={minAgreement}
+                   onChange={(e) => setMinAgreement(Number(e.target.value))}
+                   className="w-20 accent-purple-400" />
+            <span className="num text-purple-300 w-9 text-right">{Math.round(minAgreement * 100)}%</span>
+          </div>
+
+          {/* Min rating slider (server-side) */}
+          <div className="flex items-center gap-2 text-[11px] text-ink-400" title="服务端筛选：综合评分门槛（0-5，必须重新扫描生效）">
+            <span>评分≥</span>
+            <input type="range" min={0} max={5} step={0.25} value={minRating}
+                   onChange={(e) => setMinRating(Number(e.target.value))}
+                   className="w-20 accent-amber-400" />
+            <span className="num text-amber-300 w-7 text-right">{minRating.toFixed(2)}</span>
           </div>
 
           {/* Stats pills */}
