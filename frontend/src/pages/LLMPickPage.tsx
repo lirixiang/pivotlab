@@ -187,10 +187,16 @@ export function LLMPickPage({ onPickStock }: { onPickStock?: (c: string) => void
   const loadHistoryItem = async (ts: string) => {
     setHistOpen(false);
     setLoading(true);
+    setError(null);
     try {
-      const d = await api.llmHistoryDetail(ts);
+      const d: any = await api.llmHistoryDetail(ts);
       setResults(d.results || []);
       setSummary({ total: d.total, passed: d.passed, filtered: d.filtered });
+      if (d.llm) {
+        setLlmInfo(d.llm);
+      } else {
+        setLlmInfo(null);
+      }
     } catch {
       setError("加载历史记录失败");
     } finally {
@@ -300,18 +306,32 @@ export function LLMPickPage({ onPickStock }: { onPickStock?: (c: string) => void
             {histOpen && (
               <div className="absolute right-0 top-full mt-1 z-50 w-64 bg-ink-850 border border-ink-700 rounded-lg shadow-xl py-1 max-h-72 overflow-y-auto scrollbar">
                 {history.length === 0 && <div className="px-3 py-4 text-[10px] text-ink-600 text-center">暂无历史</div>}
-                {history.map(h => (
-                  <button key={h.ts}
-                    className="w-full text-left px-3 py-2 text-[11px] hover:bg-ink-800 text-ink-300 flex justify-between"
-                    onClick={() => loadHistoryItem(h.ts)}
-                  >
-                    <span>
-                      {h.ts.replace("_", " ")}
-                      <span className="text-ink-600 ml-1">[{h.mode === "generate" ? "AI" : "手动"}]</span>
-                    </span>
-                    <span className="text-green-400 num">{h.passed}/{h.total}</span>
-                  </button>
-                ))}
+                {history.map(h => {
+                  // Format ts like 20260512_040621 → 05-12 04:06
+                  const t = h.ts;
+                  const display = t.length >= 15
+                    ? `${t.slice(4,6)}-${t.slice(6,8)} ${t.slice(9,11)}:${t.slice(11,13)}`
+                    : t.replace("_", " ");
+                  return (
+                    <button key={h.ts}
+                      className="w-full text-left px-3 py-2 text-[11px] hover:bg-ink-800 text-ink-300 flex justify-between items-center gap-2"
+                      onClick={() => loadHistoryItem(h.ts)}
+                    >
+                      <span className="flex items-center gap-1.5">
+                        <span className={`text-[9px] px-1 py-0.5 rounded ${
+                          h.mode === "generate"
+                            ? "bg-purple-900/40 text-purple-400"
+                            : "bg-blue-900/40 text-blue-400"
+                        }`}>
+                          {h.mode === "generate" ? "AI" : "手动"}
+                        </span>
+                        <span>{display}</span>
+                        {h.provider && <span className="text-ink-600 text-[10px]">{h.provider}</span>}
+                      </span>
+                      <span className="text-green-400 num">{h.passed}/{h.total}</span>
+                    </button>
+                  );
+                })}
               </div>
             )}
           </div>

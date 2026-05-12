@@ -457,7 +457,7 @@ export const api = {
       `/llmpick/history?limit=${limit}`,
     ),
   llmHistoryDetail: (ts: string) =>
-    http<LlmPickResult>(`/llmpick/history/${ts}`),
+    http<LlmPickResult & { llm?: { provider: string; model: string; raw_response: string; candidate_count: number }; mode?: string }>(`/llmpick/history/${ts}`),
   llmDefaultPrompt: () =>
     http<{ prompt: string }>("/llmpick/default_prompt"),
 };
