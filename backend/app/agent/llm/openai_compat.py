@@ -16,17 +16,21 @@ def _msg_to_dict(m: Message) -> dict[str, Any]:
     d: dict[str, Any] = {"role": m.role}
     if m.role == "tool":
         d["tool_call_id"] = m.tool_call_id
-        d["content"] = m.content
+        d["content"] = m.content or "ok"
         if m.name:
             d["name"] = m.name
         return d
-    d["content"] = m.content or ""
     if m.tool_calls:
         d["tool_calls"] = [
             {"id": tc.id, "type": "function",
              "function": {"name": tc.name, "arguments": json.dumps(tc.arguments, ensure_ascii=False)}}
             for tc in m.tool_calls
         ]
+        # Claude rejects empty content when tool_calls present; omit or use null
+        if m.content:
+            d["content"] = m.content
+    else:
+        d["content"] = m.content or ""
     return d
 
 
@@ -92,7 +96,11 @@ class OpenAICompatibleLLM(BaseLLM):
 
         async with httpx.AsyncClient(timeout=300) as client:
             async with client.stream("POST", url, json=payload, headers=headers) as r:
-                r.raise_for_status()
+                if r.status_code >= 400:
+                    body = await r.aread()
+                    import logging
+                    logging.getLogger(__name__).error("LLM API error %s: %s", r.status_code, body.decode(errors="replace"))
+                    r.raise_for_status()
                 async for line in r.aiter_lines():
                     if not line or not line.startswith("data:"):
                         continue
@@ -121,8 +129,21 @@ class OpenAICompatibleLLM(BaseLLM):
                     delta = ch.get("delta") or {}
                     finish = ch.get("finish_reason")
 
-                    # Qwen3 thinking content (reasoning_content field)
-                    thinking = delta.get("reasoning_content") or ""
+                    # Thinking/reasoning content
+                    # - Qwen3 / DeepSeek: reasoning_content
+                    # - OpenAI o-series / Claude via gateways: reasoning (string or dict)
+                    # - Anthropic-style proxied as: thinking
+                    thinking = (
+                        delta.get("reasoning_content")
+                        or delta.get("thinking")
+                        or ""
+                    )
+                    if not thinking:
+                        r = delta.get("reasoning")
+                        if isinstance(r, str):
+                            thinking = r
+                        elif isinstance(r, dict):
+                            thinking = r.get("content") or r.get("text") or ""
                     if thinking:
                         yield StreamDelta(thinking_delta=thinking)
 

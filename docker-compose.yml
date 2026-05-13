@@ -15,6 +15,9 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://pivotlab:pivotlab@127.0.0.1:5433/pivotlab
       QWEN_API_KEY: YOUR_QWEN_API_KEY
+      GEEKPLUS_API_KEY: YOUR_GEEKPLUS_API_KEY
+      LLM_DEFAULT_PROVIDER: geekplus
+      LLM_DEFAULT_MODEL: claude-sonnet-4-6
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility

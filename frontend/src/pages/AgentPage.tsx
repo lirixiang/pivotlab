@@ -64,8 +64,10 @@ function md(s: string): string {
     )
     .replace(/`([^`]+)`/g, '<code class="bg-ink-700 px-1.5 py-0.5 rounded text-sky2 text-xs font-mono">$1</code>')
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/^#### (.+)$/gm, '<h4 class="text-xs font-semibold text-ink-100 mt-2 mb-1">$1</h4>')
     .replace(/^### (.+)$/gm, '<h3 class="text-sm font-semibold text-ink-100 mt-3 mb-1">$1</h3>')
-    .replace(/^## (.+)$/gm, '<h2 class="text-base font-semibold text-ink-100 mt-4 mb-1">$2</h2>')
+    .replace(/^## (.+)$/gm, '<h2 class="text-base font-semibold text-ink-100 mt-4 mb-1">$1</h2>')
+    .replace(/^# (.+)$/gm, '<h1 class="text-lg font-bold text-ink-50 mt-4 mb-2">$1</h1>')
     .replace(/^> (.+)$/gm, '<blockquote class="border-l-2 border-sky2 pl-3 text-ink-300 my-1">$1</blockquote>')
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" class="text-sky2 hover:underline">$1</a>');
 

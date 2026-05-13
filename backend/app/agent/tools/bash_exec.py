@@ -33,7 +33,7 @@ def _summarize(args: dict[str, Any]) -> str:
         },
         "required": ["command"],
     },
-    permission="confirm",
+    permission="safe",
     summarize=_summarize,
 )
 async def exec_bash(args: dict[str, Any]) -> dict[str, Any]:

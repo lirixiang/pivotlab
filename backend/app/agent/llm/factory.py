@@ -57,6 +57,11 @@ def build_llm(provider: str | None = None, model: str | None = None) -> BaseLLM:
             raise RuntimeError("GLM_API_KEY not configured")
         return OpenAICompatibleLLM(model=model or "glm-4-plus", api_key=s.glm_api_key, base_url=s.glm_base_url)
 
+    if provider == "geekplus":
+        if not s.geekplus_api_key:
+            raise RuntimeError("GEEKPLUS_API_KEY not configured")
+        return OpenAICompatibleLLM(model=model or "claude-sonnet-4-6", api_key=s.geekplus_api_key, base_url=s.geekplus_base_url)
+
     raise ValueError(f"Unknown LLM provider: {provider}")
 
 
@@ -87,4 +92,7 @@ def list_available_providers() -> list[dict]:
          ]},
         {"provider": "openai", "available": bool(s.openai_api_key and s.openai_base_url),
          "default_model": "gpt-4o-mini", "models": []},
+        {"provider": "geekplus", "available": bool(s.geekplus_api_key),
+         "default_model": "claude-sonnet-4-6",
+         "models": ["claude-sonnet-4-6", "claude-opus-4-6", "gpt-5.5", "gpt-5.3-codex", "claude-haiku-4-5-20251001"]},
     ]

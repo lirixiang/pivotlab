@@ -98,16 +98,19 @@ async def lifespan(app: FastAPI):
         logger.warning("Agent init skipped: %s", e)
 
     # Initialize Ray cluster (single node, all GPUs)
-    import ray
-    if not ray.is_initialized():
-        ray.init(
-            ignore_reinit_error=True,
-            num_gpus=int(os.environ.get("NUM_GPUS", "6")),
-            dashboard_host="0.0.0.0",
-            include_dashboard=False,
-            logging_level=logging.WARNING,
-        )
-        logger.info("Ray initialized: %s", ray.cluster_resources())
+    try:
+        import ray
+        if not ray.is_initialized():
+            ray.init(
+                ignore_reinit_error=True,
+                num_gpus=int(os.environ.get("NUM_GPUS", "6")),
+                dashboard_host="0.0.0.0",
+                include_dashboard=False,
+                logging_level=logging.WARNING,
+            )
+            logger.info("Ray initialized: %s", ray.cluster_resources())
+    except ImportError:
+        logger.warning("Ray not installed, distributed training disabled")
 
     # Only start scheduler in one worker (the first one)
     if os.environ.get("SCHEDULER_DISABLED") != "1":
@@ -124,9 +127,12 @@ async def lifespan(app: FastAPI):
     if _scheduler:
         _scheduler.shutdown(wait=False)
     # Shutdown Ray
-    import ray
-    if ray.is_initialized():
-        ray.shutdown()
+    try:
+        import ray
+        if ray.is_initialized():
+            ray.shutdown()
+    except ImportError:
+        pass
 
 
 app = FastAPI(title="PivotLab API", version="0.1.0", lifespan=lifespan)

@@ -9,7 +9,10 @@ import time as _time
 import uuid
 from pathlib import Path
 
-import ray
+try:
+    import ray
+except ImportError:
+    ray = None  # type: ignore[assignment]
 from fastapi import APIRouter
 from sqlalchemy import select, func
 
