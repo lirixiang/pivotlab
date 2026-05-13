@@ -364,22 +364,22 @@ export function AgentPage() {
             case "done":
               flushDelta();
               break;
-            case "final":
+            case "final": {
               // Flush any pending streaming content first
               if (accThink) {
                 setItems(prev => [...prev, { type: "thinking", text: accThink }]);
                 setThinkBuf("");
                 accThink = "";
               }
-              if (accDelta.trim()) {
-                setItems(prev => [...prev, { type: "assistant", text: accDelta }]);
+              const finalText = accDelta.trim() ? accDelta : (data.text || "");
+              if (finalText.trim()) {
+                setItems(prev => [...prev, { type: "assistant", text: finalText }]);
               }
               accDelta = "";
               setStreamBuf("");
               setStreaming(false);
-              // Only add final text if it's different from what we just flushed
-              // (FinalEvent.text is last step's content — skip if already streamed)
               break;
+            }
             case "cancelled":
               flushDelta();
               setItems(prev => [...prev, { type: "system", text: "已停止" }]);
