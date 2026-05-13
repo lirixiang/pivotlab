@@ -20,14 +20,14 @@ _scheduler: BackgroundScheduler | None = None
 
 # Default schedule config — all disabled
 DEFAULT_SCHEDULE: dict[str, dict] = {
-    "daily_candles":        {"enabled": True,  "cron": "0 16 * * 1-5",  "label": "历史日线",     "desc": "每交易日收盘后同步"},
+    "daily_candles":        {"enabled": False, "cron": "0 16 * * 1-5",  "label": "历史日线",     "desc": "每交易日收盘后同步"},
     "financials":           {"enabled": False, "cron": "0 18 * * 6",    "label": "基本面快照",   "desc": "每周六更新（季报期可手动）"},
     "analyst_consensus":    {"enabled": False, "cron": "0 18 * * 3",    "label": "机构一致预期", "desc": "每周三更新"},
     "quotes":               {"enabled": True,  "cron": "*/30 9-15 * * 1-5", "label": "实时行情", "desc": "交易时段每30分钟刷新"},
     "stocks":               {"enabled": False, "cron": "0 8 * * 1",     "label": "股票列表",     "desc": "每周一更新"},
     "concepts":             {"enabled": False, "cron": "10 8 * * 1",    "label": "题材与概念",   "desc": "每周一更新"},
     "industry":             {"enabled": False, "cron": "20 8 * * 1",    "label": "行业数据",     "desc": "每周一更新"},
-    "screener":             {"enabled": True,  "cron": "30 15 * * 1-5", "label": "形态筛选",     "desc": "每交易日15:30扫描"},
+    "screener":             {"enabled": False, "cron": "30 15 * * 1-5", "label": "形态筛选",     "desc": "每交易日15:30扫描"},
     "zt_pool":              {"enabled": True,  "cron": "35 15 * * 1-5", "label": "涨停池",       "desc": "每交易日15:35抓取涨停/炸板池"},
     "lhb":                  {"enabled": True,  "cron": "30 18 * * 1-5", "label": "龙虎榜",       "desc": "每交易日18:30抓取龙虎榜（盘后公布）"},
     "concept_heat_history": {"enabled": True,  "cron": "40 15 * * 1-5", "label": "板块热度快照", "desc": "涨停池采集后立即生成"},

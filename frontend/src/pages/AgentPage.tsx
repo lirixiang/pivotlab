@@ -365,16 +365,20 @@ export function AgentPage() {
               flushDelta();
               break;
             case "final":
-              // Server sends final with complete text — use it directly
+              // Flush any pending streaming content first
               if (accThink) {
                 setItems(prev => [...prev, { type: "thinking", text: accThink }]);
                 setThinkBuf("");
                 accThink = "";
               }
+              if (accDelta.trim()) {
+                setItems(prev => [...prev, { type: "assistant", text: accDelta }]);
+              }
               accDelta = "";
               setStreamBuf("");
               setStreaming(false);
-              if (data.text) setItems(prev => [...prev, { type: "assistant", text: data.text }]);
+              // Only add final text if it's different from what we just flushed
+              // (FinalEvent.text is last step's content — skip if already streamed)
               break;
             case "cancelled":
               flushDelta();

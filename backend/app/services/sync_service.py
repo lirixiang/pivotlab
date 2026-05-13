@@ -1502,9 +1502,9 @@ def _fetch_candles_em(session, code: str, beg: str, days: int) -> list[dict]:
                 rows = []
                 for line in data["klines"]:
                     parts = line.split(",")
-                    if len(parts) < 6:
+                    if len(parts) < 7:
                         continue
-                    rows.append({
+                    row = {
                         "code": code,
                         "trade_date": parts[0],
                         "open": float(parts[1]),
@@ -1512,7 +1512,29 @@ def _fetch_candles_em(session, code: str, beg: str, days: int) -> list[dict]:
                         "high": float(parts[3]),
                         "low": float(parts[4]),
                         "volume": _em_volume_to_shares(float(parts[5])),
-                    })
+                    }
+                    # f57=amount, f59=change_pct, f60=change_amt, f61=turnover_rate
+                    if len(parts) > 6 and parts[6]:
+                        try:
+                            row["amount"] = float(parts[6])
+                        except (ValueError, TypeError):
+                            pass
+                    if len(parts) > 8 and parts[8]:
+                        try:
+                            row["change_pct"] = float(parts[8])
+                        except (ValueError, TypeError):
+                            pass
+                    if len(parts) > 9 and parts[9]:
+                        try:
+                            row["change_amt"] = float(parts[9])
+                        except (ValueError, TypeError):
+                            pass
+                    if len(parts) > 10 and parts[10]:
+                        try:
+                            row["turnover_rate"] = float(parts[10])
+                        except (ValueError, TypeError):
+                            pass
+                    rows.append(row)
                 return rows
     except Exception:
         pass
@@ -1540,7 +1562,8 @@ def _fetch_today_candles_clist(session) -> list[dict]:
             "fltt": 2, "invt": 2,
             "fid": "f12",  # sort by code for stable pagination
             "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",  # 沪深A股
-            "fields": "f12,f2,f15,f16,f17,f5",  # code,close,high,low,open,volume
+            # f3=chg%, f4=chg, f6=amount, f8=turnover_rate
+            "fields": "f12,f2,f15,f16,f17,f5,f3,f4,f6,f8",
         }
         try:
             resp = session.get(_EM_CLIST_URL, params=params, timeout=10)
@@ -1565,7 +1588,7 @@ def _fetch_today_candles_clist(session) -> list[dict]:
             if any(x is None or x == "-" for x in (o, h, l, v)):
                 continue
             try:
-                all_rows.append({
+                row = {
                     "code": code,
                     "trade_date": today,
                     "open": float(o),
@@ -1574,7 +1597,14 @@ def _fetch_today_candles_clist(session) -> list[dict]:
                     "close": float(close),
                     # EM clist f5 = 手,×100 得股。
                     "volume": int(float(v) * 100),
-                })
+                }
+                # Extra fields — may be "-" for suspended stocks
+                for fkey, dkey in (("f3", "change_pct"), ("f4", "change_amt"),
+                                   ("f6", "amount"), ("f8", "turnover_rate")):
+                    val = item.get(fkey)
+                    if val is not None and val != "-":
+                        row[dkey] = float(val)
+                all_rows.append(row)
             except (ValueError, TypeError):
                 continue
 
@@ -1618,13 +1648,11 @@ def _fetch_today_candles_clist(session) -> list[dict]:
 
 
 def sync_candles(days: int = 365, _task_id: int = None) -> int:
-    """Batch-sync historical daily candles for all stocks.
+    """Backfill daily candles for stocks with missing data.
 
-    Two-phase strategy:
-      1) Batch phase: use EM clist API to grab today's candle for ALL stocks (~17s)
-      2) Backfill phase: for stocks with no history, fetch full history per-stock
-
-    This replaces the old all-per-stock approach (15 min → 20s for daily updates).
+    Detects stocks whose latest candle is stale (>5 days old) or missing entirely,
+    then fetches missing days per-stock via Tencent/EM kline API.
+    Today's data is already handled by sync_quotes (runs every 30min).
     """
     import requests
     from requests.adapters import HTTPAdapter
@@ -1655,60 +1683,60 @@ def sync_candles(days: int = 365, _task_id: int = None) -> int:
         latest_map = {r[0]: r[1] for r in latest_rows}
 
         from datetime import date as _date
-        today_str = _date.today().strftime("%Y-%m-%d")
-        cutoff = (_date.today() - timedelta(days=3)).strftime("%Y-%m-%d")
+        # If a stock's latest candle is before yesterday, it needs backfill
+        # (today's data is handled by sync_quotes every 30min)
+        cutoff = (_date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
         default_beg = (_date.today() - timedelta(days=days * 2)).strftime("%Y%m%d")
 
-        # ═══════════════════════════════════════════════════════════
-        # Phase 1: Batch fetch today's candle via clist API (~17s)
-        # ═══════════════════════════════════════════════════════════
         http = requests.Session()
         http.headers["User-Agent"] = "Mozilla/5.0"
         adapter = HTTPAdapter(pool_connections=4, pool_maxsize=4)
         http.mount("https://", adapter)
+        http.mount("http://", adapter)
 
-        logger.info("sync_candles: Phase 1 — fetching today's candles via clist batch API")
-        clist_rows = _fetch_today_candles_clist(http)
-        logger.info("sync_candles: clist returned %d stocks for %s", len(clist_rows), today_str)
-
-        # Upsert today's candles in bulk
+        # Upsert SQL (include enriched fields when available)
         upsert_sql = text(
-            "INSERT INTO daily_candles (code, trade_date, open, high, low, close, volume) "
-            "VALUES (:code, :trade_date, :open, :high, :low, :close, :volume) "
+            "INSERT INTO daily_candles (code, trade_date, open, high, low, close, volume, "
+            "amount, change_pct, change_amt, turnover_rate) "
+            "VALUES (:code, :trade_date, :open, :high, :low, :close, :volume, "
+            ":amount, :change_pct, :change_amt, :turnover_rate) "
             "ON CONFLICT (code, trade_date) DO UPDATE SET "
             "open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low, "
-            "close=EXCLUDED.close, volume=EXCLUDED.volume"
+            "close=EXCLUDED.close, volume=EXCLUDED.volume, "
+            "amount=COALESCE(EXCLUDED.amount, daily_candles.amount), "
+            "change_pct=COALESCE(EXCLUDED.change_pct, daily_candles.change_pct), "
+            "change_amt=COALESCE(EXCLUDED.change_amt, daily_candles.change_amt), "
+            "turnover_rate=COALESCE(EXCLUDED.turnover_rate, daily_candles.turnover_rate)"
         )
-
-        if clist_rows:
-            # Write in chunks of 5000
-            for i in range(0, len(clist_rows), 5000):
-                chunk = clist_rows[i:i+5000]
-                with _get_session() as s:
-                    s.execute(upsert_sql, chunk)
-                    s.commit()
-            logger.info("sync_candles: Phase 1 done — %d today candles written", len(clist_rows))
-
-        _update_task_progress(task_id, len(clist_rows), len(codes))
+        _extra_keys = ("amount", "change_pct", "change_amt", "turnover_rate")
+        def _pad_row(r):
+            for k in _extra_keys:
+                r.setdefault(k, None)
+            return r
 
         # ═══════════════════════════════════════════════════════════
-        # Phase 2: Backfill stocks that have NO history at all
+        # Detect stocks needing backfill (no data or stale >7 days)
         # ═══════════════════════════════════════════════════════════
         need_backfill: list[tuple[str, str]] = []
+        gap_fill_count = 0
         for code in codes:
             last = latest_map.get(code)
             if not last:
-                # No cached data at all — need full history
                 need_backfill.append((code, default_beg))
+            elif str(last) < cutoff:
+                next_day = (_date.fromisoformat(str(last)) + timedelta(days=1)).strftime("%Y%m%d")
+                need_backfill.append((code, next_day))
+                gap_fill_count += 1
 
         total_backfill = len(need_backfill)
         if total_backfill == 0:
             http.close()
             _finish_task(task_id, len(codes), len(codes))
-            logger.info("sync_candles: done — all stocks up-to-date, no backfill needed")
+            logger.info("sync_candles: done — all %d stocks up-to-date (cutoff=%s)", len(codes), cutoff)
             return task_id
 
-        logger.info("sync_candles: Phase 2 — backfilling %d stocks with no history", total_backfill)
+        logger.info("sync_candles: backfilling %d stocks (%d new, %d gap-fill, cutoff=%s)",
+                     total_backfill, total_backfill - gap_fill_count, gap_fill_count, cutoff)
 
         # Per-stock fetch for backfill (keep existing throttled approach)
         _WORKERS = 8
@@ -1750,7 +1778,7 @@ def sync_candles(days: int = 365, _task_id: int = None) -> int:
                 # Flush to DB in batches
                 if len(all_rows) >= 10000:
                     with _get_session() as s:
-                        s.execute(upsert_sql, all_rows)
+                        s.execute(upsert_sql, [_pad_row(r) for r in all_rows])
                         s.commit()
                     logger.info("sync_candles: flushed %d backfill rows to DB", len(all_rows))
                     all_rows = []
@@ -1758,7 +1786,7 @@ def sync_candles(days: int = 365, _task_id: int = None) -> int:
                 # Update progress periodically
                 done = i + 1
                 if done % 200 == 0 or done == total_backfill:
-                    _update_task_progress(task_id, len(clist_rows) + processed, len(codes))
+                    _update_task_progress(task_id, processed, len(codes))
                     logger.info(
                         "sync_candles backfill: %d/%d (ok=%d, nodata=%d, err=%d)",
                         done, total_backfill, processed, no_data, errors,
@@ -1767,14 +1795,14 @@ def sync_candles(days: int = 365, _task_id: int = None) -> int:
         # Final flush
         if all_rows:
             with _get_session() as s:
-                s.execute(upsert_sql, all_rows)
+                s.execute(upsert_sql, [_pad_row(r) for r in all_rows])
                 s.commit()
             logger.info("sync_candles: flushed final %d backfill rows to DB", len(all_rows))
 
         http.close()
-        _finish_task(task_id, len(clist_rows) + processed, len(codes))
-        logger.info("sync_candles: done — clist=%d, backfill=%d/%d (nodata=%d, errors=%d)",
-                     len(clist_rows), processed, total_backfill, no_data, errors)
+        _finish_task(task_id, processed, len(codes))
+        logger.info("sync_candles: done — backfill=%d/%d (nodata=%d, errors=%d, gap_fill=%d)",
+                     processed, total_backfill, no_data, errors, gap_fill_count)
     except Exception as e:
         logger.error("sync_candles error: %s", e, exc_info=True)
         _finish_task(task_id, 0, 0, str(e))

@@ -127,7 +127,7 @@ def _cache_save(code: str, candles: list[Candle]) -> None:
     with Session(_sync_engine) as session:
         is_pg = str(_sync_engine.url).startswith("postgresql")
         if is_pg:
-            # PostgreSQL: use ON CONFLICT upsert
+            # PostgreSQL: use ON CONFLICT upsert, preserve enriched fields
             sql = text(
                 "INSERT INTO daily_candles (code, trade_date, open, high, low, close, volume) "
                 "VALUES (:code, :trade_date, :open, :high, :low, :close, :volume) "
