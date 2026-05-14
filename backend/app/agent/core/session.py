@@ -83,6 +83,24 @@ async def create_session(title: str | None, provider: str, model: str) -> str:
     return sid
 
 
+async def update_session_llm(sid: str, provider: str | None, model: str | None) -> None:
+    _ensure_init()
+    parts, params = [], {"id": sid}
+    if provider:
+        parts.append("llm_provider = :p")
+        params["p"] = provider
+    if model:
+        parts.append("llm_model = :m")
+        params["m"] = model
+    if not parts:
+        return
+    async with _Session() as s:
+        await s.execute(text(
+            f"UPDATE agent_sessions SET {', '.join(parts)}, updated_at = NOW() WHERE id = :id"
+        ), params)
+        await s.commit()
+
+
 async def list_sessions(limit: int = 50) -> list[dict]:
     _ensure_init()
     async with _Session() as s:  # type: ignore[misc]

@@ -59,28 +59,28 @@ SCREENER_CONFIG: dict[str, ModelConfig] = {
     # ─── New patterns (high-RR, US growth-stock playbooks) ───
     "stage2_breakout": ModelConfig(
         label="Stage 2 突破",
-        min_candles=180,        # need ~9 months of data
+        min_candles=250,        # ~1 year for stable 30W MA slope
         max_dist_support_pct=8.0,
         min_support_score=40,
         min_total_score=60,
     ),
     "vcp": ModelConfig(
         label="VCP 波动收缩",
-        min_candles=120,
+        min_candles=200,        # ~10 months for proper base + contractions
         max_dist_support_pct=5.0,
         min_support_score=40,
         min_total_score=60,
     ),
     "pivot_breakout": ModelConfig(
         label="Pivot 点突破",
-        min_candles=120,
+        min_candles=180,        # ~9 months
         max_dist_support_pct=6.0,
         min_support_score=40,
         min_total_score=60,
     ),
     "cup_handle": ModelConfig(
         label="杯柄形态",
-        min_candles=180,        # cup typically spans 7-30 weeks
+        min_candles=300,        # ~15 months (US standard: cup spans 7-65 weeks)
         max_dist_support_pct=6.0,
         min_support_score=40,
         min_total_score=60,
@@ -91,6 +91,13 @@ SCREENER_CONFIG: dict[str, ModelConfig] = {
         max_dist_support_pct=10.0,
         min_support_score=30,
         min_total_score=65,
+    ),
+    "volume_breakout_resistance": ModelConfig(
+        label="放量突破压力位",
+        min_candles=120,
+        max_dist_support_pct=15.0,
+        min_support_score=0,
+        min_total_score=55,
     ),
 }
 
@@ -143,7 +150,7 @@ def get_sr_context(code: str, candles: list[Candle], price: float, weekly_candle
     res_price = None
 
     try:
-        levels = detect_levels_multifactor(candles, lookback=min(len(candles), 120))
+        levels = detect_levels_multifactor(candles, lookback=min(len(candles), 250))
         supports = [lv for lv in levels if lv.kind == "support" and lv.price < price]
         resistances = [lv for lv in levels if lv.kind == "resistance" and lv.price > price]
 
@@ -1952,6 +1959,201 @@ def detect_trend_strong(code: str, name: str, candles: list[Candle],
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Model: volume_breakout_resistance (放量突破压力位)
+# ─────────────────────────────────────────────────────────────────────
+
+def detect_volume_breakout_resistance(
+    code: str, name: str, candles: list[Candle],
+    weekly_candles: list[Candle] | None = None,
+) -> ScreenerItem | None:
+    """Detect stocks that just broke above a key resistance level on heavy volume.
+
+    Logic:
+    1. Compute SR levels using *yesterday's* close so resistance levels
+       that were overhead are still classified as resistance.
+    2. Check if the latest close crossed above one of those resistance levels.
+    3. Require volume ≥ 1.5× the 20-day average (放量确认).
+    4. Score based on resistance strength, volume ratio, MA alignment,
+       breakout magnitude, and weekly trend.
+    """
+    cfg = SCREENER_CONFIG["volume_breakout_resistance"]
+    if not cfg.enabled or len(candles) < cfg.min_candles:
+        return None
+
+    closes = [c.close for c in candles]
+    highs = [c.high for c in candles]
+    volumes = [c.volume for c in candles]
+    cur = closes[-1]
+    prev_close = closes[-2]
+    n = len(candles)
+
+    # ── 1) Find resistance levels using yesterday's close ──
+    try:
+        levels = detect_levels_multifactor(candles[:-1], lookback=min(n - 1, 250))
+    except Exception:
+        return None
+
+    resistances = [
+        lv for lv in levels
+        if lv.kind == "resistance" and lv.price > prev_close * 0.99
+    ]
+    if not resistances:
+        return None
+
+    # Sort by price ascending → find the nearest STRONG resistance that was just broken
+    # Only consider resistances with score ≥ 50; weak ones are not meaningful breakouts
+    resistances.sort(key=lambda lv: lv.price)
+    broken = None
+    for r in resistances:
+        if r.score < 50:
+            continue  # skip weak resistance
+        # Today's close above resistance, yesterday's close was below or near
+        if cur >= r.price and prev_close < r.price * 1.005:
+            broken = r
+            break  # first (nearest) strong broken resistance
+
+    if broken is None:
+        return None
+
+    # ── 2) Volume surge: today's volume ≥ 1.5× 20-day average ──
+    if n < 22:
+        return None
+    avg_vol_20 = float(np.mean(volumes[-21:-1]))
+    if avg_vol_20 <= 0:
+        return None
+    vol_ratio = float(volumes[-1] / avg_vol_20)
+    if vol_ratio < 1.5:
+        return None
+
+    # ── 3) Not a gap-up dump (last bar must close in upper half of range) ──
+    last = candles[-1]
+    bar_range = last.high - last.low
+    if bar_range > 0 and (last.close - last.low) / bar_range < 0.35:
+        return None  # closed near low → suspect
+
+    # ── 4) Big red candle filter ──
+    last_pct = (last.close - last.open) / max(last.open, 1)
+    if last_pct < -0.02:
+        return None
+
+    # ── 5) MA context ──
+    ma5 = sum(closes[-5:]) / 5
+    ma10 = sum(closes[-10:]) / 10
+    ma20 = sum(closes[-20:]) / 20
+    ma_aligned = ma5 >= ma10 >= ma20
+    above_ma20 = cur > ma20
+
+    # ── 6) Weekly trend ──
+    wtrend = _weekly_trend_context(weekly_candles)
+    weekly_down = wtrend["direction"] == "down"
+
+    # ── 7) Breakout magnitude ──
+    breakout_pct = (cur - broken.price) / broken.price
+
+    # ── 8) Support below (nice to have) ──
+    supports = [lv for lv in levels if lv.kind == "support" and lv.price < cur]
+    sup_price = max(supports, key=lambda lv: lv.price).price if supports else None
+    sup_score_val = max(supports, key=lambda lv: lv.price).score if supports else 0
+
+    # ── Scoring ──
+    triggers: list[str] = []
+
+    # Resistance strength (0-25): stronger resistance = more significant breakout
+    res_strength = min(broken.score, 100)
+    score_resistance = res_strength * 0.25
+    triggers.append(f"突破压力位 {broken.price:.2f}（强度{res_strength:.0f}）")
+
+    # Volume component (0-25)
+    score_volume = min((vol_ratio - 1.0) * 20, 25)
+    triggers.append(f"放量{vol_ratio:.1f}倍（当日/20日均量）")
+
+    # Breakout magnitude (0-15): 1-5% sweet spot
+    if breakout_pct >= 0.05:
+        score_breakout = 12
+    elif breakout_pct >= 0.02:
+        score_breakout = 15
+    elif breakout_pct >= 0.005:
+        score_breakout = 10
+    else:
+        score_breakout = 5
+    triggers.append(f"突破幅度 {breakout_pct * 100:.1f}%")
+
+    # MA alignment (0-15)
+    if ma_aligned:
+        score_ma = 15
+        triggers.append(f"均线多头排列 MA5({ma5:.2f})>MA10({ma10:.2f})>MA20({ma20:.2f})")
+    elif above_ma20:
+        score_ma = 8
+        triggers.append(f"站上MA20({ma20:.2f})")
+    else:
+        score_ma = 0
+
+    # Weekly trend (0-10)
+    if wtrend["direction"] == "up":
+        weekly_bonus = 10
+        triggers.append("周线趋势向上")
+    elif not weekly_down:
+        weekly_bonus = 5
+    else:
+        weekly_bonus = 0
+
+    # Support safety net (0-10)
+    if sup_price and sup_price > cur * 0.9:
+        score_support = min(sup_score_val * 0.10, 10)
+        triggers.append(f"下方支撑 {sup_price:.2f}")
+    else:
+        score_support = 0
+
+    # ── 9) Check room to next STRONG resistance ──
+    # Only consider resistances with score ≥ 50 as real blockers;
+    # weak ones (< 50) are easily broken and shouldn't block the signal.
+    next_res_strong = [lv for lv in resistances if lv.price > cur and lv.score >= 50]
+    next_res = [lv for lv in resistances if lv.price > cur]
+    blocker = next_res_strong[0] if next_res_strong else None
+    if blocker:
+        room_pct = (blocker.price - cur) / cur
+        if room_pct < 0.01:
+            return None
+        elif room_pct < 0.03:
+            score_room = -15
+            triggers.append(f"⚠ 距强压力位 {blocker.price:.2f}（{blocker.score:.0f}分）仅 {room_pct*100:.1f}%")
+        elif room_pct < 0.05:
+            score_room = -5
+            triggers.append(f"距强压力位 {blocker.price:.2f}（{room_pct*100:.1f}%）")
+        else:
+            score_room = 5
+            triggers.append(f"上方空间至 {blocker.price:.2f}（{room_pct*100:.1f}%）")
+    else:
+        score_room = 10
+        triggers.append("上方无强压力位")
+
+    total_score = score_resistance + score_volume + score_breakout + score_ma + weekly_bonus + score_support + score_room
+    total_score = round(min(max(total_score, 0), 100), 1)
+    if total_score < cfg.min_total_score:
+        return None
+
+    # ── Result ──
+    change_pct = (cur / prev_close - 1) * 100
+    stop = sup_price * 0.98 if sup_price else broken.price * 0.97
+    target = next_res[0].price if next_res else cur * 1.10
+    rr = _rr_ratio(cur, stop, target)
+    dist_pct = (cur - stop) / stop * 100 if stop > 0 else 0
+
+    return ScreenerItem(
+        code=code, name=name, pattern="volume_breakout_resistance",
+        score=total_score, price=round(cur, 2),
+        change_pct=round(change_pct, 2),
+        volume_ratio=round(vol_ratio, 2),
+        breakout_price=round(broken.price, 2),
+        pullback_price=round(sup_price, 2) if sup_price else None,
+        distance_to_support_pct=round(dist_pct, 2),
+        triggers=triggers,
+        rr_ratio=round(rr, 2),
+        support_score=round(sup_score_val, 1),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Registry
 # ─────────────────────────────────────────────────────────────────────
 
@@ -1966,6 +2168,7 @@ PATTERN_DETECTORS = {
     "ma_support": detect_ma_support,
     "volume_shrink_consolidation": detect_volume_shrink_consolidation,
     "trend_strong": detect_trend_strong,
+    "volume_breakout_resistance": detect_volume_breakout_resistance,
 }
 
 MODEL_LABELS = {
@@ -1979,4 +2182,5 @@ MODEL_LABELS = {
     "ma_support": "均线支撑",
     "volume_shrink_consolidation": "缩量整理",
     "trend_strong": "强势趋势",
+    "volume_breakout_resistance": "放量突破压力位",
 }

@@ -12,8 +12,15 @@ from __future__ import annotations
 import logging
 import time
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
+
+_CN_TZ = ZoneInfo("Asia/Shanghai")
+
+def _now_cn() -> datetime:
+    """Return current time in Beijing timezone (CST, UTC+8)."""
+    return datetime.now(_CN_TZ)
 
 from sqlalchemy import select, delete, text, func, Numeric
 from sqlalchemy.orm import Session
@@ -2422,10 +2429,10 @@ def _candles_are_stale() -> bool:
     """
     from datetime import date as _date, timedelta
     from sqlalchemy import func as sa_func
-    now = datetime.now()
+    now = _now_cn()
 
-    # 期望的"最近交易日"
-    today = _date.today()
+    # 期望的"最近交易日" (北京时间)
+    today = now.date()
     if now.weekday() >= 5:
         # 周末: 上周五
         expected_latest = today - timedelta(days=now.weekday() - 4)
@@ -2473,7 +2480,7 @@ def _suggest_sync_days() -> int:
     """
     from datetime import date as _date, timedelta
     from sqlalchemy import func as sa_func
-    today = _date.today()
+    today = _now_cn().date()
     try:
         with _get_session() as s:
             latest = s.execute(select(sa_func.max(DailyCandle.trade_date))).scalar()
@@ -2491,8 +2498,8 @@ def _suggest_sync_days() -> int:
 
 
 def _is_market_hours() -> bool:
-    """Return True if current time is during A-share trading hours (9:30-15:00 weekdays)."""
-    now = datetime.now()
+    """Return True if current time is during A-share trading hours (9:30-15:00 weekdays, Beijing time)."""
+    now = _now_cn()
     if now.weekday() >= 5:  # Saturday/Sunday
         return False
     t = now.hour * 100 + now.minute
@@ -2528,31 +2535,27 @@ def run_screener(_task_id: int = None, pattern: str | None = None):
     # Clear SR cache before scan (each stock gets computed once)
     clear_sr_cache()
 
-    # Auto-sync: sync_quotes now handles both today's data AND gap backfill
-    intraday = _is_market_hours()
+    # Auto-sync: always sync quotes to get latest data (both intraday and after-hours)
     quote_map: dict[str, dict] = {}
-    if _candles_are_stale() or intraday:
-        logger.info("screener: syncing quotes (includes auto-backfill if gaps exist)...")
-        sync_quotes()
-        logger.info("screener: sync done")
-        # Batch load today's candles into memory
-        from datetime import date as _date
-        today = _date.today().strftime("%Y-%m-%d")
-        with _get_session() as s:
-            rows = s.execute(
-                select(DailyCandle).where(DailyCandle.trade_date == today)
-            ).scalars().all()
-            for q in rows:
-                if q.close and q.close > 0 and q.open and q.open > 0:
-                    quote_map[q.code] = {
-                        "open": q.open, "high": q.high, "low": q.low,
-                        "close": q.close, "volume": q.volume or 0,
-                    }
-        logger.info("screener: loaded %d live quotes, starting scan", len(quote_map))
-    else:
-        logger.info("screener: after hours, using cached candles")
+    logger.info("screener: syncing quotes to ensure latest data...")
+    sync_quotes()
+    logger.info("screener: sync done")
+    # Batch load today's candles into memory
+    from datetime import date as _date
+    today = _date.today().strftime("%Y-%m-%d")
+    with _get_session() as s:
+        rows = s.execute(
+            select(DailyCandle).where(DailyCandle.trade_date == today)
+        ).scalars().all()
+        for q in rows:
+            if q.close and q.close > 0 and q.open and q.open > 0:
+                quote_map[q.code] = {
+                    "open": q.open, "high": q.high, "low": q.low,
+                    "close": q.close, "volume": q.volume or 0,
+                }
+    logger.info("screener: loaded %d live quotes, starting scan", len(quote_map))
 
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = _now_cn().strftime("%Y-%m-%d")
 
     cache_dir = _os.path.join(
         _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))),
@@ -2589,7 +2592,7 @@ def run_screener(_task_id: int = None, pattern: str | None = None):
     _update_task_progress(task_id, 0, total_work)
 
     def _get_candles_with_live(code: str) -> list[Candle]:
-        candles = get_candles(code, days=180)
+        candles = get_candles(code, days=365)
         if not candles:
             return []
         live = quote_map.get(code)
@@ -2667,7 +2670,7 @@ def run_screener(_task_id: int = None, pattern: str | None = None):
             "pattern": pat,
             "total": len(items),
             "scanned": len(universe),
-            "scanned_at": datetime.now().isoformat(),
+            "scanned_at": _now_cn().isoformat(),
             "items": [
                 {
                     "code": it.code, "name": it.name, "pattern": it.pattern,
@@ -2689,7 +2692,7 @@ def run_screener(_task_id: int = None, pattern: str | None = None):
         path = _os.path.join(cache_dir, f"{pat}.json")
         with open(path, "w") as f:
             _json.dump(result, f, ensure_ascii=False)
-        ts = datetime.now().strftime("%Y%m%d_%H%M")
+        ts = _now_cn().strftime("%Y%m%d_%H%M")
         hist_path = _os.path.join(cache_dir, f"{pat}_{ts}.json")
         with open(hist_path, "w") as f:
             _json.dump(result, f, ensure_ascii=False)

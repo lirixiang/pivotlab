@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { StockDetail } from "../types";
 import { ChartCanvas } from "./ChartCanvas";
 import { FinancialHistoryPanel } from "./FinancialHistoryPanel";
@@ -13,6 +13,9 @@ type Props = {
   isWatched?: boolean;
   onToggleWatch?: () => void;
   minScore?: number;
+  onAIAnalyze?: (prompt: string, imageData?: string) => void;
+  autoTriggerAI?: boolean;
+  onAutoTriggerConsumed?: () => void;
 };
 
 const PERIODS = ["日线", "周线", "月线", "季线"];
@@ -41,7 +44,8 @@ function statusLabel(s: string) {
   return "待同步";
 }
 
-export function ChartWorkspace({ data, loading, period, onPeriodChange, refreshing, onRefresh, isWatched, onToggleWatch, minScore = 80 }: Props) {
+export function ChartWorkspace({ data, loading, period, onPeriodChange, refreshing, onRefresh, isWatched, onToggleWatch, minScore = 80, onAIAnalyze, autoTriggerAI, onAutoTriggerConsumed }: Props) {
+  const chartAreaRef = useRef<HTMLDivElement>(null);
   const q = data?.quote;
   const up = (q?.change_pct ?? 0) >= 0;
   const f = q?.fundamentals;
@@ -50,6 +54,23 @@ export function ChartWorkspace({ data, loading, period, onPeriodChange, refreshi
   const [showRes, setShowRes] = useState(true);
   const [showSup, setShowSup] = useState(true);
   const [showVP, setShowVP] = useState(false);
+
+  // Auto-fire AI analysis when triggered from outside (e.g. from Screener page)
+  const firedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!autoTriggerAI || !onAIAnalyze || !data) return;
+    const code = data.quote?.code;
+    if (!code || firedRef.current === code) return;
+    // Wait one tick for canvas to be drawn
+    const t = setTimeout(() => {
+      const canvas = chartAreaRef.current?.querySelector("canvas");
+      const imageData = canvas?.toDataURL("image/png");
+      firedRef.current = code;
+      onAIAnalyze("", imageData);
+      onAutoTriggerConsumed?.();
+    }, 350);
+    return () => clearTimeout(t);
+  }, [autoTriggerAI, data, onAIAnalyze, onAutoTriggerConsumed]);
   return (
     <section className="bg-ink-950 flex flex-col flex-1">
       {/* ─── Header row 1: stock info + price + change ─── */}
@@ -132,6 +153,22 @@ export function ChartWorkspace({ data, loading, period, onPeriodChange, refreshi
 
         <div className="flex-1" />
 
+        {onAIAnalyze && (
+          <button
+            className="px-3 py-1.5 rounded-md bg-amber-500/10 ring-1 ring-amber-500/20 text-[12px] text-amber-400 hover:bg-amber-500/20 hover:text-amber-300 flex items-center gap-1.5 transition"
+            onClick={() => {
+              // Capture K-line canvas as base64
+              const canvas = chartAreaRef.current?.querySelector("canvas");
+              const imageData = canvas?.toDataURL("image/png");
+              onAIAnalyze("", imageData);
+            }}
+            title="用 AI 分析当前股票（含K线截图）"
+          >
+            <i className="fas fa-robot text-[11px]" />
+            AI 分析
+          </button>
+        )}
+
         <button
           className="px-3 py-1.5 rounded-md bg-ink-800 ring-soft text-[12px] text-ink-200 hover:text-white flex items-center gap-1.5 disabled:opacity-50"
           onClick={onRefresh}
@@ -146,7 +183,7 @@ export function ChartWorkspace({ data, loading, period, onPeriodChange, refreshi
       {/* ─── Main content: chart + side panel ─── */}
       <div className="flex flex-1 overflow-hidden">
         {/* Chart area */}
-        <div className="relative flex-1 px-5 pt-4 pb-2 overflow-hidden">
+        <div ref={chartAreaRef} className="relative flex-1 px-5 pt-4 pb-2 overflow-hidden">
           {loading || !data ? (
             <div className="h-[560px] flex items-center justify-center text-ink-500 text-sm">
               <i className="fas fa-circle-notch fa-spin mr-2" /> 正在加载行情与画线...

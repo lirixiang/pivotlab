@@ -144,11 +144,12 @@ class Agent:
         state: AgentState,
         user_input: str,
         approval_inbox: "ApprovalInbox",
+        images: list[str] | None = None,
     ) -> AsyncIterator[Any]:
         """Drive a single user turn. Yields events; consumer awaits each."""
         await self._ensure_system(state)
 
-        user_msg = Message(role="user", content=user_input)
+        user_msg = Message(role="user", content=user_input, images=images or [])
         state.messages.append(user_msg)
         await session_db.append_message(state.session_id, user_msg)
 

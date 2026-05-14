@@ -406,7 +406,7 @@ def _scan_watchlist_patterns_sync(items: list[tuple[str, str]]) -> dict:
     scanned = 0
     for code, name in items:
         try:
-            candles = get_candles(code, days=180)
+            candles = get_candles(code, days=365)
             if not candles or len(candles) < 120:
                 continue
             try:

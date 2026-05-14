@@ -131,7 +131,7 @@ export function WatchlistPanel({
   };
 
   return (
-    <aside className="border-r border-ink-700 bg-ink-900 flex flex-col h-full">
+    <aside className="border-r border-ink-700 bg-ink-900 flex flex-col min-h-0">
       <div className="p-3 pb-0 border-b border-ink-800">
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2">

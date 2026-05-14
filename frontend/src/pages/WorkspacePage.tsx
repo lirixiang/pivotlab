@@ -8,9 +8,15 @@ import type { StockDetail, SrFactor } from "../types";
 export function WorkspacePage({
   code,
   onSelect,
+  onAIAnalyze,
+  pendingAnalyze,
+  onConsumePending,
 }: {
   code: string;
   onSelect: (c: string) => void;
+  onAIAnalyze?: (prompt: string, images?: string[]) => void;
+  pendingAnalyze?: { code: string; extra: string } | null;
+  onConsumePending?: () => void;
 }) {
   const [period, setPeriod] = useState("日线");
   const [data, setData] = useState<StockDetail | null>(null);
@@ -140,12 +146,12 @@ export function WorkspacePage({
 
   return (
     <main
-      className="grid flex-1"
-      style={{ gridTemplateColumns: "280px 1fr 340px", minHeight: "calc(100vh - 84px)" }}
+      className="grid flex-1 overflow-hidden"
+      style={{ gridTemplateColumns: "280px 1fr 340px", height: "calc(100vh - 84px)" }}
     >
       <WatchlistPanel activeCode={code} onSelect={onSelect} refreshKey={watchRefreshKey} />
 
-      <div className="flex flex-col">
+      <div className="flex flex-col min-h-0 overflow-hidden">
         <ChartWorkspace
           data={data}
           loading={loading}
@@ -156,10 +162,65 @@ export function WorkspacePage({
           isWatched={watchedCodes.has(code)}
           onToggleWatch={toggleWatch}
           minScore={minScore}
+          autoTriggerAI={!!(pendingAnalyze && pendingAnalyze.code === code && data && !loading)}
+          onAutoTriggerConsumed={onConsumePending}
+          onAIAnalyze={onAIAnalyze ? (_unused: string, imageData?: string) => {
+            if (!data) return;
+            const q = data.quote;
+            const candles = data.candles;
+            const levels = data.levels;
+            // Build summary of 1-year K-line data
+            const recent20 = candles.slice(-20);
+            const high = Math.max(...candles.map(c => c.high));
+            const low = Math.min(...candles.map(c => c.low));
+            const avgVol = candles.length ? Math.round(candles.reduce((s, c) => s + c.volume, 0) / candles.length) : 0;
+            const ma = (n: number) => {
+              const s = candles.slice(-n);
+              return s.length >= n ? (s.reduce((a, c) => a + c.close, 0) / n).toFixed(2) : "N/A";
+            };
+            const srText = levels.slice(0, 10).map(l => `${l.price.toFixed(2)}(${l.kind},得分${l.score ?? "-"})`).join(", ");
+            const recentText = recent20.map(c => `${c.date}:O${c.open} H${c.high} L${c.low} C${c.close} V${c.volume}`).join("\n");
+            // Fundamentals & concepts
+            const f = q.fundamentals;
+            const fundText = f ? `EPS(TTM)=${f.eps_ttm ?? "N/A"}, ROE=${f.roe ?? "N/A"}, 营收同比=${f.revenue_yoy ?? "N/A"}%, 净利同比=${f.net_profit_yoy ?? "N/A"}%, ${f.fundamental_summary ?? ""}` : "无";
+            const conceptsText = q.concepts?.join(", ") || "无";
+            const ac = q.analyst_consensus;
+            const analystText = ac ? `目标价=${ac.consensus_target ?? "N/A"}, 分析师${ac.analyst_count}人, 买入${ac.buy_count}/增持${ac.overweight_count}/中性${ac.neutral_count}` : "无";
+            const prompt = `请对以下股票进行深度技术分析和投资建议：
+
+【基本信息】
+代码: ${q.code} | 名称: ${q.name} | 行业: ${q.industry || "未知"}
+现价: ${q.price} | 涨跌幅: ${q.change_pct}%
+
+【K线概览】(共${candles.length}根K线)
+区间最高: ${high} | 区间最低: ${low}
+MA10=${ma(10)} | MA20=${ma(20)} | MA50=${ma(50)} | MA120=${ma(120)} | MA250=${ma(250)}
+平均成交量: ${avgVol}
+
+【近20日明细】
+${recentText}
+
+【关键支撑/压力位】
+${srText || "无"}
+
+【基本面】
+${fundText}
+
+【概念板块】${conceptsText}
+【机构共识】${analystText}
+
+${imageData ? "上方附有该股票的K线截图，请结合图表形态一并分析。\n\n" : ""}${
+  pendingAnalyze && pendingAnalyze.code === code && pendingAnalyze.extra
+    ? `\n\u3010选股器信号】\n${pendingAnalyze.extra}\n\n`
+    : ""
+}请分析：1)当前趋势和位置 2)关键支撑压力位分析 3)量价关系 4)基本面评估 5)综合建议和风险提示`;
+            const images = imageData ? [imageData] : undefined;
+            onAIAnalyze(prompt, images);
+          } : undefined}
         />
       </div>
 
-      <aside className="border-l border-ink-700 bg-ink-900 flex flex-col overflow-y-auto scrollbar">
+      <aside className="border-l border-ink-700 bg-ink-900 flex flex-col overflow-y-auto scrollbar min-h-0">
         <LevelsPanel levels={data?.levels ?? []} price={data?.quote.price ?? 0} />
 
         <div className="p-4 border-b border-ink-800">

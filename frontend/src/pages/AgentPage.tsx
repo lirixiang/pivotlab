@@ -104,10 +104,25 @@ function jsonPreview(obj: unknown): string {
 }
 
 // ── Main Component ──
-export function AgentPage() {
+// ── URL param helpers ──
+function getUrlParam(key: string): string {
+  return new URLSearchParams(window.location.search).get(key) || "";
+}
+function setUrlParams(params: Record<string, string>) {
+  const u = new URL(window.location.href);
+  for (const [k, v] of Object.entries(params)) {
+    if (v) u.searchParams.set(k, v); else u.searchParams.delete(k);
+  }
+  const target = u.pathname + u.search;
+  if (window.location.pathname + window.location.search !== target) {
+    window.history.replaceState(null, "", target);
+  }
+}
+
+export function AgentPage({ initialPrompt, initialImages, onConsumedPrompt }: { initialPrompt?: string; initialImages?: string[]; onConsumedPrompt?: () => void }) {
   const [providers, setProviders] = useState<Provider[]>([]);
-  const [provider, setProvider] = useState("");
-  const [model, setModel] = useState("");
+  const [provider, setProvider] = useState(() => getUrlParam("provider"));
+  const [model, setModel] = useState(() => getUrlParam("model"));
   const [sessions, setSessions] = useState<Session[]>([]);
   const [searchQ, setSearchQ] = useState("");
   const [sid, setSid] = useState<string | null>(null);
@@ -150,8 +165,21 @@ export function AgentPage() {
       setProviders(d.providers);
       const avail = d.providers.filter((p: Provider) => p.available);
       if (avail.length) {
-        setProvider(d.default_provider || avail[0].provider);
-        setModel(d.default_model || avail[0].default_model);
+        // Restore from URL params, fallback to server default
+        const urlP = getUrlParam("provider");
+        const urlM = getUrlParam("model");
+        const matchP = urlP && avail.find((a: Provider) => a.provider === urlP);
+        let finalP: string, finalM: string;
+        if (matchP) {
+          finalP = urlP;
+          finalM = matchP.models.includes(urlM) ? urlM : matchP.default_model;
+        } else {
+          finalP = d.default_provider || avail[0].provider;
+          finalM = d.default_model || avail[0].default_model;
+        }
+        setProvider(finalP);
+        setModel(finalM);
+        setUrlParams({ provider: finalP, model: finalM });
       }
       setConnected(true);
     }).catch(() => setConnected(false));
@@ -174,7 +202,7 @@ export function AgentPage() {
     return () => clearTimeout(t);
   }, [searchQ, loadSessions]);
 
-  // Provider change → update model list
+  // Provider change → update model list + sync to active session
   const curProvider = providers.find(p => p.provider === provider);
   useEffect(() => {
     if (curProvider && !curProvider.models.includes(model)) {
@@ -182,10 +210,27 @@ export function AgentPage() {
     }
   }, [provider, curProvider]);
 
-  // Open session → load history
+  // Sync provider/model to active session when changed
+  useEffect(() => {
+    if (sid && provider) {
+      fetch(`/api/agent/sessions/${sid}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider, model }),
+      }).catch(() => {});
+    }
+  }, [sid, provider, model]);
+
+  // Open session → load history and restore provider/model
   const openSession = useCallback(async (id: string) => {
     setSid(id);
     setTotalTokens(0);
+    // Restore provider/model from session metadata
+    const meta = sessions.find(s => s.id === id);
+    if (meta) {
+      if (meta.llm_provider) setProvider(meta.llm_provider);
+      if (meta.llm_model) setModel(meta.llm_model);
+    }
     try {
       const d = await fetch(`/api/agent/sessions/${id}/messages`).then(r => r.json());
       const msgs: Msg[] = (d.messages || []).filter((m: Msg) => m.role !== "system");
@@ -229,9 +274,14 @@ export function AgentPage() {
   }, [provider, model, loadSessions]);
 
   // Send message via SSE
-  const send = useCallback(async (text?: string) => {
+  const [pendingImages, setPendingImages] = useState<string[]>([]);
+  const send = useCallback(async (text?: string, images?: string[]) => {
     const msg = (text || input).trim();
     if (!msg || running) return;
+
+    // Consume pending images if any
+    const imgs = images || (pendingImages.length ? pendingImages : undefined);
+    setPendingImages([]);
 
     // Auto-create session if none
     let currentSid = sid;
@@ -247,20 +297,26 @@ export function AgentPage() {
     }
 
     setInput("");
+    // Reset textarea height after clearing
+    if (inputRef.current) {
+      inputRef.current.style.height = "auto";
+    }
     setRunning(true);
     setStreaming(false);
     setStreamBuf("");
     setThinkBuf("");
-    setItems(prev => [...prev, { type: "user", text: msg }]);
+    setItems(prev => [...prev, { type: "user", text: msg, images: imgs }]);
 
     const abort = new AbortController();
     abortRef.current = abort;
 
     try {
+      const body: Record<string, unknown> = { text: msg };
+      if (imgs?.length) body.images = imgs;
       const resp = await fetch(`/api/agent/chat/${currentSid}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: msg }),
+        body: JSON.stringify(body),
         signal: abort.signal,
       });
 
@@ -418,7 +474,30 @@ export function AgentPage() {
       setStreaming(false);
       abortRef.current = null;
     }
-  }, [input, running, sid, provider, model, loadSessions]);
+  }, [input, running, sid, provider, model, loadSessions, pendingImages]);
+
+  // Pre-fill input from K-line page "AI分析" button (don't auto-send)
+  const initialFilled = useRef(false);
+  useEffect(() => {
+    if (initialPrompt && !initialFilled.current) {
+      initialFilled.current = true;
+      setInput(initialPrompt);
+      // Store images for when user hits send
+      if (initialImages?.length) {
+        setPendingImages(initialImages);
+      }
+      onConsumedPrompt?.();
+      // Auto-resize textarea after React flushes the new value
+      setTimeout(() => {
+        if (inputRef.current) {
+          inputRef.current.style.height = "auto";
+          inputRef.current.style.height = Math.min(inputRef.current.scrollHeight, 400) + "px";
+          inputRef.current.focus();
+          inputRef.current.scrollTop = 0;
+        }
+      }, 50);
+    }
+  }, [initialPrompt]);
 
   // Cancel
   const cancel = useCallback(async () => {
@@ -518,7 +597,7 @@ export function AgentPage() {
                 providers={providers}
                 provider={provider}
                 model={model}
-                onSelect={(p, m) => { setProvider(p); setModel(m); setPickerOpen(false); }}
+                onSelect={(p, m) => { setProvider(p); setModel(m); setPickerOpen(false); setUrlParams({ provider: p, model: m }); }}
               />
             )}
           </div>
@@ -532,7 +611,7 @@ export function AgentPage() {
         </div>
 
         {/* Messages */}
-        <div ref={scrollRef} className="flex-1 overflow-y-auto min-h-0">
+        <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden min-h-0">
           <div className="max-w-4xl mx-auto px-4 py-6 space-y-4">
             {items.length === 0 && !streaming && (
               <div className="flex flex-col items-center justify-center py-20 text-center">
@@ -557,9 +636,16 @@ export function AgentPage() {
             )}
 
             {items.map((item, i) => {
-              if (item.type === "user") return <UserBubble key={i} text={item.text} />;
+              if (item.type === "user") return <UserBubble key={i} text={item.text} images={item.images} />;
               if (item.type === "thinking") return <ThinkingBlock key={i} text={item.text} />;
-              if (item.type === "assistant") return <AssistantBubble key={i} text={item.text} />;
+              if (item.type === "assistant") {
+                // Find the last user message before this assistant message for retry
+                let lastUser: any = null;
+                for (let j = i - 1; j >= 0; j--) { if (items[j].type === "user") { lastUser = items[j]; break; } }
+                const isLast = items.slice(i + 1).every((x: any) => x.type !== "assistant");
+                return <AssistantBubble key={i} text={item.text}
+                  onRetry={isLast && lastUser ? () => send(lastUser.text, lastUser.images) : undefined} />;
+              }
               // update_plan calls are surfaced via the sticky TodoPanel; hide the noisy tool cards.
               if (item.type === "tool" && item.name === "update_plan") return null;
               if (item.type === "tool") return <ToolCard key={i} {...item} />;
@@ -595,15 +681,33 @@ export function AgentPage() {
         <div className="border-t border-ink-800 grad-head px-4 py-3 flex-shrink-0">
           <div className="max-w-4xl mx-auto">
             <div className="bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 focus-within:border-gold/60 transition">
+              {pendingImages.length > 0 && (
+                <div className="flex gap-2 mb-2 flex-wrap">
+                  {pendingImages.map((img, j) => (
+                    <div key={j} className="relative group">
+                      <img src={img} alt="K线截图" className="h-16 rounded border border-ink-600 object-contain" />
+                      <button
+                        className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-red-500 text-white text-[10px] flex items-center justify-center opacity-0 group-hover:opacity-100 transition"
+                        onClick={() => setPendingImages(prev => prev.filter((_, i) => i !== j))}
+                      >×</button>
+                    </div>
+                  ))}
+                </div>
+              )}
               <textarea
                 ref={inputRef}
                 value={input}
-                onChange={e => setInput(e.target.value)}
+                onChange={e => {
+                  setInput(e.target.value);
+                  const ta = e.target;
+                  ta.style.height = "auto";
+                  ta.style.height = Math.min(ta.scrollHeight, 400) + "px";
+                }}
                 onKeyDown={onKeyDown}
                 placeholder="问点什么..."
                 rows={1}
-                className="w-full bg-transparent text-sm text-ink-200 placeholder:text-ink-500 outline-none resize-none"
-                style={{ minHeight: 24, maxHeight: 200 }}
+                className="w-full bg-transparent text-sm text-ink-200 placeholder:text-ink-500 outline-none resize-none scrollbar"
+                style={{ minHeight: 24, maxHeight: 400 }}
               />
               <div className="flex items-center justify-between mt-1.5">
                 <span className="text-[11px] text-ink-600">
@@ -655,7 +759,7 @@ function ThinkingBlock({ text, live }: { text: string; live?: boolean }) {
   );
 }
 
-function UserBubble({ text }: { text: string }) {
+function UserBubble({ text, images }: { text: string; images?: string[] }) {
   return (
     <div className="space-y-1">
       <div className="flex items-center gap-2 text-[10px] text-ink-500 uppercase tracking-wider">
@@ -663,21 +767,69 @@ function UserBubble({ text }: { text: string }) {
         You
       </div>
       <div className="bg-sky2/5 border border-sky2/20 rounded-lg px-4 py-3 text-sm text-ink-200 whitespace-pre-wrap">
+        {images?.length ? (
+          <div className="flex gap-2 mb-2 flex-wrap">
+            {images.map((img, j) => (
+              <img key={j} src={img} alt="K线截图" className="max-w-[320px] max-h-[200px] rounded border border-ink-700 object-contain" />
+            ))}
+          </div>
+        ) : null}
         {text}
       </div>
     </div>
   );
 }
 
-function AssistantBubble({ text }: { text: string }) {
+function AssistantBubble({ text, onRetry }: { text: string; onRetry?: () => void }) {
+  const [copied, setCopied] = useState(false);
+  const [vote, setVote] = useState<"up" | "down" | null>(null);
+
+  const copyText = () => {
+    // Strip HTML, copy plain text
+    const tmp = document.createElement("div");
+    tmp.innerHTML = md(text);
+    navigator.clipboard.writeText(tmp.textContent || text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
+
   return (
-    <div className="space-y-1">
+    <div className="space-y-1 group/ab">
       <div className="flex items-center gap-2 text-[10px] text-ink-500 uppercase tracking-wider">
         <span className="w-4 h-4 rounded bg-gradient-to-br from-sky2 to-purple-400 flex items-center justify-center text-[8px] text-white font-bold">A</span>
         Assistant
       </div>
       <div className="bg-ink-900 border border-ink-700 rounded-lg px-4 py-3 text-sm text-ink-200 prose-agent" dangerouslySetInnerHTML={{ __html: md(text) }} />
+      <div className="flex items-center gap-1 opacity-0 group-hover/ab:opacity-100 transition-opacity pt-0.5">
+        <BubbleBtn title="复制" active={copied} onClick={copyText}>
+          {copied ? "✓" : "📋"}
+        </BubbleBtn>
+        <BubbleBtn title="有用" active={vote === "up"} onClick={() => setVote(v => v === "up" ? null : "up")}>
+          👍
+        </BubbleBtn>
+        <BubbleBtn title="无用" active={vote === "down"} onClick={() => setVote(v => v === "down" ? null : "down")}>
+          👎
+        </BubbleBtn>
+        {onRetry && (
+          <BubbleBtn title="重新生成" onClick={onRetry}>🔄</BubbleBtn>
+        )}
+        <span className="ml-2 text-[10px] text-ink-600">本回答由AI生成，仅供参考，请仔细甄别，谨慎投资。</span>
+      </div>
     </div>
+  );
+}
+
+function BubbleBtn({ title, active, onClick, children }: { title: string; active?: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      title={title}
+      onClick={onClick}
+      className={`w-7 h-7 rounded-md flex items-center justify-center text-sm transition
+        ${active ? "bg-sky2/20 text-sky2" : "bg-ink-800 text-ink-400 hover:text-ink-200 hover:bg-ink-700"}`}
+    >
+      {children}
+    </button>
   );
 }
 

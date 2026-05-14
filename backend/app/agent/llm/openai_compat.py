@@ -36,6 +36,16 @@ def _msg_to_dict(m: Message) -> dict[str, Any]:
         # Claude rejects empty content when tool_calls present; omit or use null
         if m.content:
             d["content"] = m.content
+    elif m.images:
+        # Vision message: content is an array of text + image_url parts
+        parts: list[dict[str, Any]] = []
+        if m.content:
+            parts.append({"type": "text", "text": m.content})
+        for img in m.images:
+            # Accept data URI (data:image/png;base64,...) or raw base64
+            url = img if img.startswith("data:") else f"data:image/png;base64,{img}"
+            parts.append({"type": "image_url", "image_url": {"url": url}})
+        d["content"] = parts
     else:
         d["content"] = m.content or ""
     return d

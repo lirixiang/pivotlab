@@ -42,12 +42,24 @@ export default function App() {
   const [tab, setTab] = useState<TabKey>(() => parseLocation().tab);
   const [code, setCode] = useState(() => parseLocation().code || "600519");
   const [recommendInitCode, setRecommendInitCode] = useState<string>("");
+  const [agentInitPrompt, setAgentInitPrompt] = useState<string>("");
+  const [agentInitImages, setAgentInitImages] = useState<string[]>([]);
+  // When Screener requests AI analysis, jump to Workspace and auto-trigger
+  // ChartWorkspace's "AI 分析" with extra screener-only context appended.
+  const [pendingAnalyze, setPendingAnalyze] = useState<{ code: string; extra: string } | null>(null);
 
   // Push URL on tab/code change
   const pushUrl = useCallback((t: TabKey, c?: string) => {
-    const path = t === "workspace" ? `/stock/${c || code}` : TAB_PATHS[t];
-    // Strip query/hash when switching top-level tabs — each page has its
-    // own sub-state in ?params, those don't carry meaning across tabs.
+    let path: string;
+    if (t === "workspace") {
+      path = `/stock/${c || code}`;
+    } else if (t === "agent") {
+      // Preserve existing query params (provider/model) on agent tab
+      const curSearch = window.location.pathname === "/agent" ? window.location.search : "";
+      path = TAB_PATHS[t] + curSearch;
+    } else {
+      path = TAB_PATHS[t];
+    }
     const cur = window.location.pathname + window.location.search + window.location.hash;
     if (cur !== path) {
       window.history.pushState(null, "", path);
@@ -117,10 +129,18 @@ export default function App() {
         <WorkspacePage
           code={code}
           onSelect={handleSelectCode}
+          onAIAnalyze={(prompt, images) => {
+            setAgentInitPrompt(prompt);
+            setAgentInitImages(images || []);
+            handleTabChange("agent");
+          }}
+          pendingAnalyze={pendingAnalyze}
+          onConsumePending={() => setPendingAnalyze(null)}
         />
       )}
 
-      {tab === "screener" && <ScreenerPage onPickStock={goWorkspace} onShowRecommend={goRecommend} />}
+      {tab === "screener" && <ScreenerPage onPickStock={goWorkspace} onShowRecommend={goRecommend}
+        onAIAnalyze={(code, extra) => { setPendingAnalyze({ code, extra }); goWorkspace(code); }} />}
       {tab === "aiscan" && <AIScanPage defaultCode={code} />}
       <div style={{ display: tab === "llmpick" ? "flex" : "none", flex: 1, flexDirection: "column" }}>
         <LLMPickPage onPickStock={goWorkspace} />
@@ -129,7 +149,7 @@ export default function App() {
       {tab === "strategy" && <StrategyPage defaultCode={code} />}
       {tab === "monitor" && <MonitorPage onPickStock={goWorkspace} />}
       {tab === "sync" && <SyncPage />}
-      {tab === "agent" && <AgentPage />}
+      {tab === "agent" && <AgentPage initialPrompt={agentInitPrompt} initialImages={agentInitImages} onConsumedPrompt={() => { setAgentInitPrompt(""); setAgentInitImages([]); }} />}
       {tab === "recommend" && (
         <RecommendPage
           onPickStock={goWorkspace}

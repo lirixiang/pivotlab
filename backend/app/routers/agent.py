@@ -90,6 +90,7 @@ class ApproveReq(BaseModel):
 
 class ChatReq(BaseModel):
     text: str
+    images: list[str] | None = None  # base64 data-URIs for vision
 
 
 @router.get("/providers")
@@ -132,6 +133,17 @@ async def get_messages(sid: str):
     return {"messages": [m.model_dump() for m in msgs]}
 
 
+@router.patch("/sessions/{sid}")
+async def update_session(sid: str, req: dict):
+    """Update session metadata (provider / model)."""
+    provider = req.get("provider")
+    model = req.get("model")
+    if not provider and not model:
+        raise HTTPException(400, "nothing to update")
+    await session_db.update_session_llm(sid, provider, model)
+    return {"ok": True}
+
+
 @router.post("/chat/{sid}")
 async def chat_sse(sid: str, req: ChatReq, request: Request):
     """Send a message and stream the agent response via SSE."""
@@ -162,7 +174,7 @@ async def chat_sse(sid: str, req: ChatReq, request: Request):
         try:
             task = asyncio.current_task()
             _run_tasks[sid] = task
-            async for ev in agent.run(state, text_in, inbox):
+            async for ev in agent.run(state, text_in, inbox, images=req.images):
                 # Check if client disconnected
                 if await request.is_disconnected():
                     break
