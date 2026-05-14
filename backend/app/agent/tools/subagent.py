@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import json
 import uuid
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
-from app.agent.core.loop import Agent, AgentState, ApprovalInbox, FinalEvent, ToolResultEvent
+if TYPE_CHECKING:
+    from app.agent.core.loop import Agent, AgentState, ApprovalInbox, FinalEvent, ToolResultEvent
+
 from app.agent.core.types import Message
 from app.agent.llm.factory import build_llm
 from app.agent.tools.registry import registry
@@ -74,6 +76,7 @@ async def delegate(args: dict[str, Any]) -> dict[str, Any]:
 async def _run_subagent(task: str, context: str) -> dict[str, Any]:
     """Run a child agent loop and collect the final answer."""
     from app.agent.config import get_settings
+    from app.agent.core.loop import Agent, AgentState, ApprovalInbox, FinalEvent, ToolResultEvent
 
     settings = get_settings()
     llm = build_llm(provider=settings.llm_default_provider, model=settings.llm_default_model)

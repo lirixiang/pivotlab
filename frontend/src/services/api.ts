@@ -81,6 +81,31 @@ export const api = {
     }),
   removeWatch: (code: string) =>
     http<{ ok: boolean }>(`/watchlist/${code}`, { method: "DELETE" }),
+  scanWatchlistPatterns: () =>
+    http<{
+      scanned: number; total_hits: number;
+      counts: Record<string, number>; labels: Record<string, string>;
+      scanned_at: string;
+    }>("/watchlist/scan-patterns", { method: "POST" }),
+  // OCR: extract stock codes from a screenshot (multipart)
+  ocrExtractCodes: (file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return fetch(BASE + "/ocr/extract-codes", { method: "POST", body: fd }).then(async (r) => {
+      if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+      return r.json() as Promise<{
+        candidates: {
+          code: string; name: string; industry: string;
+          valid: boolean; in_watchlist: boolean; confidence: number; text: string;
+        }[];
+      }>;
+    });
+  },
+  importWatchlist: (codes: string[]) =>
+    http<{ added: number; skipped_existing: number; skipped_unknown: number; added_codes: string[] }>(
+      "/ocr/import-watchlist",
+      { method: "POST", body: JSON.stringify({ codes }) },
+    ),
   // Settings
   getSetting: (key: string) =>
     http<{ key: string; value: Record<string, unknown> }>(`/settings/${key}`),

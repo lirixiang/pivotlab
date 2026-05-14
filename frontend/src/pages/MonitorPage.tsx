@@ -73,6 +73,63 @@ export function MonitorPage({ onPickStock }: { onPickStock: (code: string) => vo
   const addRef = useRef<HTMLDivElement>(null);
   const searchTimer = useRef<ReturnType<typeof setTimeout>>();
 
+  // ── Pattern filter chips (multi-select; empty = show all) ──
+  const [patternFilter, setPatternFilter] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem("monitor_patternFilter");
+      return raw ? new Set(JSON.parse(raw) as string[]) : new Set();
+    } catch { return new Set(); }
+  });
+  const togglePattern = (key: string) => {
+    setPatternFilter((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      localStorage.setItem("monitor_patternFilter", JSON.stringify([...next]));
+      return next;
+    });
+  };
+  const clearPatternFilter = () => {
+    setPatternFilter(new Set());
+    localStorage.removeItem("monitor_patternFilter");
+  };
+
+  // ── Screenshot OCR import modal ──
+  const [showOcr, setShowOcr] = useState(false);
+  const [ocrLoading, setOcrLoading] = useState(false);
+  const [ocrError, setOcrError] = useState("");
+  const [ocrCandidates, setOcrCandidates] = useState<
+    { code: string; name: string; industry: string; valid: boolean; in_watchlist: boolean; confidence: number; text: string }[]
+  >([]);
+  const [ocrSelected, setOcrSelected] = useState<Set<string>>(new Set());
+  const [ocrPreview, setOcrPreview] = useState<string>("");
+  const [importing, setImporting] = useState(false);
+  const ocrFileRef = useRef<HTMLInputElement>(null);
+
+  const resetOcr = () => {
+    setOcrCandidates([]); setOcrSelected(new Set()); setOcrError("");
+    if (ocrPreview) URL.revokeObjectURL(ocrPreview);
+    setOcrPreview("");
+  };
+  const closeOcr = () => { setShowOcr(false); resetOcr(); };
+
+  // ── Pattern scan (only against watchlist codes) ──
+  const [scanning, setScanning] = useState(false);
+  const handleScanPatterns = async () => {
+    if (scanning) return;
+    setScanning(true);
+    try {
+      const r = await api.scanWatchlistPatterns();
+      load();
+      const hitDesc = Object.entries(r.counts)
+        .map(([k, v]) => `${r.labels[k] || k} ${v}`).join("、") || "无命中";
+      alert(`已扫描 ${r.scanned} 只，命中 ${r.total_hits} 项（${hitDesc}）`);
+    } catch (e) {
+      alert(`形态识别失败：${(e as Error).message || e}`);
+    } finally {
+      setScanning(false);
+    }
+  };
+
   const load = useCallback(() => {
     setLoading(true);
     api.watchlist().then(setItems).finally(() => setLoading(false));
@@ -115,6 +172,63 @@ export function MonitorPage({ onPickStock }: { onPickStock: (code: string) => vo
     setItems((prev) => prev.filter((i) => i.code !== code));
   };
 
+  // ── OCR helpers ──
+  const processOcrFile = useCallback(async (f: File) => {
+    if (!f.type.startsWith("image/")) { setOcrError("请选择图片文件"); return; }
+    resetOcr();
+    setOcrPreview(URL.createObjectURL(f));
+    setOcrLoading(true);
+    try {
+      const r = await api.ocrExtractCodes(f);
+      setOcrCandidates(r.candidates);
+      // pre-select all valid + not-yet-in-watchlist candidates
+      setOcrSelected(new Set(r.candidates.filter((c) => c.valid && !c.in_watchlist).map((c) => c.code)));
+      if (r.candidates.length === 0) setOcrError("未识别到股票代码");
+    } catch (e) {
+      setOcrError(String((e as Error).message || e));
+    } finally {
+      setOcrLoading(false);
+    }
+  }, []);
+
+  // Paste-from-clipboard handler — active only while modal is open.
+  useEffect(() => {
+    if (!showOcr) return;
+    const onPaste = (e: ClipboardEvent) => {
+      const item = Array.from(e.clipboardData?.items || []).find((it) => it.type.startsWith("image/"));
+      if (!item) return;
+      const f = item.getAsFile();
+      if (f) { e.preventDefault(); processOcrFile(f); }
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [showOcr, processOcrFile]);
+
+  const handleImportSelected = async () => {
+    const codes = [...ocrSelected];
+    if (codes.length === 0) return;
+    setImporting(true);
+    try {
+      const r = await api.importWatchlist(codes);
+      closeOcr();
+      load();
+      // simple toast via alert (project does not seem to have a toast lib in this page)
+      alert(`已导入 ${r.added} 只，跳过已存在 ${r.skipped_existing} 只，跳过未知代码 ${r.skipped_unknown} 只`);
+    } catch (e) {
+      setOcrError(String((e as Error).message || e));
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const toggleOcrPick = (code: string) => {
+    setOcrSelected((prev) => {
+      const n = new Set(prev);
+      if (n.has(code)) n.delete(code); else n.add(code);
+      return n;
+    });
+  };
+
   const handleSort = (key: SortKey) => {
     if (sortKey === key) {
       const next = sortDir === "desc" ? "asc" : "desc";
@@ -131,6 +245,9 @@ export function MonitorPage({ onPickStock }: { onPickStock: (code: string) => vo
 
   const sorted = useMemo(() => {
     const mul = sortDir === "desc" ? -1 : 1;
+    const filtered = patternFilter.size === 0
+      ? items
+      : items.filter((r) => r.pattern && patternFilter.has(r.pattern));
     const getVal = (r: WatchlistItem): number | string => {
       switch (sortKey) {
         case "name":          return r.name || r.code;
@@ -149,14 +266,28 @@ export function MonitorPage({ onPickStock }: { onPickStock: (code: string) => vo
         case "distance_to_support_pct": return r.distance_to_support_pct ?? Number.POSITIVE_INFINITY;
       }
     };
-    return [...items].sort((a, b) => {
+    return [...filtered].sort((a, b) => {
       const va = getVal(a), vb = getVal(b);
       if (typeof va === "string" && typeof vb === "string") return va.localeCompare(vb) * mul;
       return ((va as number) - (vb as number)) * mul;
     });
-  }, [items, sortKey, sortDir]);
+  }, [items, sortKey, sortDir, patternFilter]);
+
+  // Available patterns across the current watchlist (with counts) → drives chips.
+  const patternStats = useMemo(() => {
+    const m = new Map<string, { label: string; count: number }>();
+    for (const r of items) {
+      if (!r.pattern) continue;
+      const cur = m.get(r.pattern);
+      if (cur) cur.count += 1;
+      else m.set(r.pattern, { label: r.pattern_label || r.pattern, count: 1 });
+    }
+    return [...m.entries()].sort((a, b) => b[1].count - a[1].count);
+  }, [items]);
+  const noPatternCount = useMemo(() => items.filter((r) => !r.pattern).length, [items]);
 
   const existingCodes = new Set(items.map((i) => i.code));
+
 
   return (
     <div className="flex-1 flex flex-col bg-ink-950 overflow-hidden">
@@ -171,6 +302,20 @@ export function MonitorPage({ onPickStock }: { onPickStock: (code: string) => vo
             onClick={load} disabled={loading} title="刷新行情"
           >
             <i className={`fas fa-rotate ${loading ? "fa-spin" : ""} mr-1`} />刷新
+          </button>
+          <button
+            className="px-2.5 py-1.5 text-[11px] rounded-md border border-ink-700 text-ink-300 hover:border-ink-600 disabled:opacity-50"
+            onClick={handleScanPatterns} disabled={scanning || items.length === 0}
+            title="对当前自选股运行所有形态识别器"
+          >
+            <i className={`fas ${scanning ? "fa-circle-notch fa-spin" : "fa-wave-square"} mr-1`} />
+            {scanning ? "识别中..." : "形态识别"}
+          </button>
+          <button
+            className="px-2.5 py-1.5 text-[11px] rounded-md border border-ink-700 text-ink-300 hover:border-ink-600"
+            onClick={() => setShowOcr(true)} title="截图识别股票代码并批量导入"
+          >
+            <i className="fas fa-image mr-1" />截图导入
           </button>
           <div ref={addRef} className="relative">
             <button className="px-3 py-1.5 text-[12px] rounded-md grad-gold text-ink-950 font-semibold"
@@ -213,6 +358,34 @@ export function MonitorPage({ onPickStock }: { onPickStock: (code: string) => vo
         </div>
       </div>
 
+      {patternStats.length > 0 && (
+        <div className="px-5 py-2 border-b border-ink-800 bg-ink-900/50 flex items-center gap-2 flex-wrap">
+          <span className="text-[10px] text-ink-500 uppercase tracking-wider mr-1">形态筛选</span>
+          <button
+            onClick={clearPatternFilter}
+            className={`px-2 py-0.5 text-[11px] rounded-full border transition ${
+              patternFilter.size === 0
+                ? "border-gold/60 text-gold bg-gold/10"
+                : "border-ink-700 text-ink-400 hover:border-ink-600"
+            }`}
+          >全部 <span className="text-ink-600 ml-0.5">{items.length}</span></button>
+          {patternStats.map(([key, info]) => {
+            const active = patternFilter.has(key);
+            return (
+              <button key={key} onClick={() => togglePattern(key)}
+                className={`px-2 py-0.5 text-[11px] rounded-full border transition ${
+                  active ? "border-gold/60 text-gold bg-gold/10" : "border-ink-700 text-ink-300 hover:border-ink-600"
+                }`}>
+                {info.label}<span className="text-ink-600 ml-1">{info.count}</span>
+              </button>
+            );
+          })}
+          {noPatternCount > 0 && (
+            <span className="text-[10px] text-ink-600 ml-auto">未识别形态 {noPatternCount} 只</span>
+          )}
+        </div>
+      )}
+
       <div className="overflow-auto scrollbar flex-1">
         {items.length === 0 && !loading ? (
           <div className="flex flex-col items-center justify-center h-full text-ink-500">
@@ -236,7 +409,6 @@ export function MonitorPage({ onPickStock }: { onPickStock: (code: string) => vo
                     </th>
                   );
                 })}
-                <th className="text-center font-normal px-2 w-16">走势</th>
                 <th className="text-left font-normal px-2">备注</th>
                 <th className="text-right font-normal px-5"></th>
               </tr>
@@ -244,7 +416,7 @@ export function MonitorPage({ onPickStock }: { onPickStock: (code: string) => vo
             <tbody className="text-ink-200">
               {loading && items.length === 0 && (
                 <tr>
-                  <td colSpan={COLUMNS.length + 4} className="text-center text-ink-500 py-10">
+                  <td colSpan={COLUMNS.length + 3} className="text-center text-ink-500 py-10">
                     <i className="fas fa-circle-notch fa-spin mr-2" />加载中...
                   </td>
                 </tr>
@@ -252,7 +424,6 @@ export function MonitorPage({ onPickStock }: { onPickStock: (code: string) => vo
               {sorted.map((r, i) => {
                 const up = r.change_pct >= 0;
                 const hasPrice = r.price > 0;
-                const sparkUp = r.sparkline.length >= 2 ? r.sparkline[r.sparkline.length - 1] >= r.sparkline[0] : up;
                 return (
                   <tr key={r.code} onClick={() => onPickStock(r.code)}
                       className="row-hover border-b border-ink-850/60 cursor-pointer">
@@ -312,9 +483,6 @@ export function MonitorPage({ onPickStock }: { onPickStock: (code: string) => vo
                         </span>
                       ) : <span className="text-ink-700">—</span>}
                     </td>
-                    <td className="text-center px-2">
-                      <Sparkline data={r.sparkline} up={sparkUp} />
-                    </td>
                     <td className="px-2 text-ink-500 text-[11px] font-sans max-w-[120px] truncate" title={r.note}>
                       {r.note || "—"}
                     </td>
@@ -331,6 +499,106 @@ export function MonitorPage({ onPickStock }: { onPickStock: (code: string) => vo
           </table>
         )}
       </div>
+
+      {showOcr && (
+        <div className="fixed inset-0 z-[100] bg-black/70 flex items-center justify-center p-4"
+             onClick={(e) => { if (e.target === e.currentTarget) closeOcr(); }}>
+          <div className="bg-ink-900 border border-ink-700 rounded-xl shadow-2xl w-full max-w-3xl max-h-[88vh] flex flex-col">
+            <div className="px-5 py-3 border-b border-ink-800 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <i className="fas fa-image text-gold" />
+                <span className="text-[13px] font-semibold text-white">截图导入自选</span>
+                <span className="text-[10px] text-ink-500">同花顺 / 东财 / 雪球 截图均可</span>
+              </div>
+              <button onClick={closeOcr} className="text-ink-500 hover:text-ink-200 text-[14px]">
+                <i className="fas fa-xmark" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-auto scrollbar p-5 space-y-4">
+              <div className="flex items-center gap-3 text-[12px]">
+                <button
+                  onClick={() => ocrFileRef.current?.click()}
+                  disabled={ocrLoading}
+                  className="px-3 py-1.5 rounded-md grad-gold text-ink-950 font-semibold disabled:opacity-50"
+                >
+                  <i className="fas fa-upload mr-1" />选择图片
+                </button>
+                <span className="text-ink-500">或</span>
+                <span className="text-ink-400">在窗口内按 <kbd className="px-1.5 py-0.5 rounded bg-ink-800 border border-ink-700 text-[10px]">Ctrl/⌘ + V</kbd> 粘贴截图</span>
+                <input ref={ocrFileRef} type="file" accept="image/*" className="hidden"
+                       onChange={(e) => { const f = e.target.files?.[0]; if (f) processOcrFile(f); e.target.value = ""; }} />
+              </div>
+
+              {ocrLoading && (
+                <div className="text-[12px] text-ink-400"><i className="fas fa-circle-notch fa-spin mr-2 text-gold" />正在识别...（首次加载 OCR 模型可能需要几秒）</div>
+              )}
+              {ocrError && (
+                <div className="text-[12px] text-cn-dn"><i className="fas fa-triangle-exclamation mr-1" />{ocrError}</div>
+              )}
+
+              {ocrPreview && (
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <div className="text-[11px] text-ink-500 mb-1">截图预览</div>
+                    <img src={ocrPreview} alt="preview"
+                         className="max-h-[420px] w-full object-contain border border-ink-800 rounded" />
+                  </div>
+                  <div>
+                    <div className="text-[11px] text-ink-500 mb-1 flex items-center justify-between">
+                      <span>识别结果（{ocrCandidates.length}）</span>
+                      {ocrCandidates.length > 0 && (
+                        <div className="flex gap-2 text-ink-400">
+                          <button className="hover:text-gold"
+                                  onClick={() => setOcrSelected(new Set(ocrCandidates.filter((c) => c.valid && !c.in_watchlist).map((c) => c.code)))}>全选可导入</button>
+                          <button className="hover:text-gold" onClick={() => setOcrSelected(new Set())}>清空</button>
+                        </div>
+                      )}
+                    </div>
+                    <div className="border border-ink-800 rounded max-h-[420px] overflow-auto scrollbar">
+                      {ocrCandidates.length === 0 && !ocrLoading && (
+                        <div className="text-[11px] text-ink-600 text-center py-8">暂无结果</div>
+                      )}
+                      {ocrCandidates.map((c) => {
+                        const disabled = !c.valid || c.in_watchlist;
+                        const checked = ocrSelected.has(c.code);
+                        return (
+                          <label key={c.code}
+                                 className={`flex items-center gap-2 px-3 py-2 text-[12px] border-b border-ink-800/60 last:border-0 ${
+                                   disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer hover:bg-ink-850"
+                                 }`}>
+                            <input type="checkbox" disabled={disabled} checked={checked}
+                                   onChange={() => toggleOcrPick(c.code)}
+                                   className="accent-gold" />
+                            <span className="num text-ink-200 w-16">{c.code}</span>
+                            <span className="flex-1 text-ink-300 truncate">{c.name || "—"}</span>
+                            <span className="text-[10px] text-ink-600">{(c.confidence * 100).toFixed(0)}%</span>
+                            {c.in_watchlist && <span className="text-[10px] text-ink-500">已在自选</span>}
+                            {!c.valid && <span className="text-[10px] text-cn-dn">未知代码</span>}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="px-5 py-3 border-t border-ink-800 flex items-center justify-between">
+              <span className="text-[11px] text-ink-500">已选 <span className="text-gold">{ocrSelected.size}</span> 只</span>
+              <div className="flex gap-2">
+                <button onClick={closeOcr}
+                        className="px-3 py-1.5 text-[12px] rounded-md border border-ink-700 text-ink-300 hover:border-ink-600">取消</button>
+                <button onClick={handleImportSelected}
+                        disabled={importing || ocrSelected.size === 0}
+                        className="px-3 py-1.5 text-[12px] rounded-md grad-gold text-ink-950 font-semibold disabled:opacity-50">
+                  {importing ? <><i className="fas fa-circle-notch fa-spin mr-1" />导入中</> : <><i className="fas fa-plus mr-1" />导入选中</>}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

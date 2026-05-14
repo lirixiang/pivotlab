@@ -27,3 +27,12 @@ pydantic-settings>=2.0
 structlog>=24.0
 sqlglot>=20.0
 httpx>=0.25
+
+# OCR for screenshot watchlist import
+paddleocr>=2.7,<3.0
+paddlepaddle>=2.6
+python-multipart>=0.0.9
+pillow>=10.0
+# Force headless OpenCV so PaddleOCR doesn't pull in libxcb/X11 deps.
+opencv-python-headless>=4.8
+opencv-contrib-python-headless>=4.8

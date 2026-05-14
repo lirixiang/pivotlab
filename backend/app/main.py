@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import init_db
-from .routers import market, screener, stocks, watchlist, sync, settings, backtest, algo, strategy, dragon, recommend, llmpick, agent
+from .routers import market, screener, stocks, watchlist, sync, settings, backtest, algo, strategy, dragon, recommend, llmpick, agent, ocr
 from .services.data_provider import preload_candles
 from .services.sync_worker import spawn_sync
 
@@ -158,6 +158,7 @@ app.include_router(dragon.router)
 app.include_router(recommend.router)
 app.include_router(llmpick.router)
 app.include_router(agent.router)
+app.include_router(ocr.router)
 
 
 @app.get("/api/health")

@@ -48,7 +48,17 @@ from app.database import AsyncSessionLocal
     permission="safe",
 )
 async def query_db(args: dict[str, Any]) -> dict[str, Any]:
-    sql = args["sql"].strip().rstrip(";")
+    # Handle _raw fallback from malformed LLM JSON
+    if "_raw" in args and "sql" not in args:
+        import re
+        m = re.search(r'"sql"\s*:\s*"((?:[^"\\]|\\.)*)"', args["_raw"])
+        if m:
+            sql = m.group(1).encode().decode('unicode_escape')
+        else:
+            return {"error": "无法解析 SQL 参数，LLM 返回了格式错误的 JSON"}
+    else:
+        sql = args["sql"]
+    sql = sql.strip().rstrip(";")
     s = get_settings()
     try:
         assert_readonly(sql)

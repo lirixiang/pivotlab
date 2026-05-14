@@ -251,3 +251,117 @@ async def watchlist_scores(db: AsyncSession = Depends(get_db)):
         {"code": code, "decision_score": score, "decision_label": label}
         for code, score, label in results
     ]
+
+
+def _scan_watchlist_patterns_sync(items: list[tuple[str, str]]) -> dict:
+    """Run all pattern detectors against the given watchlist codes, then merge
+    results into `.screener_cache/{pattern}.json` so the regular GET /watchlist
+    enrichment picks them up."""
+    import os as _os
+    import json as _json
+    from datetime import datetime as _dt
+
+    from ..services.screener import (
+        PATTERN_DETECTORS,
+        MODEL_LABELS,
+        clear_sr_cache,
+    )
+    from ..services.data_provider import get_candles
+
+    cache_dir = _SCREENER_CACHE_DIR
+    _os.makedirs(cache_dir, exist_ok=True)
+
+    # Run detectors in-memory; collect new hits per pattern
+    new_hits: dict[str, list[dict]] = {p: [] for p in PATTERN_DETECTORS}
+    counts: dict[str, int] = {p: 0 for p in PATTERN_DETECTORS}
+    scanned = 0
+    for code, name in items:
+        try:
+            candles = get_candles(code, days=180)
+            if not candles or len(candles) < 120:
+                continue
+            try:
+                weekly = get_candles(code, period="weekly", days=80) or None
+            except Exception:
+                weekly = None
+            scanned += 1
+            clear_sr_cache()
+            for pat, detector in PATTERN_DETECTORS.items():
+                try:
+                    r = detector(code, name, candles, weekly_candles=weekly)
+                except Exception:
+                    r = None
+                if not r:
+                    continue
+                counts[pat] += 1
+                # Serialise the same fields the bulk screener produces.
+                new_hits[pat].append({
+                    "code": r.code, "name": r.name, "pattern": r.pattern,
+                    "score": r.score, "price": r.price,
+                    "change_pct": getattr(r, "change_pct", None),
+                    "volume_ratio": getattr(r, "volume_ratio", None),
+                    "breakout_price": getattr(r, "breakout_price", None),
+                    "pullback_price": getattr(r, "pullback_price", None),
+                    "distance_to_support_pct": getattr(r, "distance_to_support_pct", None),
+                    "triggers": getattr(r, "triggers", []) or [],
+                    "market": getattr(r, "market", "") or "",
+                    "industry": getattr(r, "industry", "") or "",
+                    "market_cap": getattr(r, "market_cap", None),
+                    "amount": getattr(r, "amount", None),
+                    "rr_ratio": getattr(r, "rr_ratio", None),
+                    "support_score": getattr(r, "support_score", None),
+                    "concept": getattr(r, "concept", "") or "",
+                    "fundamental_status": getattr(r, "fundamental_status", "") or "",
+                    "fundamental_summary": getattr(r, "fundamental_summary", "") or "",
+                })
+        except Exception as exc:
+            logger.warning("watchlist scan failed for %s: %s", code, exc)
+
+    scanned_codes = {c for c, _ in items}
+    scanned_at = _dt.now().isoformat()
+
+    # Merge into existing cache files: drop any prior entries for these codes,
+    # then append the fresh hits. This keeps full-market hits intact while
+    # refreshing the watchlist view.
+    for pat in PATTERN_DETECTORS:
+        path = _os.path.join(cache_dir, f"{pat}.json")
+        existing: dict = {"pattern": pat, "total": 0, "scanned": 0,
+                          "scanned_at": scanned_at, "items": []}
+        if _os.path.exists(path):
+            try:
+                with open(path) as f:
+                    existing = _json.load(f)
+            except Exception:
+                pass
+        kept = [it for it in existing.get("items", []) if it.get("code") not in scanned_codes]
+        merged = kept + new_hits[pat]
+        merged.sort(key=lambda x: x.get("score") or 0, reverse=True)
+        existing["items"] = merged
+        existing["total"] = len(merged)
+        existing["scanned_at"] = scanned_at
+        try:
+            with open(path, "w") as f:
+                _json.dump(existing, f, ensure_ascii=False)
+        except Exception as exc:
+            logger.warning("watchlist scan: write %s failed: %s", path, exc)
+
+    return {
+        "scanned": scanned,
+        "total_hits": sum(counts.values()),
+        "counts": {p: counts[p] for p in counts if counts[p] > 0},
+        "labels": {p: MODEL_LABELS.get(p, p) for p in PATTERN_DETECTORS},
+        "scanned_at": scanned_at,
+    }
+
+
+@router.post("/scan-patterns")
+async def scan_watchlist_patterns(db: AsyncSession = Depends(get_db)):
+    """Run all pattern detectors against just the watchlist codes (fast, sync).
+    Updates `.screener_cache/{pattern}.json` so the regular list endpoint
+    immediately reflects the new pattern tags."""
+    rows = (await db.execute(select(WatchlistItem))).scalars().all()
+    if not rows:
+        return {"scanned": 0, "total_hits": 0, "counts": {}, "labels": {}, "scanned_at": ""}
+    items = [(r.code, r.name or r.code) for r in rows]
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _scan_watchlist_patterns_sync, items)

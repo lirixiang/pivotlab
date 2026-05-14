@@ -1676,6 +1676,9 @@ PATTERN_DETECTORS = {
     "pivot_breakout": detect_pivot_breakout,
     "cup_handle": detect_cup_handle,
     "high_tight_flag": detect_high_tight_flag,
+    "ma_support": detect_ma_support,
+    "volume_shrink_consolidation": detect_volume_shrink_consolidation,
+    "trend_strong": detect_trend_strong,
 }
 
 MODEL_LABELS = {
@@ -1686,4 +1689,7 @@ MODEL_LABELS = {
     "pivot_breakout": "Pivot 点突破",
     "cup_handle": "杯柄形态",
     "high_tight_flag": "高位紧旗",
+    "ma_support": "均线支撑",
+    "volume_shrink_consolidation": "缩量整理",
+    "trend_strong": "强势趋势",
 }

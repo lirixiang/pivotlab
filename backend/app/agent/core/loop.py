@@ -181,8 +181,6 @@ class Agent:
                 yield UsageEvent(**resp.usage.model_dump())
 
             if not assistant_msg.tool_calls:
-                log.info("FinalEvent", text_len=len(assistant_msg.content or ""),
-                         text_preview=(assistant_msg.content or "")[:120])
                 yield FinalEvent(text=assistant_msg.content, steps=state.step)
                 return
 

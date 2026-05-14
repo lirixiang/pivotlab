@@ -391,6 +391,23 @@ export function AgentPage() {
           }
         }
       }
+      // Process any remaining data in buffer (edge case: last event without trailing \n\n)
+      buf += decoder.decode(); // flush TextDecoder
+      if (buf.trim()) {
+        const eventMatch = buf.match(/^event:\s*(\S+)/m);
+        const dataMatch = buf.match(/^data:\s*(.*)/m);
+        if (eventMatch && dataMatch) {
+          const etype = eventMatch[1];
+          try {
+            const data = JSON.parse(dataMatch[1]);
+            if (etype === "final" && data.text?.trim()) {
+              if (!accDelta.trim()) {
+                accDelta = data.text;
+              }
+            }
+          } catch { /* ignore parse error */ }
+        }
+      }
       flushDelta();
     } catch (e: any) {
       if (e.name !== "AbortError") {
