@@ -6,7 +6,7 @@ type SortKey =
   | "name" | "industry" | "price" | "change_pct" | "amount"
   | "turnover_rate" | "pe" | "market_cap" | "roe"
   | "score" | "rr_ratio" | "distance_to_support_pct"
-  | "fundamental" | "pattern";
+  | "fundamental" | "pattern" | "signal";
 type SortDir = "asc" | "desc";
 
 const COLUMNS: { key: SortKey; label: string; defaultDir: SortDir; align: "left" | "right" }[] = [
@@ -21,6 +21,7 @@ const COLUMNS: { key: SortKey; label: string; defaultDir: SortDir; align: "left"
   { key: "roe",                     label: "ROE",       defaultDir: "desc", align: "right" },
   { key: "fundamental",             label: "基本面",    defaultDir: "desc", align: "left"  },
   { key: "pattern",                 label: "形态",      defaultDir: "desc", align: "left"  },
+  { key: "signal",                  label: "信号",      defaultDir: "desc", align: "left"  },
   { key: "score",                   label: "评分",      defaultDir: "desc", align: "right" },
   { key: "rr_ratio",                label: "盈亏比",    defaultDir: "desc", align: "right" },
   { key: "distance_to_support_pct", label: "距支撑",    defaultDir: "asc",  align: "right" },
@@ -31,6 +32,16 @@ const FUND_LABEL: Record<string, string> = { healthy: "优", neutral: "中", wea
 const FUND_COLOR: Record<string, string> = {
   healthy: "text-green-400", neutral: "text-ink-300", weak: "text-amber-400",
   risk: "text-red-400", unknown: "text-ink-600",
+};
+const SIGNAL_RANK: Record<string, number> = { buy: 5, hold: 4, wait: 3, neutral: 2, sell: 1, "": 0 };
+const SIGNAL_COLOR: Record<string, string> = {
+  buy: "bg-red-500/20 text-red-400", sell: "bg-green-500/20 text-green-400",
+  hold: "bg-amber-500/20 text-amber-400", wait: "bg-sky-500/15 text-sky-400",
+  neutral: "text-ink-600",
+};
+const SIGNAL_ICON: Record<string, string> = {
+  buy: "fa-arrow-up", sell: "fa-arrow-down",
+  hold: "fa-pause", wait: "fa-clock",
 };
 
 const fmtAmount = (v: number | null | undefined) => {
@@ -65,6 +76,15 @@ export function MonitorPage({ onPickStock }: { onPickStock: (code: string) => vo
   const [loading, setLoading] = useState(true);
   const [sortKey, setSortKey] = useState<SortKey>(() => (localStorage.getItem("monitor_sortKey") as SortKey) || "change_pct");
   const [sortDir, setSortDir] = useState<SortDir>(() => (localStorage.getItem("monitor_sortDir") as SortDir) || "desc");
+
+  // ── Toast notification ──
+  const [toast, setToast] = useState<{ msg: string; type: "success" | "error" | "info" } | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout>>();
+  const showToast = useCallback((msg: string, type: "success" | "error" | "info" = "success") => {
+    clearTimeout(toastTimer.current);
+    setToast({ msg, type });
+    toastTimer.current = setTimeout(() => setToast(null), 4000);
+  }, []);
 
   const [showAdd, setShowAdd] = useState(false);
   const [addQuery, setAddQuery] = useState("");
@@ -122,9 +142,9 @@ export function MonitorPage({ onPickStock }: { onPickStock: (code: string) => vo
       load();
       const hitDesc = Object.entries(r.counts)
         .map(([k, v]) => `${r.labels[k] || k} ${v}`).join("、") || "无命中";
-      alert(`已扫描 ${r.scanned} 只，命中 ${r.total_hits} 项（${hitDesc}）`);
+      showToast(`已扫描 ${r.scanned} 只，命中 ${r.total_hits} 项（${hitDesc}）`, "success");
     } catch (e) {
-      alert(`形态识别失败：${(e as Error).message || e}`);
+      showToast(`形态识别失败：${(e as Error).message || e}`, "error");
     } finally {
       setScanning(false);
     }
@@ -213,7 +233,7 @@ export function MonitorPage({ onPickStock }: { onPickStock: (code: string) => vo
       closeOcr();
       load();
       // simple toast via alert (project does not seem to have a toast lib in this page)
-      alert(`已导入 ${r.added} 只，跳过已存在 ${r.skipped_existing} 只，跳过未知代码 ${r.skipped_unknown} 只`);
+      showToast(`已导入 ${r.added} 只，跳过 ${r.skipped_existing} 已存在 · ${r.skipped_unknown} 未知`, "success");
     } catch (e) {
       setOcrError(String((e as Error).message || e));
     } finally {
@@ -261,6 +281,7 @@ export function MonitorPage({ onPickStock }: { onPickStock: (code: string) => vo
         case "roe":           return r.roe ?? -Infinity;
         case "fundamental":   return FUND_RANK[r.fundamental_status] ?? 0;
         case "pattern":       return r.pattern ? 1 : 0;
+        case "signal":        return SIGNAL_RANK[r.signal] ?? 0;
         case "score":         return r.score ?? -Infinity;
         case "rr_ratio":      return r.rr_ratio ?? -Infinity;
         case "distance_to_support_pct": return r.distance_to_support_pct ?? Number.POSITIVE_INFINITY;
@@ -290,7 +311,23 @@ export function MonitorPage({ onPickStock }: { onPickStock: (code: string) => vo
 
 
   return (
-    <div className="flex-1 flex flex-col bg-ink-950 overflow-hidden">
+    <div className="flex-1 flex flex-col bg-ink-950 overflow-hidden relative">
+      {/* Toast notification */}
+      {toast && (
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[100] animate-toast-in">
+          <div className={`flex items-center gap-2.5 px-5 py-3 rounded-xl shadow-2xl border backdrop-blur-md text-sm
+            ${toast.type === "success" ? "bg-green-500/10 border-green-500/20 text-green-300" :
+              toast.type === "error"   ? "bg-red-500/10 border-red-500/20 text-red-300" :
+                                         "bg-sky-500/10 border-sky-500/20 text-sky-300"}`}>
+            <i className={`fas text-xs ${
+              toast.type === "success" ? "fa-circle-check" :
+              toast.type === "error"   ? "fa-circle-xmark" : "fa-circle-info"
+            }`} />
+            <span>{toast.msg}</span>
+            <button onClick={() => setToast(null)} className="ml-2 text-ink-500 hover:text-ink-200 text-xs">✕</button>
+          </div>
+        </div>
+      )}
       <div className="px-5 py-3 border-b border-ink-800 grad-head flex items-center justify-between">
         <div className="flex items-center gap-3">
           <h2 className="text-[14px] font-semibold text-white">自选股</h2>
@@ -457,9 +494,33 @@ export function MonitorPage({ onPickStock }: { onPickStock: (code: string) => vo
                     </td>
                     <td className="px-2">
                       {r.pattern_label ? (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-gold/15 text-gold" title={`已入选: ${r.pattern_label}`}>
-                          <i className="fas fa-bookmark text-[9px] mr-1" />{r.pattern_label}
-                        </span>
+                        <div className="flex flex-col gap-0.5">
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-gold/15 text-gold inline-block w-fit"
+                                title={r.triggers?.length ? r.triggers.join('\n') : r.pattern_label}>
+                            <i className="fas fa-bookmark text-[9px] mr-1" />{r.pattern_label}
+                          </span>
+                          {r.triggers?.length > 0 && (
+                            <span className="text-[9px] text-ink-400 leading-tight max-w-[180px] truncate" title={r.triggers.join('\n')}>
+                              {r.triggers.slice(0, 2).join('；')}
+                            </span>
+                          )}
+                        </div>
+                      ) : <span className="text-ink-700">—</span>}
+                    </td>
+                    <td className="px-2">
+                      {r.signal && r.signal !== "neutral" ? (
+                        <div className="flex flex-col gap-0.5">
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded inline-block w-fit font-medium ${SIGNAL_COLOR[r.signal] || "text-ink-600"}`}
+                                title={r.signal_reason || r.signal_label}>
+                            {SIGNAL_ICON[r.signal] && <i className={`fas ${SIGNAL_ICON[r.signal]} text-[9px] mr-1`} />}
+                            {r.signal_label}
+                          </span>
+                          {r.signal_reason && (
+                            <span className="text-[9px] text-ink-400 leading-tight max-w-[200px] truncate" title={r.signal_reason}>
+                              {r.signal_reason}
+                            </span>
+                          )}
+                        </div>
                       ) : <span className="text-ink-700">—</span>}
                     </td>
                     <td className="text-right px-2">

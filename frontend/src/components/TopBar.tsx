@@ -187,6 +187,75 @@ export function TopBar({
   );
 }
 
+/* ── Disclaimer popup ── */
+function DisclaimerBadge() {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button
+        onClick={() => setOpen(true)}
+        className="flex items-center gap-1.5 text-ink-500 hover:text-ink-300 transition"
+        title="数据声明"
+      >
+        <i className="fas fa-shield-halved text-[10px]" />
+        <span className="text-[11px]">数据声明</span>
+      </button>
+
+      {open && (
+        <div
+          className="fixed inset-0 z-[999] flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          onClick={() => setOpen(false)}
+        >
+          <div
+            className="w-[420px] rounded-2xl bg-ink-850 border border-ink-700 shadow-2xl p-6 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg bg-amber-500/10 flex items-center justify-center">
+                  <i className="fas fa-shield-halved text-amber-400 text-sm" />
+                </div>
+                <span className="text-sm font-medium text-ink-100">数据声明</span>
+              </div>
+              <button
+                onClick={() => setOpen(false)}
+                className="text-ink-500 hover:text-ink-200 transition text-lg leading-none"
+              >
+                ×
+              </button>
+            </div>
+
+            {/* Content */}
+            <div className="space-y-3 text-[13px] text-ink-300 leading-relaxed">
+              <div className="flex gap-3">
+                <i className="fas fa-database text-ink-500 mt-0.5 text-xs" />
+                <span>本平台使用 <strong className="text-ink-200">开源数据接口</strong>（akshare / 东方财富 / 腾讯财经），数据仅供个人学习研究使用。</span>
+              </div>
+              <div className="flex gap-3">
+                <i className="fas fa-triangle-exclamation text-amber-500/70 mt-0.5 text-xs" />
+                <span>所有分析结果、形态识别、买卖信号均为 <strong className="text-ink-200">算法自动生成</strong>，不构成任何投资建议。</span>
+              </div>
+              <div className="flex gap-3">
+                <i className="fas fa-user-shield text-ink-500 mt-0.5 text-xs" />
+                <span>投资有风险，入市需谨慎。请根据自身情况独立判断，盈亏自负。</span>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <button
+              onClick={() => setOpen(false)}
+              className="w-full rounded-lg bg-ink-700 hover:bg-ink-600 text-ink-200 text-sm py-2 transition"
+            >
+              我已知晓
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 export function IndexStrip() {
   const [data, setData] = useState<MarketOverview | null>(null);
   useEffect(() => {
@@ -214,10 +283,7 @@ export function IndexStrip() {
         <span className="text-ink-500 text-[11px]">亿</span>
       </div>
       <div className="flex-1" />
-      <div className="flex items-center gap-2 text-ink-500">
-        <i className="fas fa-circle-info text-[10px]" />
-        <span>开源数据 · akshare · 仅供研究 · 不构成投资建议</span>
-      </div>
+      <DisclaimerBadge />
     </div>
   );
 }

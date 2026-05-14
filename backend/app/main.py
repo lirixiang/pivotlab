@@ -34,6 +34,7 @@ DEFAULT_SCHEDULE: dict[str, dict] = {
     "recommend_scan":       {"enabled": True,  "cron": "5 16 * * 1-5",  "label": "智能选股扫描", "desc": "每交易日16:05全市场扫描+生成交易计划"},
     "sync_indices":         {"enabled": True,  "cron": "10 16 * * 1-5", "label": "大盘指数同步", "desc": "每交易日16:10拉取上证/深成/创业板等指数日线"},
     "lifecycle_update":     {"enabled": True,  "cron": "30 16 * * 1-5", "label": "推荐生命周期", "desc": "每交易日16:30追踪所有推荐的触发/止损/止盈状态"},
+    "watchlist_patterns":   {"enabled": True,  "cron": "45 15 * * 1-5", "label": "自选形态识别", "desc": "每交易日15:45自动扫描自选股形态"},
 }
 
 
@@ -123,6 +124,18 @@ async def lifespan(app: FastAPI):
         config = _load_schedule_config()
         _apply_schedule(_scheduler, config)
         _scheduler.start()
+
+    # Pre-warm OCR engine in background thread (avoids cold-start latency on first screenshot)
+    import threading
+    def _prewarm_ocr():
+        try:
+            from .services.ocr import _get_engine
+            _get_engine()
+            logger.info("OCR engine pre-warmed")
+        except Exception as e:
+            logger.debug("OCR pre-warm skipped: %s", e)
+    threading.Thread(target=_prewarm_ocr, daemon=True).start()
+
     yield
     if _scheduler:
         _scheduler.shutdown(wait=False)

@@ -208,6 +208,9 @@ export type WatchlistItem = {
   rr_ratio: number | null;
   support_score: number | null;
   volume_ratio: number | null;
+  signal: string;
+  signal_label: string;
+  signal_reason: string;
   created_at: string;
 };
 

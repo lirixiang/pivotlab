@@ -1665,6 +1665,293 @@ def detect_high_tight_flag(code: str, name: str, candles: list[Candle], weekly_c
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Model: ma_support (均线支撑) — 回踩 MA20/MA60 附近获支撑
+# ─────────────────────────────────────────────────────────────────────
+
+def detect_ma_support(code: str, name: str, candles: list[Candle],
+                      weekly_candles: list[Candle] | None = None) -> ScreenerItem | None:
+    """价格回踩 MA20 或 MA60 附近（±3%）并站稳，同时高于更长均线。"""
+    n = len(candles)
+    if n < 60:
+        return None
+    closes = np.array([c.close for c in candles], dtype=float)
+    volumes = np.array([c.volume for c in candles], dtype=float)
+    cur = float(closes[-1])
+
+    ma20 = float(np.mean(closes[-20:]))
+    ma60 = float(np.mean(closes[-60:]))
+
+    triggers = []
+    score = 0.0
+
+    # 趋势前提: MA20 > MA60（或至少持平）
+    if ma20 < ma60 * 0.97:
+        return None
+
+    # 价格应在 MA60 之上
+    if cur < ma60 * 0.97:
+        return None
+
+    # 判断回踩到哪条均线
+    dist_ma20 = (cur - ma20) / ma20
+    dist_ma60 = (cur - ma60) / ma60
+
+    touched_ma20 = -0.03 <= dist_ma20 <= 0.03
+    touched_ma60 = -0.03 <= dist_ma60 <= 0.05
+
+    if not touched_ma20 and not touched_ma60:
+        return None
+
+    # 近 5 日有至少 1 日最低价碰到均线
+    lows_5 = np.array([c.low for c in candles[-5:]], dtype=float)
+    touched_low_ma20 = any(abs(l - ma20) / ma20 < 0.02 for l in lows_5)
+    touched_low_ma60 = any(abs(l - ma60) / ma60 < 0.02 for l in lows_5)
+    if not touched_low_ma20 and not touched_low_ma60:
+        return None
+
+    # 今日收盘应站在均线之上或附近
+    if cur < min(ma20, ma60) * 0.98:
+        return None
+
+    # 量能: 缩量回踩更好
+    vol_avg20 = float(np.mean(volumes[-20:])) if np.any(volumes[-20:]) else 1
+    vol_recent = float(np.mean(volumes[-3:])) if np.any(volumes[-3:]) else 1
+    vol_ratio = vol_recent / vol_avg20 if vol_avg20 > 0 else 1.0
+
+    # 评分
+    if touched_ma20 or touched_low_ma20:
+        triggers.append(f"回踩 MA20({ma20:.2f}) 获支撑")
+        score += 30
+    if touched_ma60 or touched_low_ma60:
+        triggers.append(f"回踩 MA60({ma60:.2f}) 获支撑")
+        score += 25
+
+    if ma20 > ma60:
+        triggers.append("MA20 > MA60 多头排列")
+        score += 15
+    if cur > ma20:
+        triggers.append(f"站上 MA20")
+        score += 10
+
+    if vol_ratio < 0.8:
+        triggers.append(f"缩量回踩 (量比{vol_ratio:.2f})")
+        score += 10
+    elif vol_ratio < 1.2:
+        score += 5
+
+    # 距 60 日高点不太远（还在趋势中）
+    hi60 = float(np.max([c.high for c in candles[-60:]]))
+    from_hi = (cur - hi60) / hi60
+    if from_hi > -0.15:
+        score += 10
+        triggers.append(f"距60日高点 {from_hi*100:.1f}%")
+
+    score = round(min(score, 100), 1)
+    if score < 40:
+        return None
+
+    change_pct = (closes[-1] / closes[-2] - 1) * 100 if n >= 2 else 0
+    stop = min(ma20, ma60) * 0.97
+    target = hi60
+    rr = _rr_ratio(cur, stop, target)
+    dist_pct = (cur - stop) / stop * 100
+
+    return ScreenerItem(
+        code=code, name=name, pattern="ma_support",
+        score=score, price=round(cur, 2),
+        change_pct=round(change_pct, 2),
+        volume_ratio=round(vol_ratio, 2),
+        breakout_price=round(hi60, 2),
+        pullback_price=round(stop, 2),
+        distance_to_support_pct=round(dist_pct, 2),
+        triggers=triggers,
+        rr_ratio=round(rr, 2),
+        support_score=0,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Model: volume_shrink_consolidation (缩量整理) — 涨后缩量横盘
+# ─────────────────────────────────────────────────────────────────────
+
+def detect_volume_shrink_consolidation(code: str, name: str, candles: list[Candle],
+                                       weekly_candles: list[Candle] | None = None) -> ScreenerItem | None:
+    """前期上涨后近 10-20 日缩量横盘整理，振幅收窄，等待突破。"""
+    n = len(candles)
+    if n < 60:
+        return None
+    closes = np.array([c.close for c in candles], dtype=float)
+    highs = np.array([c.high for c in candles], dtype=float)
+    lows = np.array([c.low for c in candles], dtype=float)
+    volumes = np.array([c.volume for c in candles], dtype=float)
+    cur = float(closes[-1])
+
+    # 前期上涨: 30-60 日前到 10 日前涨幅 >= 15%
+    base_price = float(np.min(lows[-60:-10])) if n >= 60 else float(np.min(lows[:-10]))
+    peak_price = float(np.max(highs[-30:-5]))
+    prior_gain = (peak_price - base_price) / base_price if base_price > 0 else 0
+    if prior_gain < 0.15:
+        return None
+
+    # 近 10 日整理：振幅 <= 10%
+    recent_high = float(np.max(highs[-10:]))
+    recent_low = float(np.min(lows[-10:]))
+    consolidation_range = (recent_high - recent_low) / recent_low if recent_low > 0 else 1
+    if consolidation_range > 0.10:
+        return None
+
+    # 缩量: 近 10 日均量 < 前 20 日均量 * 0.7
+    vol_recent = float(np.mean(volumes[-10:])) if np.any(volumes[-10:]) else 1
+    vol_prior = float(np.mean(volumes[-30:-10])) if np.any(volumes[-30:-10]) else 1
+    vol_ratio = vol_recent / vol_prior if vol_prior > 0 else 1
+    if vol_ratio > 0.85:
+        return None
+
+    # 现价不能跌太多(应在整理区间上半部分)
+    mid = (recent_high + recent_low) / 2
+    if cur < mid:
+        return None
+
+    triggers = [
+        f"前期涨幅 {prior_gain*100:.0f}%",
+        f"近10日横盘整理 (振幅{consolidation_range*100:.1f}%)",
+        f"缩量至 {vol_ratio:.0%} (相比前20日)",
+    ]
+    score = 0.0
+    score += min(prior_gain / 0.5 * 25, 30)       # 涨幅越大越好
+    score += (0.10 - consolidation_range) / 0.10 * 20  # 越窄越好
+    score += (0.85 - vol_ratio) / 0.85 * 20        # 越缩越好
+    score += 15 if cur >= recent_high * 0.98 else 5  # 接近上沿更好
+
+    if cur >= recent_high * 0.98:
+        triggers.append("逼近整理上沿")
+
+    ma20 = float(np.mean(closes[-20:]))
+    if cur > ma20:
+        score += 10
+        triggers.append("站上 MA20")
+
+    score = round(min(score, 100), 1)
+    if score < 35:
+        return None
+
+    change_pct = (closes[-1] / closes[-2] - 1) * 100 if n >= 2 else 0
+    stop = recent_low * 0.98
+    target = recent_high * (1 + prior_gain * 0.5)
+    rr = _rr_ratio(cur, stop, target)
+    dist_pct = (cur - stop) / stop * 100
+
+    return ScreenerItem(
+        code=code, name=name, pattern="volume_shrink_consolidation",
+        score=score, price=round(cur, 2),
+        change_pct=round(change_pct, 2),
+        volume_ratio=round(vol_ratio, 2),
+        breakout_price=round(recent_high, 2),
+        pullback_price=round(stop, 2),
+        distance_to_support_pct=round(dist_pct, 2),
+        triggers=triggers,
+        rr_ratio=round(rr, 2),
+        support_score=0,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Model: trend_strong (强势趋势) — 多头排列 + 站稳均线
+# ─────────────────────────────────────────────────────────────────────
+
+def detect_trend_strong(code: str, name: str, candles: list[Candle],
+                        weekly_candles: list[Candle] | None = None) -> ScreenerItem | None:
+    """MA10 > MA20 > MA60, 价格在 MA10 之上, 且近 20 日创新高或接近新高。
+    这是最宽松的"可以进"的形态，只要趋势向上就标记。"""
+    n = len(candles)
+    if n < 60:
+        return None
+    closes = np.array([c.close for c in candles], dtype=float)
+    highs = np.array([c.high for c in candles], dtype=float)
+    volumes = np.array([c.volume for c in candles], dtype=float)
+    cur = float(closes[-1])
+
+    ma10 = float(np.mean(closes[-10:]))
+    ma20 = float(np.mean(closes[-20:]))
+    ma60 = float(np.mean(closes[-60:]))
+
+    # 多头排列: MA10 > MA20 > MA60
+    if not (ma10 > ma20 > ma60):
+        return None
+
+    # 价格在 MA20 之上
+    if cur < ma20 * 0.99:
+        return None
+
+    triggers = [f"多头排列 MA10({ma10:.2f}) > MA20({ma20:.2f}) > MA60({ma60:.2f})"]
+    score = 40.0  # 基础分
+
+    # 价格在 MA10 之上: 额外加分
+    if cur >= ma10:
+        score += 10
+        triggers.append("站上 MA10")
+
+    # MA20 斜率向上 (对比 5 日前的 MA20)
+    if n >= 25:
+        ma20_5ago = float(np.mean(closes[-25:-5]))
+        if ma20 > ma20_5ago:
+            slope_pct = (ma20 - ma20_5ago) / ma20_5ago * 100
+            score += min(slope_pct * 3, 15)
+            triggers.append(f"MA20 上升 {slope_pct:.1f}%/周")
+
+    # 距 60 日高点
+    hi60 = float(np.max(highs[-60:]))
+    from_hi = (cur - hi60) / hi60
+    if from_hi > -0.05:
+        score += 15
+        triggers.append(f"接近60日新高 ({from_hi*100:+.1f}%)")
+    elif from_hi > -0.10:
+        score += 8
+        triggers.append(f"距60日高点 {from_hi*100:.1f}%")
+
+    # 量价配合: 近 5 日量能不萎缩
+    vol_avg20 = float(np.mean(volumes[-20:])) if np.any(volumes[-20:]) else 1
+    vol_recent = float(np.mean(volumes[-5:])) if np.any(volumes[-5:]) else 1
+    vol_ratio = vol_recent / vol_avg20 if vol_avg20 > 0 else 1
+    if vol_ratio >= 0.8:
+        score += 10
+    if vol_ratio >= 1.2:
+        triggers.append(f"放量 (量比{vol_ratio:.2f})")
+
+    # 周线趋势加分
+    if weekly_candles and len(weekly_candles) >= 10:
+        wc = [c.close for c in weekly_candles]
+        wma5 = np.mean(wc[-5:])
+        wma10 = np.mean(wc[-10:])
+        if wma5 > wma10:
+            score += 10
+            triggers.append("周线趋势向上")
+
+    score = round(min(score, 100), 1)
+    if score < 45:
+        return None
+
+    change_pct = (closes[-1] / closes[-2] - 1) * 100 if n >= 2 else 0
+    stop = ma20 * 0.97
+    target = hi60 * 1.1
+    rr = _rr_ratio(cur, stop, target)
+    dist_pct = (cur - stop) / stop * 100
+
+    return ScreenerItem(
+        code=code, name=name, pattern="trend_strong",
+        score=score, price=round(cur, 2),
+        change_pct=round(change_pct, 2),
+        volume_ratio=round(vol_ratio, 2),
+        breakout_price=round(hi60, 2),
+        pullback_price=round(stop, 2),
+        distance_to_support_pct=round(dist_pct, 2),
+        triggers=triggers,
+        rr_ratio=round(rr, 2),
+        support_score=0,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Registry
 # ─────────────────────────────────────────────────────────────────────
 

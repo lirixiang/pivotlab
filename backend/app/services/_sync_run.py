@@ -32,6 +32,7 @@ TASK_REGISTRY = {
     "daily_candles":      "sync_candles",
     "analyst_consensus":  "sync_analyst_consensus",
     "screener":           "run_screener",
+    "watchlist_patterns": "sync_watchlist_patterns",
 }
 
 # Dragon-strategy sync tasks (use a different module — dragon_sync)

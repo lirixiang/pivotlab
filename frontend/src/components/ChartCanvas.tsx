@@ -123,7 +123,7 @@ export function ChartCanvas({ candles, levels, consensus, showMA, showResistance
     // 经典算法不计算 score(始终为 0),用 score==0 视为「无评分」直接放行,
     // 仅对多因子算法(score>0)应用分数过滤。
     const visibleLevels = levels.filter(l => {
-      if (l.label === "MA20" || l.label === "MA60") return showMA;
+      if (l.label === "MA20" || l.label === "MA60") return false; // 用曲线均线替代水平线
       const s = l.score ?? 0;
       const passScore = s === 0 || s >= minScore;
       if (l.kind === "resistance") return showResistance && passScore;
@@ -421,6 +421,36 @@ export function ChartCanvas({ candles, levels, consensus, showMA, showResistance
       ctx.restore();
     }
 
+    /* ── 价格均线 MA5 / MA10 / MA20 / MA60 ── */
+    if (showMA && events.length > 0) {
+      const maLines: { color: string; getter: (e: CandleEvent) => number }[] = [
+        { color: "#f5f5f5", getter: (e) => e.priceMa5 },    // MA5 白
+        { color: "#fbbf24", getter: (e) => e.priceMa10 },   // MA10 黄
+        { color: "#f472b6", getter: (e) => e.priceMa20 },   // MA20 粉
+        { color: "#22d3ee", getter: (e) => e.priceMa60 },   // MA60 青
+      ];
+      for (const ma of maLines) {
+        ctx.save();
+        ctx.strokeStyle = ma.color;
+        ctx.globalAlpha = 0.85;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        let started = false;
+        for (let i = 0; i < n; i++) {
+          const ev = events[vp.start + i];
+          if (!ev) continue;
+          const v = ma.getter(ev);
+          if (v <= 0) { started = false; continue; }
+          const x = xOf(i);
+          const y = priceY(v);
+          if (!started) { ctx.moveTo(x, y); started = true; }
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
     /* ── latest price line ── */
     const last = slice[n - 1].close;
     const lastY = priceY(last);
@@ -595,6 +625,28 @@ export function ChartCanvas({ candles, levels, consensus, showMA, showResistance
         // 图例 MA5 / MA20
         ctx.fillStyle = "#fb923c"; ctx.fillText("MA5", PAD_L + 96, volTop + 12);
         ctx.fillStyle = "#22d3ee"; ctx.fillText("MA20", PAD_L + 130, volTop + 12);
+        ctx.restore();
+      }
+
+      // ── 价格均线图例（价格区顶部）──
+      if (showMA) {
+        ctx.save();
+        ctx.font = "10px 'JetBrains Mono', monospace";
+        ctx.textAlign = "left";
+        const lastEv2 = events[vp.start + n - 1];
+        const maItems: { label: string; color: string; val: number }[] = [
+          { label: "MA5", color: "#f5f5f5", val: lastEv2?.priceMa5 ?? 0 },
+          { label: "MA10", color: "#fbbf24", val: lastEv2?.priceMa10 ?? 0 },
+          { label: "MA20", color: "#f472b6", val: lastEv2?.priceMa20 ?? 0 },
+          { label: "MA60", color: "#22d3ee", val: lastEv2?.priceMa60 ?? 0 },
+        ];
+        let mx = PAD_L + 8;
+        for (const m of maItems) {
+          if (m.val <= 0) continue;
+          ctx.fillStyle = m.color;
+          ctx.fillText(`${m.label}:${m.val.toFixed(2)}`, mx, PAD_T + 12);
+          mx += ctx.measureText(`${m.label}:${m.val.toFixed(2)}`).width + 10;
+        }
         ctx.restore();
       }
     }

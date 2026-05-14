@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../services/api";
 import type { WatchlistItem, WatchlistScore } from "../types";
 
-type SortKey = "default" | "decision" | "change" | "price";
+type SortKey = "default" | "decision" | "change" | "price" | "market_cap";
 type SortDir = "asc" | "desc";
 
 const SORT_OPTIONS: { key: SortKey; label: string; defaultDir: SortDir }[] = [
@@ -10,6 +10,7 @@ const SORT_OPTIONS: { key: SortKey; label: string; defaultDir: SortDir }[] = [
   { key: "decision", label: "决策分", defaultDir: "desc" },
   { key: "change", label: "涨跌", defaultDir: "desc" },
   { key: "price", label: "现价", defaultDir: "desc" },
+  { key: "market_cap", label: "市值", defaultDir: "desc" },
 ];
 
 function SortBtn({ k, label, cur, dir, onClick }: {
@@ -109,6 +110,10 @@ export function WatchlistPanel({
           va = a.price ?? 0;
           vb = b.price ?? 0;
           break;
+        case "market_cap":
+          va = a.market_cap ?? 0;
+          vb = b.market_cap ?? 0;
+          break;
         default:
           return 0;
       }
@@ -117,7 +122,13 @@ export function WatchlistPanel({
     return arr;
   }, [items, scores, sortKey, sortDir]);
 
-
+  const fmtCap = (v: number) => {
+    if (!v) return "—";
+    if (v >= 1e12) return (v / 1e12).toFixed(1) + "万亿";
+    if (v >= 1e8) return (v / 1e8).toFixed(1) + "亿";
+    if (v >= 1e4) return (v / 1e4).toFixed(0) + "万";
+    return v.toFixed(0);
+  };
 
   return (
     <aside className="border-r border-ink-700 bg-ink-900 flex flex-col h-full">
@@ -134,6 +145,9 @@ export function WatchlistPanel({
           <div className="flex items-center gap-3">
             <div className="w-[40px] text-center">
               <SortBtn k="decision" label="决策分" cur={sortKey} dir={sortDir} onClick={handleSort} />
+            </div>
+            <div className="w-[44px] text-right">
+              <SortBtn k="market_cap" label="市值" cur={sortKey} dir={sortDir} onClick={handleSort} />
             </div>
             <div className="w-[50px] text-right">
               <SortBtn k="price" label="现价" cur={sortKey} dir={sortDir} onClick={handleSort} />
@@ -161,6 +175,8 @@ export function WatchlistPanel({
           const sc = scores[it.code];
           const dscore = sc?.decision_score ?? null;
           const dlabel = sc?.decision_label ?? "";
+          const capVal = it.market_cap ?? 0;
+          const concepts = it.concepts ?? [];
           const scoreColor =
             dscore === null ? "text-ink-600"
             : dscore >= 80 ? "text-cn-up"
@@ -186,6 +202,11 @@ export function WatchlistPanel({
                     {it.code} · {it.code.startsWith("6") ? "SH" : "SZ"}
                     {it.industry ? ` · ${it.industry}` : ""}
                   </div>
+                  {concepts.length > 0 && (
+                    <div className="text-[9px] text-ink-500 mt-0.5 truncate max-w-[120px]" title={concepts.join(" · ")}>
+                      {concepts.join(" · ")}
+                    </div>
+                  )}
                 </div>
                 <div className="flex items-baseline gap-3">
                   {/* Decision score */}
@@ -198,6 +219,10 @@ export function WatchlistPanel({
                     ) : (
                       <div className="text-[10px] text-ink-700">···</div>
                     )}
+                  </div>
+                  {/* Market cap */}
+                  <div className="w-[44px] text-right" title={capVal > 0 ? `总市值 ${capVal.toLocaleString()}` : ""}>
+                    <div className="text-[11px] text-ink-400 num">{fmtCap(capVal)}</div>
                   </div>
                   {/* Price */}
                   <div className="w-[50px] text-right num">

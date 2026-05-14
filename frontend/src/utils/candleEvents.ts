@@ -61,6 +61,11 @@ export type CandleEvent = {
   volStack: boolean;
   /** 量价背离：top=价新高量未新高（顶背离 ↘）, bottom=价新低量未新低（底背离 ↗） */
   divergence: "top" | "bottom" | null;
+  /** 价格均线 */
+  priceMa5: number;
+  priceMa10: number;
+  priceMa20: number;
+  priceMa60: number;
 };
 
 type OHLC = {
@@ -117,6 +122,18 @@ function detectOne(
   const tail5 = history.slice(-5);
   const volMa20 = tail20.length ? tail20.reduce((s, h) => s + (h.volume || 0), 0) / tail20.length : 0;
   const volMa5 = tail5.length ? tail5.reduce((s, h) => s + (h.volume || 0), 0) / tail5.length : 0;
+
+  // ── 价格均线（含当日 close）──
+  const allClose = [...history.map(h => h.close), cur.close];
+  const maCalc = (n: number) => {
+    if (allClose.length < n) return 0;
+    const w = allClose.slice(-n);
+    return w.reduce((s, v) => s + v, 0) / n;
+  };
+  const priceMa5 = maCalc(5);
+  const priceMa10 = maCalc(10);
+  const priceMa20 = maCalc(20);
+  const priceMa60 = maCalc(60);
   const volRatio = volMa5 > 0 ? cur.volume / volMa5 : 0;
   const highVol = volMa20 > 0 && cur.volume >= volMa20 * 3;
 
@@ -211,6 +228,10 @@ function detectOne(
     volSignal,
     volStack: false,                        // 由 detectEvents 后处理填充
     divergence: null,                       // 由 detectEvents 后处理填充
+    priceMa5,
+    priceMa10,
+    priceMa20,
+    priceMa60,
   };
 }
 

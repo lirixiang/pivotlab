@@ -625,8 +625,244 @@ def sync_quotes(_task_id: int = None) -> int:
 
         _finish_task(task_id, processed, total)
         logger.info("sync_quotes: saved %d quotes → daily_candles (today=%s)", processed, today)
+
+        # ── Phase 2: auto-backfill gaps ──
+        # Detect stocks with missing history and backfill automatically.
+        # Gap size determines backfill range — no manual sync_candles needed.
+        try:
+            _auto_backfill_gaps(today, {q["code"] for q in all_quotes})
+        except Exception as bf_err:
+            logger.warning("sync_quotes: auto-backfill failed (non-fatal): %s", bf_err)
+
     except Exception as e:
         logger.error("sync_quotes error: %s", e)
+        _finish_task(task_id, 0, 0, str(e))
+    return task_id
+
+
+# ── Auto-backfill configuration ──────────────────────────────
+_BACKFILL_MAX_DAYS = 365       # 最多回补1年历史
+_BACKFILL_MAX_STOCKS = 500     # 每次最多处理500只
+_BACKFILL_WORKERS = 8          # 并发线程数
+_BACKFILL_TIERS = [            # (gap_threshold, fetch_days)
+    (7, 30),                   # ≤7天缺口 → 拉30天
+    (30, 90),                  # ≤30天 → 拉90天
+    (90, 180),                 # ≤90天 → 拉180天
+]                              # 超出 → 拉 _BACKFILL_MAX_DAYS
+
+
+def _auto_backfill_gaps(today: str, synced_codes: set[str] | None = None):
+    """Detect and backfill candle gaps for all stocks in DB.
+
+    Runs after sync_quotes writes today's row. Checks each stock's latest
+    candle date. If there's a gap (latest < yesterday), fetches missing days
+    per-stock via EM/Tencent kline API.
+
+    Configuration constants above this function:
+      _BACKFILL_MAX_DAYS   – cap on history depth (default 365)
+      _BACKFILL_MAX_STOCKS – max stocks per run (default 500)
+      _BACKFILL_WORKERS    – concurrent threads (default 8)
+      _BACKFILL_TIERS      – gap→fetch-days mapping
+
+    Limits: max _BACKFILL_MAX_STOCKS stocks per run, _BACKFILL_WORKERS threads.
+    """
+    import requests
+    from requests.adapters import HTTPAdapter
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+    from datetime import date as _date
+
+    candle_source = _source_for("daily_candles")
+
+    with _get_session() as s:
+        codes = [r[0] for r in s.execute(select(Stock.code)).fetchall()]
+    if not codes:
+        return
+
+    # Count distinct candle days per stock in the last 30 calendar days.
+    # If a stock has fewer than 15 days (30 calendar = ~21 trading days),
+    # it likely has gaps.  Also check the second-most-recent date to detect
+    # the gap between "today" (just inserted by sync_quotes) and prior data.
+    from datetime import date as _date
+    from sqlalchemy import func as sa_func
+
+    cutoff_30 = (_date.today() - timedelta(days=30)).strftime("%Y-%m-%d")
+    today_str = today  # passed from caller
+
+    with _get_session() as s:
+        # For each stock: get 2nd latest trade_date (latest before today)
+        # This lets us detect a gap between yesterday and the last prior candle.
+        rows = s.execute(text(
+            "SELECT code, MAX(trade_date) AS prev_latest "
+            "FROM daily_candles "
+            "WHERE trade_date < :today "
+            "GROUP BY code"
+        ), {"today": today_str}).fetchall()
+    prev_latest_map = {r[0]: str(r[1]) if r[1] else None for r in rows}
+
+    yesterday = (_date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # Build backfill list: (code, start_date, gap_days)
+    need_backfill: list[tuple[str, str, int]] = []
+    for code in codes:
+        prev = prev_latest_map.get(code)
+        if not prev:
+            # No prior data — full backfill
+            beg = (_date.today() - timedelta(days=_BACKFILL_MAX_DAYS)).strftime("%Y%m%d")
+            need_backfill.append((code, beg, _BACKFILL_MAX_DAYS))
+        else:
+            prev_d = _date.fromisoformat(prev)
+            gap = (_date.today() - prev_d).days - 1  # exclude today itself
+            if gap <= 1:
+                continue  # yesterday or today — no gap
+            next_day = (prev_d + timedelta(days=1)).strftime("%Y%m%d")
+            need_backfill.append((code, next_day, gap))
+
+    if not need_backfill:
+        logger.info("sync_quotes: auto-backfill — all %d stocks up-to-date", len(codes))
+        return
+
+    # Sort by gap size descending (biggest gaps first), cap per run
+    need_backfill.sort(key=lambda x: x[2], reverse=True)
+    if len(need_backfill) > _BACKFILL_MAX_STOCKS:
+        logger.info("sync_quotes: auto-backfill — capping at %d (total needing: %d)",
+                    _BACKFILL_MAX_STOCKS, len(need_backfill))
+        need_backfill = need_backfill[:_BACKFILL_MAX_STOCKS]
+
+    # Determine fetch days based on gap size (tiered)
+    def _days_for_gap(gap: int) -> int:
+        for threshold, fetch in _BACKFILL_TIERS:
+            if gap <= threshold:
+                return fetch
+        return _BACKFILL_MAX_DAYS
+
+    total_backfill = len(need_backfill)
+    gap_stats = {}
+    for _, _, gap in need_backfill:
+        bucket = "no_data" if gap >= _BACKFILL_MAX_DAYS else f"≤{_days_for_gap(gap)}d"
+        gap_stats[bucket] = gap_stats.get(bucket, 0) + 1
+    logger.info("sync_quotes: auto-backfill — %d stocks need history %s",
+                total_backfill, gap_stats)
+
+    http = requests.Session()
+    http.headers["User-Agent"] = "Mozilla/5.0"
+    adapter = HTTPAdapter(pool_connections=4, pool_maxsize=4)
+    http.mount("https://", adapter)
+    http.mount("http://", adapter)
+
+    upsert_sql = text(
+        "INSERT INTO daily_candles (code, trade_date, open, high, low, close, volume, "
+        "amount, change_pct, change_amt, turnover_rate) "
+        "VALUES (:code, :trade_date, :open, :high, :low, :close, :volume, "
+        ":amount, :change_pct, :change_amt, :turnover_rate) "
+        "ON CONFLICT (code, trade_date) DO UPDATE SET "
+        "open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low, "
+        "close=EXCLUDED.close, volume=EXCLUDED.volume, "
+        "amount=COALESCE(EXCLUDED.amount, daily_candles.amount), "
+        "change_pct=COALESCE(EXCLUDED.change_pct, daily_candles.change_pct), "
+        "change_amt=COALESCE(EXCLUDED.change_amt, daily_candles.change_amt), "
+        "turnover_rate=COALESCE(EXCLUDED.turnover_rate, daily_candles.turnover_rate)"
+    )
+    _extra_keys = ("amount", "change_pct", "change_amt", "turnover_rate")
+    def _pad_row(r):
+        for k in _extra_keys:
+            r.setdefault(k, None)
+        return r
+
+    _req_lock = threading.Lock()
+    _last_req_time = [0.0]
+
+    def _throttled_fetch(code, beg, gap):
+        with _req_lock:
+            elapsed = time.time() - _last_req_time[0]
+            if elapsed < 0.02:
+                time.sleep(0.02 - elapsed)
+            _last_req_time[0] = time.time()
+        return _fetch_candles_batch(http, code, beg, _days_for_gap(gap), source=candle_source)
+
+    processed = 0
+    errors = 0
+    no_data = 0
+    all_rows: list[dict] = []
+
+    with ThreadPoolExecutor(max_workers=_BACKFILL_WORKERS, thread_name_prefix="backfill") as executor:
+        futures = {
+            executor.submit(_throttled_fetch, code, beg, gap): code
+            for code, beg, gap in need_backfill
+        }
+        for i, future in enumerate(as_completed(futures)):
+            code = futures[future]
+            try:
+                rows = future.result(timeout=30)
+                if rows:
+                    all_rows.extend(rows)
+                    processed += 1
+                else:
+                    no_data += 1
+            except Exception as e:
+                errors += 1
+                if errors <= 10:
+                    logger.warning("sync_quotes: backfill error for %s: %s", code, e)
+
+            # Flush to DB in batches
+            if len(all_rows) >= 10000:
+                with _get_session() as s:
+                    s.execute(upsert_sql, [_pad_row(r) for r in all_rows])
+                    s.commit()
+                logger.info("sync_quotes: backfill flushed %d rows", len(all_rows))
+                all_rows = []
+
+            done = i + 1
+            if done % 200 == 0 or done == total_backfill:
+                logger.info("sync_quotes: backfill %d/%d (ok=%d, nodata=%d, err=%d)",
+                            done, total_backfill, processed, no_data, errors)
+
+    # Final flush
+    if all_rows:
+        with _get_session() as s:
+            s.execute(upsert_sql, [_pad_row(r) for r in all_rows])
+            s.commit()
+        logger.info("sync_quotes: backfill final flush %d rows", len(all_rows))
+
+    http.close()
+    logger.info("sync_quotes: auto-backfill done — %d/%d stocks filled (nodata=%d, errors=%d)",
+                processed, total_backfill, no_data, errors)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  2b. Watchlist pattern scan (auto-triggered by scheduler)
+# ═══════════════════════════════════════════════════════════════
+
+def sync_watchlist_patterns(_task_id: int = None) -> int:
+    """Run pattern detectors against all watchlist stocks.
+
+    Designed to be called by the scheduler after quotes sync,
+    or spawned as a separate subprocess via spawn_sync("watchlist_patterns").
+    """
+    task_id = _get_or_create_task("watchlist_patterns", _task_id)
+    if task_id == -1:
+        logger.info("watchlist_patterns: already running, skipping")
+        return -1
+    try:
+        from ..models import WatchlistItem
+        with _get_session() as s:
+            rows = s.execute(select(WatchlistItem)).scalars().all()
+            items = [(r.code, r.name or r.code) for r in rows]
+
+        if not items:
+            _finish_task(task_id, 0, 0)
+            logger.info("watchlist_patterns: no watchlist items")
+            return task_id
+
+        # Reuse the same scan logic from the watchlist router
+        from ..routers.watchlist import _scan_watchlist_patterns_sync
+        result = _scan_watchlist_patterns_sync(items)
+        processed = result.get("scanned", 0)
+        total_hits = result.get("total_hits", 0)
+        _finish_task(task_id, processed, len(items))
+        logger.info("watchlist_patterns: scanned %d stocks, %d hits", processed, total_hits)
+    except Exception as e:
+        logger.error("watchlist_patterns error: %s", e)
         _finish_task(task_id, 0, 0, str(e))
     return task_id
 
@@ -2292,19 +2528,13 @@ def run_screener(_task_id: int = None, pattern: str | None = None):
     # Clear SR cache before scan (each stock gets computed once)
     clear_sr_cache()
 
-    # Auto-sync candles if stale
-    if _candles_are_stale():
-        days_to_sync = _suggest_sync_days()
-        logger.info("screener: candles are stale, syncing %d days first...", days_to_sync)
-        sync_candles(days=days_to_sync)
-        logger.info("screener: candle sync done")
-
-    # During market hours, sync quotes and build live candle map
+    # Auto-sync: sync_quotes now handles both today's data AND gap backfill
     intraday = _is_market_hours()
     quote_map: dict[str, dict] = {}
-    if intraday:
-        logger.info("screener: market hours — syncing quotes for live candles...")
+    if _candles_are_stale() or intraday:
+        logger.info("screener: syncing quotes (includes auto-backfill if gaps exist)...")
         sync_quotes()
+        logger.info("screener: sync done")
         # Batch load today's candles into memory
         from datetime import date as _date
         today = _date.today().strftime("%Y-%m-%d")

@@ -25,6 +25,21 @@ export default {
         gold: "#d4a857",
         sky2: "#7dd3fc",
       },
+      keyframes: {
+        shake: {
+          "0%,100%": { transform: "translateX(0)" },
+          "20%,60%": { transform: "translateX(-6px)" },
+          "40%,80%": { transform: "translateX(6px)" },
+        },
+        "toast-in": {
+          "0%": { opacity: "0", transform: "translateX(-50%) translateY(-12px) scale(0.95)" },
+          "100%": { opacity: "1", transform: "translateX(-50%) translateY(0) scale(1)" },
+        },
+      },
+      animation: {
+        shake: "shake 0.4s ease-in-out",
+        "toast-in": "toast-in 0.25s ease-out",
+      },
     },
   },
   plugins: [],
