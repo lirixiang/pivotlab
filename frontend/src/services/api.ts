@@ -485,6 +485,485 @@ export const api = {
     http<LlmPickResult & { llm?: { provider: string; model: string; raw_response: string; candidate_count: number }; mode?: string }>(`/llmpick/history/${ts}`),
   llmDefaultPrompt: () =>
     http<{ prompt: string }>("/llmpick/default_prompt"),
+
+  // ── Quant Trading Systems (M1) ─────────────────────────────
+  quantDefaults: () => http<QuantSystemConfig>("/quant/defaults"),
+  quantList: () => http<QuantSystemSummary[]>("/quant/systems"),
+  quantGet: (id: number) => http<QuantSystem>(`/quant/systems/${id}`),
+  quantCreate: (body: Partial<QuantSystemConfig> & { name?: string }) =>
+    http<QuantSystem>("/quant/systems", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  quantUpdate: (id: number, body: Partial<QuantSystemConfig> & { name?: string; description?: string | null; status?: string }) =>
+    http<QuantSystem>(`/quant/systems/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  quantDelete: (id: number) =>
+    http<{ ok: boolean; id: number }>(`/quant/systems/${id}`, { method: "DELETE" }),
+  quantTest: (id: number, body: { code: string; date?: string; lookback?: number }) =>
+    http<QuantTestResult>(`/quant/systems/${id}/test`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  // ── M3 ──
+  quantRun: (id: number, body?: { end_date?: string }) =>
+    http<QuantRunResult>(`/quant/systems/${id}/run`, {
+      method: "POST",
+      body: JSON.stringify(body || {}),
+    }),
+  quantRuns: (id: number, limit = 20) =>
+    http<QuantRunSummary[]>(`/quant/systems/${id}/runs?limit=${limit}`),
+  quantRunDetail: (runId: number) =>
+    http<QuantRunResult & { id: number; system_id: number; created_at: string }>(
+      `/quant/runs/${runId}`,
+    ),
+  quantRunDelete: (runId: number) =>
+    http<{ ok: boolean; id: number }>(`/quant/runs/${runId}`, { method: "DELETE" }),
+  // ── M4 回测 ──
+  quantBacktest: (
+    id: number,
+    body: {
+      start_date: string;
+      end_date: string;
+      name?: string;
+      commission_bps?: number;
+      slippage_bps?: number;
+      initial_capital?: number;
+    },
+  ) =>
+    http<QuantBacktestResult>(`/quant/systems/${id}/backtest`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  quantBacktestStock: (
+    id: number,
+    body: {
+      code: string;
+      start_date: string;
+      end_date: string;
+      commission_bps?: number;
+      slippage_bps?: number;
+    },
+  ) =>
+    http<QuantBacktestResult & { system_id: number; code: string }>(
+      `/quant/systems/${id}/backtest-stock`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  quantBacktestsList: (id: number, limit = 30) =>
+    http<QuantBacktestSummary[]>(`/quant/systems/${id}/backtests?limit=${limit}`),
+  quantBacktestDetail: (bid: number) =>
+    http<QuantBacktestDetail>(`/quant/backtests/${bid}`),
+  quantBacktestDelete: (bid: number) =>
+    http<{ ok: boolean; id: number }>(`/quant/backtests/${bid}`, { method: "DELETE" }),
+
+  // ── M5: Journal / 实盘账本 ──
+  quantPositions: (systemId: number, status: "open" | "closed" | "all" = "open") =>
+    http<QuantPositionRow[]>(`/quant/systems/${systemId}/positions?status=${status}`),
+  quantPositionFromOrder: (body: {
+    run_id: number;
+    order_index: number;
+    actual_price?: number;
+    actual_qty?: number;
+    commission?: number;
+    notes?: string;
+  }) =>
+    http<QuantPositionRow>(`/quant/positions/from-order`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  quantPositionManual: (body: {
+    system_id: number;
+    code: string;
+    name?: string;
+    qty: number;
+    entry_price: number;
+    entry_date: string;
+    stop_price?: number;
+    commission?: number;
+    notes?: string;
+  }) =>
+    http<QuantPositionRow>(`/quant/positions/manual`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  quantPositionClose: (
+    pid: number,
+    body: { exit_price: number; exit_date: string; exit_reason?: string; commission?: number },
+  ) =>
+    http<QuantPositionRow>(`/quant/positions/${pid}/close`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  quantPositionEdit: (pid: number, body: { stop_price?: number; notes?: string }) =>
+    http<QuantPositionRow>(`/quant/positions/${pid}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  quantPositionDelete: (pid: number) =>
+    http<{ ok: boolean; id: number }>(`/quant/positions/${pid}`, { method: "DELETE" }),
+  quantTrades: (systemId: number, limit = 200) =>
+    http<QuantPositionRow[]>(`/quant/systems/${systemId}/trades?limit=${limit}`),
+  quantNavSnapshot: (systemId: number, body?: { trade_date?: string }) =>
+    http<QuantNavRow & { snapshot: QuantNavSnapshotRow[] }>(
+      `/quant/systems/${systemId}/nav/snapshot`,
+      { method: "POST", body: JSON.stringify(body || {}) },
+    ),
+  quantNav: (systemId: number, opts?: { from_date?: string; to_date?: string; limit?: number }) => {
+    const p = new URLSearchParams();
+    if (opts?.from_date) p.set("from_date", opts.from_date);
+    if (opts?.to_date) p.set("to_date", opts.to_date);
+    if (opts?.limit) p.set("limit", String(opts.limit));
+    const qs = p.toString();
+    return http<QuantNavRow[]>(`/quant/systems/${systemId}/nav${qs ? "?" + qs : ""}`);
+  },
+  quantJournalSummary: (systemId: number) =>
+    http<QuantJournalSummary>(`/quant/systems/${systemId}/journal/summary`),
+};
+
+// ── Quant types ──────────────────────────────────────────────
+export type QuantRuleExpr = { expr: string; desc?: string };
+
+export type QuantUniverseCfg = {
+  base: string;
+  filters: QuantRuleExpr[];
+  exclude_codes: string[];
+  max_size: number;
+};
+
+export type QuantSignalCfg = {
+  buy: { all_of?: QuantRuleExpr[]; any_of?: QuantRuleExpr[] };
+  sell: { all_of?: QuantRuleExpr[]; any_of?: QuantRuleExpr[] };
+};
+
+export type QuantStopLoss = {
+  type: "ma" | "percent" | "atr";
+  ma_period?: number;
+  percent?: number;
+  atr_period?: number;
+  atr_mult?: number;
+};
+
+export type QuantRiskCfg = {
+  per_stock_max_pct: number;
+  total_position_max_pct: number;
+  per_trade_max_loss_pct: number;
+  stop_loss: QuantStopLoss;
+  trailing_stop: boolean;
+  drawdown_breaker_pct: number;
+};
+
+export type QuantExecCfg = {
+  mode: "semi_auto" | "manual";
+  order_type: string;
+  max_orders_per_day: number;
+  notify: { channel: string; enabled: boolean };
+};
+
+export type QuantSystemConfig = {
+  name: string;
+  description: string;
+  status: "draft" | "active" | "paused";
+  initial_capital: number;
+  universe_cfg: QuantUniverseCfg;
+  signal_cfg: QuantSignalCfg;
+  risk_cfg: QuantRiskCfg;
+  exec_cfg: QuantExecCfg;
+};
+
+export type QuantSystem = QuantSystemConfig & {
+  id: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type QuantSystemSummary = {
+  id: number;
+  name: string;
+  description: string;
+  status: "draft" | "active" | "paused";
+  initial_capital: number;
+  created_at: string;
+  updated_at: string;
+};
+
+// 试运行结果（M2）
+export type QuantRuleEvalResult = {
+  expr: string;
+  desc: string;
+  passed: boolean;
+  value: number | null;
+  error: string | null;
+};
+
+export type QuantSideReport = {
+  triggered: boolean;
+  combine: "all_of" | "any_of" | "empty";
+  rules: QuantRuleEvalResult[];
+};
+
+export type QuantTestResult = {
+  code: string;
+  date: string | null;
+  buy: QuantSideReport;
+  sell: QuantSideReport;
+  snapshot: {
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+    vol: number;
+    bars: number;
+  };
+};
+
+// ── M3: 完整 Pipeline run ──
+export type QuantCandidate = {
+  code: string;
+  name: string;
+  industry: string;
+  last_date: string;
+  last_close: number;
+  last_amount: number;
+};
+
+export type QuantSignalRecord = {
+  code: string;
+  name: string;
+  side: "buy" | "sell";
+  price: number;
+  date: string;
+  rules_hit: { expr: string; desc: string; value: number | null }[];
+  // M5: 持仓卖出信号（持仓 code 触发的 sell）携带账本信息
+  qty?: number;
+  entry_price?: number;
+  stop_price?: number;
+  pnl_pct?: number;
+  position_id?: number;
+  reasons?: string[];
+};
+
+export type QuantOrder = {
+  code: string;
+  name: string;
+  action: string;
+  price: number;
+  qty: number;
+  stop_price: number;
+  est_loss: number;
+  notional: number;
+  risk_used_pct: number;
+  reason: string;
+  rejected: boolean;
+  reject_reason: string;
+};
+
+export type QuantRunMetrics = {
+  universe_total_scanned?: number;
+  universe_passed?: number;
+  buy_signals?: number;
+  sell_signals?: number;
+  orders_rejected?: number;
+  capital_used?: number;
+  capital_used_pct?: number;
+};
+
+export type QuantRunResult = {
+  run_id?: number;
+  trade_date: string;
+  candidates: QuantCandidate[];
+  signals: QuantSignalRecord[];
+  orders: QuantOrder[];
+  universe_count: number;
+  signal_count: number;
+  order_count: number;
+  duration_ms: number;
+  error: string;
+  metrics: QuantRunMetrics;
+};
+
+export type QuantRunSummary = {
+  id: number;
+  run_type: string;
+  trade_date: string;
+  universe_count: number;
+  signal_count: number;
+  order_count: number;
+  duration_ms: number;
+  metrics: QuantRunMetrics;
+  created_at: string;
+  error: string;
+};
+
+// ── M4: 回测 ──
+export type QuantEquityPoint = {
+  date: string;
+  equity: number;
+  cash: number;
+  positions_value: number;
+  n_positions: number;
+  drawdown_pct: number;
+};
+
+export type QuantTrade = {
+  code: string;
+  name: string;
+  side: "open" | "close";
+  qty: number;
+  price: number;
+  date: string;
+  // open
+  stop_price?: number;
+  est_loss?: number;
+  notional?: number;
+  // close
+  pnl?: number;
+  pnl_pct?: number;
+  hold_days?: number;
+  reason: string;
+};
+
+export type QuantPositionEnd = {
+  code: string;
+  name: string;
+  qty: number;
+  entry_price: number;
+  entry_date: string;
+  stop_price: number;
+  last_price: number;
+  market_value: number;
+  cost_basis: number;
+  pnl: number;
+  pnl_pct: number;
+  hold_days: number;
+};
+
+export type QuantBacktestMetrics = {
+  total_return_pct: number;
+  cagr_pct: number;
+  max_drawdown_pct: number;
+  sharpe: number;
+  win_rate_pct: number;
+  trade_count: number;
+  win_count: number;
+  loss_count: number;
+  avg_win_pct: number;
+  avg_loss_pct: number;
+  profit_factor: number;
+  exposure_pct: number;
+  final_equity: number;
+};
+
+export type QuantBacktestResult = {
+  backtest_id?: number;
+  start_date: string;
+  end_date: string;
+  initial_capital: number;
+  trading_days: number;
+  equity_curve: QuantEquityPoint[];
+  trades: QuantTrade[];
+  positions_end: QuantPositionEnd[];
+  metrics: QuantBacktestMetrics;
+  duration_ms: number;
+  error: string;
+};
+
+export type QuantBacktestSummary = {
+  id: number;
+  name: string;
+  start_date: string;
+  end_date: string;
+  initial_capital: number;
+  status: string;
+  trading_days: number;
+  metrics: QuantBacktestMetrics;
+  duration_ms: number;
+  error: string;
+  created_at: string;
+};
+
+export type QuantBacktestDetail = QuantBacktestResult & {
+  id: number;
+  system_id: number;
+  name: string;
+  status: string;
+  system_snapshot: Record<string, any>;
+  params: Record<string, any>;
+  created_at: string;
+};
+
+// ── M5: Journal ──
+export type QuantPositionRow = {
+  id: number;
+  system_id: number;
+  code: string;
+  name: string;
+  qty: number;
+  entry_price: number;
+  entry_date: string;
+  stop_price: number;
+  cost_basis: number;
+  commission_in: number;
+  status: "open" | "closed";
+  exit_price: number;
+  exit_date: string;
+  exit_reason: string;
+  commission_out: number;
+  pnl: number;
+  pnl_pct: number;
+  hold_days: number;
+  source_run_id: number;
+  source_order_index: number;
+  notes: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type QuantNavRow = {
+  trade_date: string;
+  cash: number;
+  positions_value: number;
+  equity: number;
+  n_positions: number;
+  realized_pnl_total: number;
+  unrealized_pnl: number;
+  drawdown_pct: number;
+};
+
+export type QuantNavSnapshotRow = {
+  code: string;
+  name: string;
+  qty: number;
+  entry_price: number;
+  last_price: number;
+  market_value: number;
+  unrealized_pnl: number;
+  unrealized_pnl_pct: number;
+};
+
+export type QuantJournalSummary = {
+  initial_capital: number;
+  open_count: number;
+  open_cost: number;
+  closed_count: number;
+  realized_pnl_total: number;
+  realized_pnl_pct: number;
+  win_count: number;
+  loss_count: number;
+  win_rate_pct: number;
+  profit_factor: number;
+  avg_win_pct: number;
+  avg_loss_pct: number;
+  avg_hold_days: number;
+  latest_nav: {
+    trade_date: string;
+    cash: number;
+    positions_value: number;
+    equity: number;
+    drawdown_pct: number;
+    n_positions: number;
+  } | null;
 };
 
 export type LlmProvider = {

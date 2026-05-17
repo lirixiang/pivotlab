@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Candle, Level, AnalystConsensus } from "../types";
+import type { QuantTrade } from "../services/api";
 import { detectEvents, styleFor, VOL_SIGNAL_STYLE, VOL_STACK_COLOR, type CandleEvent } from "../utils/candleEvents";
 
 type Props = {
@@ -14,6 +15,7 @@ type Props = {
   minScore?: number;
   code?: string;
   name?: string;
+  trades?: QuantTrade[];
 };
 
 /* ── constants ── */
@@ -46,7 +48,7 @@ function fmtVol(v: number) {
 }
 function fmtDate(s: string) { return s.length >= 10 ? s.slice(5) : s; }
 
-export function ChartCanvas({ candles, levels, consensus, showMA, showResistance = true, showSupport = true, showVP = false, showEvents = true, minScore = 80, code, name }: Props) {
+export function ChartCanvas({ candles, levels, consensus, showMA, showResistance = true, showSupport = true, showVP = false, showEvents = true, minScore = 80, code, name, trades }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const cvRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef(0);
@@ -644,13 +646,85 @@ export function ChartCanvas({ candles, levels, consensus, showMA, showResistance
         for (const m of maItems) {
           if (m.val <= 0) continue;
           ctx.fillStyle = m.color;
-          ctx.fillText(`${m.label}:${m.val.toFixed(2)}`, mx, PAD_T + 12);
+          ctx.fillText(`${m.label}:${m.val.toFixed(2)}`, mx, PAD_T + 24);
           mx += ctx.measureText(`${m.label}:${m.val.toFixed(2)}`).width + 10;
         }
         ctx.restore();
       }
     }
     void volBarTop;
+
+    /* ── trades overlay (backtest buy/sell markers + holding shading) ── */
+    if (trades && trades.length > 0) {
+      // Build date→index map for visible slice
+      const dateIdx = new Map<string, number>();
+      for (let i = 0; i < n; i++) dateIdx.set(slice[i].date, i);
+
+      // Pair open/close trades for holding period shading
+      const opens: { date: string; price: number; idx: number }[] = [];
+      for (const t of trades) {
+        const ti = dateIdx.get(t.date);
+        if (t.side === "open") {
+          opens.push({ date: t.date, price: t.price, idx: ti ?? -1 });
+        } else if (t.side === "close") {
+          const op = opens.pop();
+          if (op) {
+            const startI = op.idx >= 0 ? op.idx : 0;
+            const endI = ti != null ? ti : n - 1;
+            if (startI <= endI && (op.idx >= 0 || ti != null)) {
+              const isWin = t.pnl != null && t.pnl > 0;
+              ctx.save();
+              ctx.fillStyle = isWin ? "rgba(16, 185, 129, 0.08)" : "rgba(239, 68, 68, 0.08)";
+              const x1 = xOf(startI) - step / 2;
+              const x2 = xOf(endI) + step / 2;
+              ctx.fillRect(x1, PAD_T, x2 - x1, priceH);
+              ctx.restore();
+            }
+          }
+        }
+      }
+
+      // Draw markers
+      for (const t of trades) {
+        const ti = dateIdx.get(t.date);
+        if (ti == null) continue;
+        const cx = xOf(ti);
+        const py = priceY(t.price);
+        const isBuy = t.side === "open";
+
+        ctx.save();
+        // Triangle marker
+        ctx.beginPath();
+        if (isBuy) {
+          // ▲ buy: pointing up, below the price
+          ctx.moveTo(cx, py + 4);
+          ctx.lineTo(cx - 5, py + 12);
+          ctx.lineTo(cx + 5, py + 12);
+        } else {
+          // ▼ sell: pointing down, above the price
+          ctx.moveTo(cx, py - 4);
+          ctx.lineTo(cx - 5, py - 12);
+          ctx.lineTo(cx + 5, py - 12);
+        }
+        ctx.closePath();
+        ctx.fillStyle = isBuy ? "#10b981" : "#ef4444";
+        ctx.fill();
+
+        // Price label
+        ctx.font = "bold 9px 'JetBrains Mono', monospace";
+        ctx.textAlign = "center";
+        ctx.fillStyle = isBuy ? "#10b981" : "#ef4444";
+        ctx.fillText(t.price.toFixed(2), cx, isBuy ? py + 22 : py - 16);
+
+        // P&L label for close trades
+        if (!isBuy && t.pnl_pct != null) {
+          ctx.font = "bold 9px 'JetBrains Mono', monospace";
+          ctx.fillStyle = t.pnl_pct >= 0 ? "#10b981" : "#ef4444";
+          ctx.fillText((t.pnl_pct >= 0 ? "+" : "") + t.pnl_pct.toFixed(1) + "%", cx, py - 24);
+        }
+        ctx.restore();
+      }
+    }
 
     /* ── crosshair + tooltip ── */
     const mouse = hoverRef.current;
@@ -740,7 +814,7 @@ export function ChartCanvas({ candles, levels, consensus, showMA, showResistance
         tx += ctx.measureText(it.v).width + 12;
       }
     }
-  }, [candles, levels, consensus, showMA, showResistance, showSupport, showVP, showEvents, events, minScore, ensureVp]);
+  }, [candles, levels, consensus, showMA, showResistance, showSupport, showVP, showEvents, events, minScore, ensureVp, trades]);
 
   /* ── schedule draw ── */
   const scheduleDraw = useCallback(() => {

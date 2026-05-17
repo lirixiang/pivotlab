@@ -76,6 +76,7 @@ class Base(DeclarativeBase):
 
 async def init_db() -> None:
     from . import models  # noqa: F401
+    from .quant import models as _quant_models  # noqa: F401  M1 量化系统表
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 

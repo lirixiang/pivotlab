@@ -11,12 +11,16 @@ export function WorkspacePage({
   onAIAnalyze,
   pendingAnalyze,
   onConsumePending,
+  strategyId,
+  onStrategyConsumed,
 }: {
   code: string;
   onSelect: (c: string) => void;
   onAIAnalyze?: (prompt: string, images?: string[]) => void;
   pendingAnalyze?: { code: string; extra: string } | null;
   onConsumePending?: () => void;
+  strategyId?: number;
+  onStrategyConsumed?: () => void;
 }) {
   const [period, setPeriod] = useState("日线");
   const [data, setData] = useState<StockDetail | null>(null);
@@ -151,7 +155,7 @@ export function WorkspacePage({
     >
       <WatchlistPanel activeCode={code} onSelect={onSelect} refreshKey={watchRefreshKey} />
 
-      <div className="flex flex-col min-h-0 overflow-hidden">
+      <div className="flex flex-col min-h-0 overflow-y-auto scrollbar">
         <ChartWorkspace
           data={data}
           loading={loading}
@@ -162,6 +166,8 @@ export function WorkspacePage({
           isWatched={watchedCodes.has(code)}
           onToggleWatch={toggleWatch}
           minScore={minScore}
+          strategyId={strategyId}
+          onStrategyConsumed={onStrategyConsumed}
           autoTriggerAI={!!(pendingAnalyze && pendingAnalyze.code === code && data && !loading)}
           onAutoTriggerConsumed={onConsumePending}
           onAIAnalyze={onAIAnalyze ? (_unused: string, imageData?: string) => {
@@ -296,20 +302,7 @@ ${imageData ? "上方附有该股票的K线截图，请结合图表形态一并�
           )}
         </div>
 
-        <div className="p-4">
-          <div className="flex items-center justify-between mb-3">
-            <span className="tag text-ink-500">压力位历史有效性</span>
-            <span className="text-[11px] text-gold">回测</span>
-          </div>
-          <div className="grid grid-cols-3 gap-2">
-            <Stat label="触及反应率" value="86" suffix="%" color="text-white" />
-            <Stat label="突破后5日收益" value="+3.4" suffix="%" color="text-cn-up" />
-            <Stat label="回踩成功率" value="68" suffix="%" color="text-white" />
-          </div>
-          <button className="mt-3 w-full py-2 rounded-md bg-ink-850 ring-soft text-[12px] text-ink-200 hover:text-white">
-            <i className="fas fa-clock-rotate-left text-[11px] mr-1" /> 查看完整回测报告
-          </button>
-        </div>
+
       </aside>
     </main>
   );
@@ -349,28 +342,6 @@ function ConfigSlider({
         onChange={(e) => setV(Number(e.target.value))}
         className="w-full accent-gold"
       />
-    </div>
-  );
-}
-
-function Stat({
-  label,
-  value,
-  suffix,
-  color,
-}: {
-  label: string;
-  value: string;
-  suffix: string;
-  color: string;
-}) {
-  return (
-    <div className="bg-ink-850 ring-soft rounded-md p-3 text-center">
-      <div className={"num text-lg " + color}>
-        {value}
-        <span className="text-[10px] text-ink-500">{suffix}</span>
-      </div>
-      <div className="text-[10px] text-ink-500 mt-0.5">{label}</div>
     </div>
   );
 }

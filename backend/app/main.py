@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .database import init_db
 from .routers import market, screener, stocks, watchlist, sync, settings, backtest, algo, strategy, dragon, recommend, llmpick, agent, ocr
+from .quant.router import router as quant_router
 from .services.data_provider import preload_candles
 from .services.sync_worker import spawn_sync
 
@@ -113,17 +114,30 @@ async def lifespan(app: FastAPI):
     except ImportError:
         logger.warning("Ray not installed, distributed training disabled")
 
-    # Only start scheduler in one worker (the first one)
+    # Only start scheduler in one worker (use file lock to guarantee single instance)
+    _scheduler_lock_fd = None
+    _is_scheduler_worker = False
     if os.environ.get("SCHEDULER_DISABLED") != "1":
-        _scheduler = BackgroundScheduler()
-        _scheduler.add_job(
-            preload_candles, "interval", minutes=30,
-            next_run_time=datetime.now(), id="preload_candles",
-        )
-        # Load and apply user-configured schedules
-        config = _load_schedule_config()
-        _apply_schedule(_scheduler, config)
-        _scheduler.start()
+        import fcntl
+        lock_path = "/tmp/pivotlab_scheduler.lock"
+        try:
+            _scheduler_lock_fd = open(lock_path, "w")
+            fcntl.flock(_scheduler_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _is_scheduler_worker = True
+        except (OSError, IOError):
+            logger.info("Another worker owns scheduler, skipping in this process")
+            _scheduler_lock_fd = None
+
+        if _is_scheduler_worker:
+            _scheduler = BackgroundScheduler()
+            _scheduler.add_job(
+                preload_candles, "interval", minutes=30,
+                next_run_time=datetime.now(), id="preload_candles",
+            )
+            # Load and apply user-configured schedules
+            config = _load_schedule_config()
+            _apply_schedule(_scheduler, config)
+            _scheduler.start()
 
     # Pre-warm OCR engine in background thread (avoids cold-start latency on first screenshot)
     import threading
@@ -172,6 +186,7 @@ app.include_router(recommend.router)
 app.include_router(llmpick.router)
 app.include_router(agent.router)
 app.include_router(ocr.router)
+app.include_router(quant_router)
 
 
 @app.get("/api/health")

@@ -2,19 +2,25 @@ import { useEffect, useRef, useState } from "react";
 import type { MarketOverview } from "../types";
 import { api } from "../services/api";
 
-export type TabKey = "recommend" | "workspace" | "screener" | "aiscan" | "llmpick" | "backtest" | "strategy" | "monitor" | "sync" | "agent";
+// NOTE (M0 重构): 重新设计为完整量化系统闭环。
+// 旧 tab 暂时注释，待新模块（system/journal）稳定后于 M6 删除。
+// 旧 tab keys: "recommend" | "screener" | "aiscan" | "llmpick" | "backtest" | "strategy" | "monitor"
+export type TabKey = "workspace" | "system" | "journal" | "sync" | "agent";
 
 const TABS: { k: TabKey; l: string }[] = [
-  { k: "recommend", l: "今日推荐" },
   { k: "workspace", l: "画线工作台" },
-  { k: "screener", l: "形态筛选" },
-  { k: "aiscan", l: "AI选股" },
-  { k: "llmpick", l: "AI精选" },
+  { k: "system", l: "交易系统" },
+  { k: "journal", l: "实盘日志" },
   { k: "agent", l: "AI对话" },
-  { k: "backtest", l: "历史回测" },
-  { k: "strategy", l: "策略引擎" },
-  { k: "monitor", l: "自选" },
   { k: "sync", l: "数据同步" },
+  // ── 旧 tab（M0 注释，M6 删除）──
+  // { k: "recommend", l: "今日推荐" },
+  // { k: "screener", l: "形态筛选" },
+  // { k: "aiscan", l: "AI选股" },
+  // { k: "llmpick", l: "AI精选" },
+  // { k: "backtest", l: "历史回测" },
+  // { k: "strategy", l: "策略引擎" },
+  // { k: "monitor", l: "自选" },
 ];
 
 type StockItem = { code: string; name: string; industry: string };

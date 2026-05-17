@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { StockDetail } from "../types";
+import { api, type QuantSystemSummary, type QuantBacktestResult, type QuantTrade, type QuantBacktestMetrics, type QuantTestResult, type QuantSideReport } from "../services/api";
 import { ChartCanvas } from "./ChartCanvas";
 import { FinancialHistoryPanel } from "./FinancialHistoryPanel";
 
@@ -16,6 +17,8 @@ type Props = {
   onAIAnalyze?: (prompt: string, imageData?: string) => void;
   autoTriggerAI?: boolean;
   onAutoTriggerConsumed?: () => void;
+  strategyId?: number;
+  onStrategyConsumed?: () => void;
 };
 
 const PERIODS = ["日线", "周线", "月线", "季线"];
@@ -44,16 +47,107 @@ function statusLabel(s: string) {
   return "待同步";
 }
 
-export function ChartWorkspace({ data, loading, period, onPeriodChange, refreshing, onRefresh, isWatched, onToggleWatch, minScore = 80, onAIAnalyze, autoTriggerAI, onAutoTriggerConsumed }: Props) {
+export function ChartWorkspace({ data, loading, period, onPeriodChange, refreshing, onRefresh, isWatched, onToggleWatch, minScore = 80, onAIAnalyze, autoTriggerAI, onAutoTriggerConsumed, strategyId, onStrategyConsumed }: Props) {
   const chartAreaRef = useRef<HTMLDivElement>(null);
   const q = data?.quote;
   const up = (q?.change_pct ?? 0) >= 0;
   const f = q?.fundamentals;
   const ac = q?.analyst_consensus;
-  const [showMA, setShowMA] = useState(false);
+  const [showMA, setShowMA] = useState(true);
   const [showRes, setShowRes] = useState(true);
   const [showSup, setShowSup] = useState(true);
   const [showVP, setShowVP] = useState(false);
+
+  // ── Strategy analysis state (backtest + signal) ──
+  const [saSystems, setSaSystems] = useState<QuantSystemSummary[]>([]);
+  const [saPickerOpen, setSaPickerOpen] = useState(false);
+  const [saRunning, setSaRunning] = useState(false);
+  const [saSystemName, setSaSystemName] = useState("");
+  const [btResult, setBtResult] = useState<{ trades: QuantTrade[]; metrics: QuantBacktestMetrics; systemName: string } | null>(null);
+  const [btError, setBtError] = useState("");
+  const [sigResult, setSigResult] = useState<{ test: QuantTestResult; systemName: string } | null>(null);
+  const [sigError, setSigError] = useState("");
+
+  // load systems list when picker opens
+  useEffect(() => {
+    if (!saPickerOpen) return;
+    api.quantList().then(setSaSystems).catch(() => {});
+  }, [saPickerOpen]);
+
+  const runAnalysis = async (systemId: number, systemName: string) => {
+    const code = q?.code;
+    if (!code) return;
+    setSaPickerOpen(false);
+    setSaRunning(true);
+    setSaSystemName(systemName);
+    setBtError("");
+    setBtResult(null);
+    setSigError("");
+    setSigResult(null);
+
+    // Update URL with strategy param
+    const newUrl = `/stock/${code}?strategy=${systemId}`;
+    if (window.location.pathname + window.location.search !== newUrl) {
+      window.history.replaceState(null, "", newUrl);
+    }
+
+    // Run backtest + signal in parallel
+    const btPromise = data?.candles?.length
+      ? (async () => {
+          try {
+            const dates = data.candles.map((c) => c.date).sort();
+            const res = await api.quantBacktestStock(systemId, { code, start_date: dates[0], end_date: dates[dates.length - 1] });
+            if (res.error) setBtError(res.error);
+            else setBtResult({ trades: res.trades, metrics: res.metrics, systemName });
+          } catch (e: any) {
+            setBtError(e?.message || "回测失败");
+          }
+        })()
+      : Promise.resolve();
+
+    const sigPromise = (async () => {
+      try {
+        const test = await api.quantTest(systemId, { code });
+        setSigResult({ test, systemName });
+      } catch (e: any) {
+        setSigError(e?.message || "信号评估失败");
+      }
+    })();
+
+    await Promise.all([btPromise, sigPromise]);
+    setSaRunning(false);
+  };
+
+  const clearAnalysis = () => {
+    setBtResult(null);
+    setBtError("");
+    setSigResult(null);
+    setSigError("");
+    setSaSystemName("");
+    // Remove strategy param from URL
+    const code = q?.code;
+    if (code) {
+      const cleanUrl = `/stock/${code}`;
+      if (window.location.search) {
+        window.history.replaceState(null, "", cleanUrl);
+      }
+    }
+  };
+
+  // Auto-trigger strategy analysis when navigating from SystemPage with strategyId
+  const strategyFiredRef = useRef<string | null>(null);
+  const currentCode = data?.quote?.code;
+  useEffect(() => {
+    if (!strategyId || !currentCode || loading) return;
+    const key = `${currentCode}_${strategyId}`;
+    if (strategyFiredRef.current === key) return;
+    strategyFiredRef.current = key;
+    // Find system name from list, then run
+    api.quantList().then((systems) => {
+      const sys = systems.find((s) => s.id === strategyId);
+      if (sys) runAnalysis(sys.id, sys.name);
+    }).catch(() => {});
+  }, [strategyId, currentCode, loading]);
 
   // Auto-fire AI analysis when triggered from outside (e.g. from Screener page)
   const firedRef = useRef<string | null>(null);
@@ -72,7 +166,7 @@ export function ChartWorkspace({ data, loading, period, onPeriodChange, refreshi
     return () => clearTimeout(t);
   }, [autoTriggerAI, data, onAIAnalyze, onAutoTriggerConsumed]);
   return (
-    <section className="bg-ink-950 flex flex-col flex-1">
+    <section className="bg-ink-950 flex flex-col">
       {/* ─── Header row 1: stock info + price + change ─── */}
       <div className="flex items-center px-5 py-2.5 border-b border-ink-800 grad-head gap-4">
         <div className="flex items-baseline gap-3">
@@ -153,6 +247,52 @@ export function ChartWorkspace({ data, loading, period, onPeriodChange, refreshi
 
         <div className="flex-1" />
 
+        {/* Strategy analysis trigger (backtest + signal combined) */}
+        {q && (
+          <div className="relative">
+            <button
+              className={"px-3 py-1.5 rounded-md ring-1 text-[12px] flex items-center gap-1.5 transition " +
+                ((btResult || sigResult)
+                  ? "bg-gold/15 text-gold ring-gold/30 hover:bg-gold/25"
+                  : "bg-ink-800 text-ink-300 ring-ink-700 hover:text-white hover:bg-ink-750") +
+                (saRunning ? " opacity-60" : "")}
+              onClick={() => (btResult || sigResult) ? clearAnalysis() : setSaPickerOpen(!saPickerOpen)}
+              disabled={saRunning}
+              title={(btResult || sigResult) ? "清除策略分析结果" : "选择策略系统进行分析"}
+            >
+              {saRunning ? (
+                <i className="fas fa-circle-notch fa-spin text-[10px]" />
+              ) : (
+                <i className="fas fa-flask text-[11px]" />
+              )}
+              {saRunning ? "分析中..." : (btResult || sigResult) ? `策略: ${saSystemName}` : "策略分析"}
+            </button>
+            {saPickerOpen && (
+              <div className="absolute top-full right-0 mt-1 z-50 w-[220px] bg-ink-900 border border-ink-700 rounded-lg shadow-xl overflow-hidden">
+                <div className="px-3 py-2 text-[11px] text-ink-400 border-b border-ink-800">选择策略系统（回测+信号）</div>
+                {saSystems.length === 0 ? (
+                  <div className="px-3 py-4 text-[11px] text-ink-500 text-center">
+                    <i className="fas fa-circle-notch fa-spin mr-1" /> 加载中...
+                  </div>
+                ) : (
+                  <div className="max-h-[200px] overflow-y-auto">
+                    {saSystems.map((s) => (
+                      <button
+                        key={s.id}
+                        className="w-full text-left px-3 py-2 text-[12px] text-ink-200 hover:bg-ink-800 hover:text-white transition flex items-center justify-between"
+                        onClick={() => runAnalysis(s.id, s.name)}
+                      >
+                        <span className="truncate">{s.name}</span>
+                        <span className="text-[10px] text-ink-500 ml-2 flex-shrink-0">{s.status === "active" ? "运行中" : s.status}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         {onAIAnalyze && (
           <button
             className="px-3 py-1.5 rounded-md bg-amber-500/10 ring-1 ring-amber-500/20 text-[12px] text-amber-400 hover:bg-amber-500/20 hover:text-amber-300 flex items-center gap-1.5 transition"
@@ -181,21 +321,123 @@ export function ChartWorkspace({ data, loading, period, onPeriodChange, refreshi
       </div>
 
       {/* ─── Main content: chart + side panel ─── */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* Chart area */}
-        <div ref={chartAreaRef} className="relative flex-1 px-5 pt-4 pb-2 overflow-hidden">
-          {loading || !data ? (
-            <div className="h-[560px] flex items-center justify-center text-ink-500 text-sm">
-              <i className="fas fa-circle-notch fa-spin mr-2" /> 正在加载行情与画线...
+      <div className="flex flex-1 min-h-0">
+        {/* Chart + backtest result area */}
+        <div className="flex-1 flex flex-col min-w-0">
+          {/* Chart area */}
+          <div ref={chartAreaRef} className="relative px-5 pt-4 pb-2">
+            {loading || !data ? (
+              <div className="h-[560px] flex items-center justify-center text-ink-500 text-sm">
+                <i className="fas fa-circle-notch fa-spin mr-2" /> 正在加载行情与画线...
+              </div>
+            ) : (
+              <ChartCanvas candles={data.candles} levels={data.levels} consensus={q?.analyst_consensus} showMA={showMA} showResistance={showRes} showSupport={showSup} showVP={showVP} minScore={minScore} code={q?.code} name={q?.name} trades={btResult?.trades} />
+            )}
+          </div>
+
+          {/* ─── Backtest result panel ─── */}
+          {(btResult || btError) && (
+            <div className="border-t border-ink-800 bg-ink-900/80 px-5 py-3 max-h-[220px] overflow-y-auto flex-shrink-0">
+              {btError ? (
+                <div className="text-red-400 text-[12px] flex items-center gap-2">
+                  <i className="fas fa-exclamation-triangle" /> 回测失败: {btError}
+                  <button className="ml-2 text-ink-500 hover:text-ink-300" onClick={clearAnalysis}><i className="fas fa-times" /></button>
+                </div>
+              ) : btResult && (
+                <div className="space-y-2">
+                  {/* Metrics row */}
+                  <div className="flex items-center gap-4 text-[12px]">
+                    <span className="text-ink-400 font-medium">
+                      <i className="fas fa-flask text-cyan-400 mr-1 text-[10px]" />
+                      {btResult.systemName}
+                    </span>
+                    <span className={btResult.metrics.total_return_pct >= 0 ? "text-cn-up num font-semibold" : "text-cn-dn num font-semibold"}>
+                      {btResult.metrics.total_return_pct >= 0 ? "+" : ""}{btResult.metrics.total_return_pct.toFixed(2)}%
+                    </span>
+                    <span className="text-ink-400">胜率 <span className="text-white num">{btResult.metrics.win_rate_pct.toFixed(0)}%</span></span>
+                    <span className="text-ink-400">最大回撤 <span className="text-red-400 num">-{btResult.metrics.max_drawdown_pct.toFixed(1)}%</span></span>
+                    <span className="text-ink-400">交易 <span className="text-white num">{btResult.metrics.trade_count}</span> 笔</span>
+                    <span className="text-ink-400">盈亏比 <span className="text-white num">{btResult.metrics.profit_factor.toFixed(2)}</span></span>
+                    <div className="flex-1" />
+                    <button className="text-ink-500 hover:text-ink-300 text-[11px]" onClick={clearAnalysis} title="清除分析">
+                      <i className="fas fa-times" />
+                    </button>
+                  </div>
+                  {/* Trades list */}
+                  {btResult.trades.length > 0 && (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-[11px]">
+                        <thead>
+                          <tr className="text-ink-500 border-b border-ink-800">
+                            <th className="text-left py-1 pr-3">日期</th>
+                            <th className="text-left py-1 pr-3">方向</th>
+                            <th className="text-right py-1 pr-3">价格</th>
+                            <th className="text-right py-1 pr-3">数量</th>
+                            <th className="text-right py-1 pr-3">盈亏</th>
+                            <th className="text-right py-1 pr-3">盈亏%</th>
+                            <th className="text-left py-1">原因</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {btResult.trades.map((t, i) => (
+                            <tr key={i} className="border-b border-ink-800/50 hover:bg-ink-800/30">
+                              <td className="py-1 pr-3 num text-ink-300">{t.date.slice(5)}</td>
+                              <td className={"py-1 pr-3 font-medium " + (t.side === "open" ? "text-cn-up" : "text-cn-dn")}>
+                                {t.side === "open" ? "▲ 买入" : "▼ 卖出"}
+                              </td>
+                              <td className="py-1 pr-3 num text-right text-ink-200">{t.price.toFixed(2)}</td>
+                              <td className="py-1 pr-3 num text-right text-ink-300">{t.qty}</td>
+                              <td className={"py-1 pr-3 num text-right " + (t.side === "close" ? (t.pnl && t.pnl > 0 ? "text-cn-up" : "text-cn-dn") : "text-ink-600")}>
+                                {t.side === "close" && t.pnl != null ? (t.pnl > 0 ? "+" : "") + t.pnl.toFixed(0) : "—"}
+                              </td>
+                              <td className={"py-1 pr-3 num text-right " + (t.side === "close" ? (t.pnl_pct && t.pnl_pct > 0 ? "text-cn-up" : "text-cn-dn") : "text-ink-600")}>
+                                {t.side === "close" && t.pnl_pct != null ? (t.pnl_pct > 0 ? "+" : "") + t.pnl_pct.toFixed(2) + "%" : "—"}
+                              </td>
+                              <td className="py-1 text-ink-500 truncate max-w-[160px]">{t.reason}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
-          ) : (
-            <ChartCanvas candles={data.candles} levels={data.levels} consensus={q?.analyst_consensus} showMA={showMA} showResistance={showRes} showSupport={showSup} showVP={showVP} minScore={minScore} code={q?.code} name={q?.name} />
           )}
         </div>
 
         {/* ─── Side info panel (like SR KLineAnalysisPanel) ─── */}
         {q && (
-          <aside className="w-[280px] flex-shrink-0 border-l border-ink-800 bg-ink-900/50 overflow-y-auto px-4 py-4 text-[12px] space-y-3">
+          <aside className="w-[280px] flex-shrink-0 border-l border-ink-800 bg-ink-900/50 overflow-y-auto scrollbar px-4 py-4 text-[12px] space-y-3">
+            {/* ── Signal evaluation (top of sidebar) ── */}
+            {(sigResult || sigError) && (
+              <>
+                <div className="rounded-lg border border-ink-700 bg-ink-900/80 p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-ink-300 font-medium text-[11px]">
+                      <i className="fas fa-bolt text-gold mr-1 text-[10px]" />
+                      信号评估
+                      <span className="text-ink-600 ml-1">{sigResult?.systemName}</span>
+                    </span>
+                    <button className="text-ink-600 hover:text-ink-300 text-[10px]" onClick={clearAnalysis} title="清除">
+                      <i className="fas fa-xmark" />
+                    </button>
+                  </div>
+                  {sigError && <div className="text-red-400 text-[11px]">{sigError}</div>}
+                  {sigResult && (
+                    <div className="space-y-2">
+                      <SignalSidePanel label="买入" side={sigResult.test.buy} />
+                      <SignalSidePanel label="卖出" side={sigResult.test.sell} />
+                      {sigResult.test.date && (
+                        <div className="text-[10px] text-ink-600 text-right">评估日期: {sigResult.test.date}</div>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <div className="border-t border-ink-800" />
+              </>
+            )}
+
             {/* Stock headline */}
             <div>
               <div className="text-white font-semibold text-[14px]">{q.name}</div>
@@ -378,5 +620,35 @@ function Row({ label, value, up, dn }: { label: string; value: string; up?: bool
         {value}
       </span>
     </>
+  );
+}
+
+function SignalSidePanel({ label, side }: { label: string; side: QuantSideReport }) {
+  if (side.rules.length === 0) return null;
+  const triggered = side.triggered;
+  return (
+    <div className={"rounded border px-2.5 py-2 text-[11px] " + (triggered ? "border-emerald-700 bg-emerald-900/15" : "border-ink-800 bg-ink-900/30")}>
+      <div className="flex items-center gap-2 mb-1.5">
+        <span className={"font-semibold " + (triggered ? "text-emerald-300" : "text-ink-400")}>
+          {triggered ? "✓" : "✗"} {label}信号
+        </span>
+        <span className="text-ink-600 text-[10px]">
+          {side.combine === "all_of" ? "全部满足" : side.combine === "any_of" ? "任一满足" : ""}
+        </span>
+      </div>
+      <div className="space-y-0.5">
+        {side.rules.map((r, i) => (
+          <div key={i} className="flex items-start gap-1.5">
+            <span className={r.passed ? "text-emerald-400" : "text-red-400"}>
+              {r.passed ? "✓" : "✗"}
+            </span>
+            <span className="text-ink-300 flex-1">{r.desc || r.expr}</span>
+            {r.value != null && (
+              <span className="text-ink-500 font-mono text-[10px]">{typeof r.value === "number" ? r.value.toFixed(2) : r.value}</span>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }

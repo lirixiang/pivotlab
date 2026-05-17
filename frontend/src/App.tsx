@@ -1,52 +1,53 @@
 import { useCallback, useEffect, useState } from "react";
 import { TopBar, IndexStrip, type TabKey } from "./components/TopBar";
 import { WorkspacePage } from "./pages/WorkspacePage";
-import { ScreenerPage } from "./pages/ScreenerPage";
-import { AIScanPage } from "./pages/AIScanPage";
-import { BacktestPage } from "./pages/BacktestPage";
-import { MonitorPage } from "./pages/MonitorPage";
+import { SystemPage } from "./pages/SystemPage";
+import { JournalPage } from "./pages/JournalPage";
 import { SyncPage } from "./pages/SyncPage";
-import { StrategyPage } from "./pages/StrategyPage";
-import { RecommendPage } from "./pages/RecommendPage";
-import { LLMPickPage } from "./pages/LLMPickPage";
 import { AgentPage } from "./pages/AgentPage";
+import { ToastContainer } from "./components/Toast";
 
 // ── URL ↔ state helpers ──
 const TAB_PATHS: Record<TabKey, string> = {
-  recommend: "/recommend",
   workspace: "/",
-  screener: "/screener",
-  aiscan: "/aiscan",
-  llmpick: "/llmpick",
-  agent: "/agent",
-  backtest: "/backtest",
-  strategy: "/strategy",
-  monitor: "/monitor",
+  system: "/system",
+  journal: "/journal",
   sync: "/sync",
+  agent: "/agent",
 };
 const PATH_TO_TAB: Record<string, TabKey> = Object.fromEntries(
   Object.entries(TAB_PATHS).map(([k, v]) => [v, k as TabKey]),
 ) as Record<string, TabKey>;
 
-function parseLocation(): { tab: TabKey; code: string } {
+// 旧路径重定向（M0）：保证书签 / 历史 URL 不 404
+const LEGACY_REDIRECT: Record<string, TabKey> = {
+  "/recommend": "system",
+  "/screener": "system",
+  "/aiscan": "system",
+  "/llmpick": "system",
+  "/backtest": "system",
+  "/strategy": "system",
+  "/algo": "system",
+  "/monitor": "journal",
+};
+
+function parseLocation(): { tab: TabKey; code: string; strategyId?: number } {
   const p = window.location.pathname;
+  const params = new URLSearchParams(window.location.search);
+  const strategyId = params.get("strategy") ? Number(params.get("strategy")) : undefined;
   // /stock/600519 → workspace with code
   const stockMatch = p.match(/^\/stock\/(\d{6})$/);
-  if (stockMatch) return { tab: "workspace", code: stockMatch[1] };
-  // /algo → redirect to strategy (merged)
-  if (p === "/algo") return { tab: "strategy", code: "" };
-  return { tab: PATH_TO_TAB[p] ?? "workspace", code: "" };
+  if (stockMatch) return { tab: "workspace", code: stockMatch[1], strategyId };
+  if (LEGACY_REDIRECT[p]) return { tab: LEGACY_REDIRECT[p], code: "", strategyId };
+  return { tab: PATH_TO_TAB[p] ?? "workspace", code: "", strategyId };
 }
 
 export default function App() {
   const [tab, setTab] = useState<TabKey>(() => parseLocation().tab);
   const [code, setCode] = useState(() => parseLocation().code || "600519");
-  const [recommendInitCode, setRecommendInitCode] = useState<string>("");
+  const [strategyId, setStrategyId] = useState<number | undefined>(() => parseLocation().strategyId);
   const [agentInitPrompt, setAgentInitPrompt] = useState<string>("");
   const [agentInitImages, setAgentInitImages] = useState<string[]>([]);
-  // When Screener requests AI analysis, jump to Workspace and auto-trigger
-  // ChartWorkspace's "AI 分析" with extra screener-only context appended.
-  const [pendingAnalyze, setPendingAnalyze] = useState<{ code: string; extra: string } | null>(null);
 
   // Push URL on tab/code change
   const pushUrl = useCallback((t: TabKey, c?: string) => {
@@ -73,39 +74,36 @@ export default function App() {
   }, [pushUrl]);
 
   // Handle stock selection — navigate to workspace
-  const goWorkspace = useCallback((c: string) => {
+  const goWorkspace = useCallback((c: string, sid?: number) => {
     setCode(c);
+    setStrategyId(sid);
     setTab("workspace");
-    const path = `/stock/${c}`;
-    if (window.location.pathname !== path) {
+    const path = `/stock/${c}` + (sid ? `?strategy=${sid}` : "");
+    if (window.location.pathname + window.location.search !== path) {
       window.history.pushState(null, "", path);
     }
   }, []);
 
-  // Handle code selection within workspace (no tab change)
+  // Handle code selection within workspace (no tab change) — preserves current strategy from URL
   const handleSelectCode = useCallback((c: string) => {
+    // Read current strategy from URL to preserve it across stock switches
+    const params = new URLSearchParams(window.location.search);
+    const sid = params.get("strategy");
+    const path = `/stock/${c}` + (sid ? `?strategy=${sid}` : "");
     setCode(c);
-    const path = `/stock/${c}`;
-    if (window.location.pathname !== path) {
+    setStrategyId(sid ? Number(sid) : undefined);
+    if (window.location.pathname + window.location.search !== path) {
       window.history.pushState(null, "", path);
-    }
-  }, []);
-
-  // Bridge: jump from Screener to Recommend filtered by stock code
-  const goRecommend = useCallback((c: string) => {
-    setRecommendInitCode(c);
-    setTab("recommend");
-    if (window.location.pathname !== "/recommend") {
-      window.history.pushState(null, "", "/recommend");
     }
   }, []);
 
   // Listen to browser back/forward
   useEffect(() => {
     const onPop = () => {
-      const { tab: t, code: c } = parseLocation();
+      const { tab: t, code: c, strategyId: sid } = parseLocation();
       setTab(t);
       if (c) setCode(c);
+      setStrategyId(sid);
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
@@ -129,35 +127,22 @@ export default function App() {
         <WorkspacePage
           code={code}
           onSelect={handleSelectCode}
+          strategyId={strategyId}
+          onStrategyConsumed={() => setStrategyId(undefined)}
           onAIAnalyze={(prompt, images) => {
             setAgentInitPrompt(prompt);
             setAgentInitImages(images || []);
             handleTabChange("agent");
           }}
-          pendingAnalyze={pendingAnalyze}
-          onConsumePending={() => setPendingAnalyze(null)}
         />
       )}
 
-      {tab === "screener" && <ScreenerPage onPickStock={goWorkspace} onShowRecommend={goRecommend}
-        onAIAnalyze={(code, extra) => { setPendingAnalyze({ code, extra }); goWorkspace(code); }} />}
-      {tab === "aiscan" && <AIScanPage defaultCode={code} />}
-      <div style={{ display: tab === "llmpick" ? "flex" : "none", flex: 1, flexDirection: "column" }}>
-        <LLMPickPage onPickStock={goWorkspace} />
-      </div>
-      {tab === "backtest" && <BacktestPage defaultCode={code} />}
-      {tab === "strategy" && <StrategyPage defaultCode={code} />}
-      {tab === "monitor" && <MonitorPage onPickStock={goWorkspace} />}
+      {tab === "system" && <SystemPage />}
+      {tab === "journal" && <JournalPage />}
       {tab === "sync" && <SyncPage />}
       {tab === "agent" && <AgentPage initialPrompt={agentInitPrompt} initialImages={agentInitImages} onConsumedPrompt={() => { setAgentInitPrompt(""); setAgentInitImages([]); }} />}
-      {tab === "recommend" && (
-        <RecommendPage
-          onPickStock={goWorkspace}
-          initialCode={recommendInitCode}
-          onClearInitial={() => setRecommendInitCode("")}
-        />
-      )}
 
+      <ToastContainer />
       <footer className="h-8 border-t border-ink-800 grad-head flex items-center px-4 text-[11px] text-ink-500 gap-4">
         <span className="flex items-center gap-1.5">
           <span className="dot bg-cn-dn" /> akshare 在线
