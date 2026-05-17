@@ -113,8 +113,8 @@ def size_order(
             stop_price=stop_price, est_loss=0, notional=0, risk_used_pct=0,
             reason=reason, rejected=True,
             reject_reason=(
-                f"手数为 0（风控={qty_by_risk}、单票={qty_by_cap}、现金={qty_by_cash}，"
-                f"min×取整100=0）"
+                f"手数为 0（风控={qty_by_risk}股、单票={qty_by_cap}股、现金={qty_by_cash}股，"
+                f"min={min(qty_by_risk, qty_by_cap, qty_by_cash)}股 取整100=0）"
             ),
         )
 

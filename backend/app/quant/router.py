@@ -440,7 +440,7 @@ async def run_system_backtest(system_id: int, body: BacktestBody):
             "signal_cfg": sys.signal_cfg,
             "risk_cfg": sys.risk_cfg,
             "exec_cfg": sys.exec_cfg,
-            "initial_capital": float(sys.initial_capital or 100000.0),
+            "initial_capital": float(sys.initial_capital or 1000000.0),
         }
 
     loop = asyncio.get_running_loop()
@@ -844,7 +844,7 @@ async def snapshot_nav(system_id: int, body: NavSnapshotBody | None = None):
         sys = await session.get(QuantSystem, system_id)
         if not sys:
             raise HTTPException(404, "system not found")
-        initial_capital = float(sys.initial_capital or 100000.0)
+        initial_capital = float(sys.initial_capital or 1000000.0)
 
         # 已平仓累计盈亏
         rs_closed = await session.execute(
@@ -1008,7 +1008,7 @@ async def journal_summary(system_id: int):
         if not sys:
             raise HTTPException(404, "system not found")
 
-        initial_capital = float(sys.initial_capital or 100000.0)
+        initial_capital = float(sys.initial_capital or 1000000.0)
 
         rs_open = await session.execute(
             select(QuantPosition).where(

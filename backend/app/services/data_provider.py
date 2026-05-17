@@ -67,6 +67,30 @@ def _market_closed_today() -> bool:
     return now.hour * 100 + now.minute > 1510
 
 
+def _latest_trade_date_str() -> str:
+    """Return the latest expected trading day as YYYYMMDD string.
+
+    - Weekday before 15:10 → previous trading day
+    - Weekday after 15:10  → today
+    - Saturday/Sunday      → last Friday
+    """
+    now = _now_cst()
+    wd = now.weekday()  # 0=Mon … 6=Sun
+    if wd < 5 and now.hour * 100 + now.minute > 1510:
+        # Weekday after market close → today is latest
+        return now.strftime("%Y%m%d")
+    # Otherwise roll back to last trading day
+    if wd == 0:      # Monday before close → Friday
+        delta = 3
+    elif wd == 6:     # Sunday → Friday
+        delta = 2
+    elif wd == 5:     # Saturday → Friday
+        delta = 1
+    else:             # Tue-Fri before close → yesterday
+        delta = 1
+    return (now - timedelta(days=delta)).strftime("%Y%m%d")
+
+
 async def _run_in_net_executor(fn, *args, timeout: float = _HTTP_TIMEOUT):
     """Run a sync function in the dedicated network thread pool with timeout."""
     loop = asyncio.get_running_loop()
@@ -462,10 +486,15 @@ def get_candles(code: str, period: str = "daily", days: int = 240) -> list[Candl
         # Already refreshed today, return cached
         return cached[-days:]
 
-    # Outside trading hours with cached data → no refresh needed
+    # Outside trading hours with cached data — check if cache is up-to-date
     if cached and not _is_trade_hours():
-        _candle_refresh_done.add(cache_key)
-        return cached[-days:]
+        last_date = cached[-1].date.replace("-", "")[:8]
+        latest_td = _latest_trade_date_str()
+        if last_date >= latest_td:
+            # Cache already has latest trading day data, no refresh needed
+            _candle_refresh_done.add(cache_key)
+            return cached[-days:]
+        # Cache is stale (missing latest trading day) — fall through to refresh
 
     if cached:
         # Have data but may be stale — do inline refresh (fast, ~1s)

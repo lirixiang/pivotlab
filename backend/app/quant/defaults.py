@@ -27,7 +27,7 @@ STAGE2_TREND_FOLLOWING = {
         "新手版退出条件：跌破 20 日线即卖。"
     ),
     "status": "draft",
-    "initial_capital": 100000.0,
+    "initial_capital": 1000000.0,
 
     "universe_cfg": {
         "base": "all_a_shares",  # 全 A 股（主板优先）
@@ -111,7 +111,7 @@ VCP_BREAKOUT = {
         "止损极窄 3-5%，目标 20%+，高 RR。适合爆发盘仓位。"
     ),
     "status": "draft",
-    "initial_capital": 100000.0,
+    "initial_capital": 1000000.0,
 
     "universe_cfg": {
         "base": "all_a_shares",
@@ -189,7 +189,7 @@ SECTOR_LEADER = {
         "适合热点盘仓位（10%），交易频次较高。"
     ),
     "status": "draft",
-    "initial_capital": 100000.0,
+    "initial_capital": 1000000.0,
 
     "universe_cfg": {
         "base": "all_a_shares",
@@ -246,6 +246,101 @@ SECTOR_LEADER = {
 }
 
 
+# ── 高盈亏比放量突破 ──────────────────────────────────────────
+
+HIGH_RR_VOLUME_BREAKOUT = {
+    "name": "高盈亏比放量突破",
+    "description": (
+        "缩量整理后放量突破策略：在波动收敛的窄幅整理末端，"
+        "等待放量突破关键价位，用整理区间底部做止损（风险窄），"
+        "突破后趋势延续做止盈（空间大）。目标盈亏比 ≥ 3:1。"
+    ),
+    "status": "draft",
+    "initial_capital": 1000000.0,
+
+    "universe_cfg": {
+        "base": "all_a_shares",
+        "filters": [
+            {"expr": "close > 10", "desc": "股价 > 10 元"},
+            {"expr": "not is_st", "desc": "非 ST"},
+            {"expr": "ma(amount, 5) > 5e7", "desc": "5 日均成交额 > 5000 万（流动性）"},
+            {"expr": "close > ma(close, 50)", "desc": "股价 > 50 日线（中期趋势向上）"},
+            {"expr": "ma(close, 50) > ma(close, 150)", "desc": "50 日线 > 150 日线（大趋势健康）"},
+        ],
+        "exclude_codes": [],
+        "max_size": 150,
+    },
+
+    "signal_cfg": {
+        "buy": {
+            "all_of": [
+                # ① 缩量整理：抛压枯竭
+                {"expr": "ma(vol, 5) < ma(vol, 20) * 0.7",
+                 "desc": "缩量整理：5 日均量 < 20 日均量 × 70%"},
+                # ② 今日放量：资金进场确认
+                {"expr": "vol > ma(vol, 20) * 1.8",
+                 "desc": "今日放量 > 20 日均量 × 1.8"},
+                # ③ 不爆量（避免天量见顶）
+                {"expr": "vol < ma(vol, 20) * 5",
+                 "desc": "今日量 < 20 日均量 × 5（防天量见顶）"},
+                # ④ 突破 20 日高点（用昨日之前的数据，避免N字假突破）
+                {"expr": "close > shift(highest(high, 20), 1)",
+                 "desc": "突破昨日前的 20 日最高（Pivot 突破）"},
+                # ⑤ 阳线实体饱满（不是上影线假突破）
+                {"expr": "(close - open) / (high - low + 0.001) > 0.5",
+                 "desc": "阳线实体 > 振幅 50%（非上影线假突破）"},
+                # ⑥ 未涨停：留出追入空间
+                {"expr": "(close - shift(close, 1)) / shift(close, 1) < 0.07",
+                 "desc": "今日涨幅 < 7%（未涨停，有追入空间）"},
+                # ⑦ 不接高开飞机
+                {"expr": "(open - shift(close, 1)) / shift(close, 1) < 0.03",
+                 "desc": "开盘价相对昨收 < +3%（不追高开）"},
+                # ⑧ 窄幅整理确认：20 日振幅 < 15%（VCP 收缩核心）
+                {"expr": "(highest(high, 20) - lowest(low, 20)) / lowest(low, 20) < 0.15",
+                 "desc": "20 日振幅 < 15%（窄幅整理，突破更猛）"},
+                # ⑨ 均线多头排列
+                {"expr": "ma(close, 5) > ma(close, 10)",
+                 "desc": "5 日线 > 10 日线（短期向上）"},
+                {"expr": "ma(close, 10) > ma(close, 20)",
+                 "desc": "10 日线 > 20 日线（中短期多头排列）"},
+            ],
+        },
+        "sell": {
+            "any_of": [
+                # 止损：跌破整理区间低点 → 突破失败
+                {"expr": "close < lowest(low, 20)",
+                 "desc": "跌破 20 日最低（突破失败止损）"},
+                # 趋势破位
+                {"expr": "close < ma(close, 20)",
+                 "desc": "跌破 20 日线（趋势破位）"},
+                # 大涨后回撤止盈
+                {"expr": "(highest(close, 30) - close) / highest(close, 30) > 0.12",
+                 "desc": "从 30 日高点回撤 > 12%（止盈）"},
+            ],
+        },
+    },
+
+    "risk_cfg": {
+        "per_stock_max_pct": 20.0,           # 单票 ≤ 20%
+        "total_position_max_pct": 80.0,
+        "per_trade_max_loss_pct": 2.0,       # 每笔最大亏 2%
+        "stop_loss": {
+            "type": "percent",
+            "percent": 7.0,                  # 止损 7%（整理区间底部）
+        },
+        "trailing_stop": False,
+        "drawdown_breaker_pct": 10.0,
+    },
+
+    "exec_cfg": {
+        "mode": "semi_auto",
+        "order_type": "limit_close",
+        "max_orders_per_day": 3,
+        "notify": {"channel": "web", "enabled": True},
+    },
+}
+
+
 # ── 所有模板汇总（前端用） ────────────────────────────────────
 
 TEMPLATES = {
@@ -272,6 +367,14 @@ TEMPLATES = {
         "desc": "短线强势股：锁定强势行业龙头 + 放量突破。占仓位 10%，需要较强执行力。",
         "tags": ["短线", "高频", "进阶"],
         "config": SECTOR_LEADER,
+    },
+    "high_rr_breakout": {
+        "key": "high_rr_breakout",
+        "name": "高盈亏比放量突破",
+        "emoji": "💥",
+        "desc": "缩量整理 + 窄幅收敛 + 放量突破，多重过滤精筛信号。止损 7%、目标盈亏比 ≥ 3:1。",
+        "tags": ["突破", "高RR", "中高频"],
+        "config": HIGH_RR_VOLUME_BREAKOUT,
     },
 }
 

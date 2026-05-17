@@ -1260,6 +1260,8 @@ function BacktestPanel({
   const [history, setHistory] = useState<QuantBacktestSummary[]>([]);
   const [tab, setTab] = useState<"curve" | "trades" | "positions" | "stats">("curve");
 
+  useEffect(() => { setCapital(initialCapital); }, [initialCapital]);
+
   const refresh = useCallback(async () => {
     try {
       const r = await api.quantBacktestsList(systemId, 20);

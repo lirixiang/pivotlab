@@ -78,7 +78,7 @@ def daily_run(
     signal_cfg = system.signal_cfg or {}
     risk_cfg = system.risk_cfg or {}
     exec_cfg = system.exec_cfg or {}
-    initial_capital = float(system.initial_capital or 100000.0)
+    initial_capital = float(system.initial_capital or 1000000.0)
     max_orders = int(exec_cfg.get("max_orders_per_day", 5))
 
     open_positions = open_positions or []

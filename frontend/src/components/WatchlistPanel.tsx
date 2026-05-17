@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../services/api";
 import type { WatchlistItem, WatchlistScore } from "../types";
 
@@ -130,6 +130,8 @@ export function WatchlistPanel({
     return v.toFixed(0);
   };
 
+  const [ocrOpen, setOcrOpen] = useState(false);
+
   return (
     <aside className="border-r border-ink-700 bg-ink-900 flex flex-col min-h-0">
       <div className="p-3 pb-0 border-b border-ink-800">
@@ -138,6 +140,13 @@ export function WatchlistPanel({
             <span className="tag text-ink-500">自选 · WATCHLIST</span>
             <span className="text-[11px] text-ink-500">{items.length}</span>
           </div>
+          <button
+            onClick={() => setOcrOpen(true)}
+            className="text-[10px] text-ink-500 hover:text-gold px-1.5 py-0.5 rounded hover:bg-ink-800 transition"
+            title="截图识别添加自选"
+          >
+            <i className="fas fa-camera mr-1" />截图导入
+          </button>
         </div>
         {/* Column headers with sort */}
         <div className="flex items-center justify-between px-0 pb-2 text-[10px]">
@@ -259,6 +268,211 @@ export function WatchlistPanel({
         })}
       </div>
 
+      {ocrOpen && (
+        <OcrImportModal
+          onClose={() => setOcrOpen(false)}
+          onImported={() => { loadWatchlist(); loadScores(); }}
+        />
+      )}
     </aside>
+  );
+}
+
+/* ── Screenshot OCR Import Modal ──────────────────────────── */
+
+type OcrCandidate = {
+  code: string; name: string; industry: string;
+  valid: boolean; in_watchlist: boolean; confidence: number; text: string;
+};
+
+function OcrImportModal({
+  onClose,
+  onImported,
+}: {
+  onClose: () => void;
+  onImported: () => void;
+}) {
+  const [candidates, setCandidates] = useState<OcrCandidate[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [extracting, setExtracting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [preview, setPreview] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const dropRef = useRef<HTMLDivElement>(null);
+
+  const processFile = async (file: File) => {
+    if (!file.type.startsWith("image/")) { setErr("请选择图片文件"); return; }
+    setPreview(URL.createObjectURL(file));
+    setExtracting(true);
+    setErr(null);
+    setCandidates([]);
+    try {
+      const res = await api.ocrExtractCodes(file);
+      setCandidates(res.candidates);
+      // Auto-select valid stocks not already in watchlist
+      const autoSel = new Set<string>();
+      for (const c of res.candidates) {
+        if (c.valid && !c.in_watchlist) autoSel.add(c.code);
+      }
+      setSelected(autoSel);
+    } catch (e: any) {
+      setErr(String(e?.message || e));
+    } finally {
+      setExtracting(false);
+    }
+  };
+
+  // Handle paste from clipboard
+  useEffect(() => {
+    const handler = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (const item of items) {
+        if (item.type.startsWith("image/")) {
+          e.preventDefault();
+          const file = item.getAsFile();
+          if (file) processFile(file);
+          return;
+        }
+      }
+    };
+    document.addEventListener("paste", handler);
+    return () => document.removeEventListener("paste", handler);
+  }, []);
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files[0];
+    if (file) processFile(file);
+  };
+
+  const toggle = (code: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(code)) next.delete(code); else next.add(code);
+      return next;
+    });
+  };
+
+  const doImport = async () => {
+    if (selected.size === 0) return;
+    setImporting(true);
+    try {
+      await api.importWatchlist([...selected]);
+      onImported();
+      onClose();
+    } catch (e: any) {
+      setErr(String(e?.message || e));
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+    >
+      <div className="bg-ink-900 border border-ink-700 rounded-xl shadow-2xl w-full max-w-lg mx-4 overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-ink-800">
+          <h3 className="text-sm font-semibold text-white">
+            <i className="fas fa-camera text-gold mr-2 text-[12px]" />截图识别 · 添加自选
+          </h3>
+          <button onClick={onClose} className="text-ink-500 hover:text-ink-300">
+            <i className="fas fa-times" />
+          </button>
+        </div>
+
+        <div className="p-4 space-y-3">
+          {/* Drop / paste / upload zone */}
+          <div
+            ref={dropRef}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={handleDrop}
+            onClick={() => fileRef.current?.click()}
+            className="border-2 border-dashed border-ink-700 hover:border-gold/40 rounded-lg p-6 text-center cursor-pointer transition"
+          >
+            {preview ? (
+              <img src={preview} alt="截图预览" className="max-h-40 mx-auto rounded" />
+            ) : (
+              <>
+                <i className="fas fa-paste text-2xl text-ink-600 mb-2 block" />
+                <div className="text-[12px] text-ink-400">
+                  <span className="text-gold">Ctrl+V 粘贴截图</span>
+                  <span className="mx-2 text-ink-600">|</span>
+                  拖拽图片到此处
+                  <span className="mx-2 text-ink-600">|</span>
+                  点击选择文件
+                </div>
+              </>
+            )}
+            <input
+              ref={fileRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) processFile(f); }}
+            />
+          </div>
+
+          {extracting && (
+            <div className="text-center text-[12px] text-ink-400 py-3">
+              <i className="fas fa-spinner fa-spin mr-2" />正在识别股票代码…
+            </div>
+          )}
+
+          {err && <div className="text-[12px] text-red-400"><i className="fas fa-exclamation-triangle mr-1" />{err}</div>}
+
+          {/* Candidate list */}
+          {candidates.length > 0 && (
+            <div className="space-y-1 max-h-48 overflow-y-auto scrollbar">
+              <div className="text-[11px] text-ink-500 mb-1">
+                识别到 {candidates.length} 个股票代码，已自动勾选可添加的：
+              </div>
+              {candidates.map((c) => (
+                <label
+                  key={c.code}
+                  className={`flex items-center gap-2 px-2 py-1.5 rounded text-[12px] cursor-pointer transition ${
+                    c.in_watchlist ? "opacity-50" : "hover:bg-ink-800"
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={selected.has(c.code)}
+                    onChange={() => toggle(c.code)}
+                    disabled={c.in_watchlist}
+                    className="accent-gold"
+                  />
+                  <span className="font-mono text-ink-200 w-16">{c.code}</span>
+                  <span className="text-ink-300 flex-1 truncate">{c.name}</span>
+                  <span className="text-ink-500 text-[10px]">{c.industry}</span>
+                  {c.in_watchlist && <span className="text-[10px] text-ink-500">已自选</span>}
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        {candidates.length > 0 && (
+          <div className="flex items-center justify-between px-4 py-3 border-t border-ink-800">
+            <span className="text-[11px] text-ink-500">已选 {selected.size} 只</span>
+            <div className="flex gap-2">
+              <button onClick={onClose} className="text-xs px-3 py-1.5 rounded bg-ink-800 text-ink-300 hover:bg-ink-700">
+                取消
+              </button>
+              <button
+                onClick={doImport}
+                disabled={importing || selected.size === 0}
+                className="text-xs px-3 py-1.5 rounded bg-gold/15 text-gold hover:bg-gold/25 disabled:opacity-50"
+              >
+                {importing ? "添加中…" : `添加 ${selected.size} 只到自选`}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }

@@ -98,6 +98,17 @@ function esc(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+function highlightText(text: string, query: string): React.ReactNode {
+  if (!query) return text;
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const parts = text.split(new RegExp(`(${escaped})`, "gi"));
+  return parts.map((part, i) =>
+    part.toLowerCase() === query.toLowerCase()
+      ? <mark key={i} className="bg-gold/30 text-gold rounded px-0.5">{part}</mark>
+      : part
+  );
+}
+
 function jsonPreview(obj: unknown): string {
   const s = JSON.stringify(obj);
   return s.length > 80 ? s.slice(0, 77) + "..." : s;
@@ -272,6 +283,18 @@ export function AgentPage({ initialPrompt, initialImages, onConsumedPrompt }: { 
     setSid(d.session_id);
     setItems([]);
   }, [provider, model, loadSessions]);
+
+  // Delete session
+  const deleteSession = useCallback(async (id: string) => {
+    try {
+      await fetch(`/api/agent/sessions/${id}`, { method: "DELETE" });
+      if (sid === id) {
+        setSid(null);
+        setItems([]);
+      }
+      await loadSessions();
+    } catch { /* ignore */ }
+  }, [sid, loadSessions]);
 
   // Send message via SSE
   const [pendingImages, setPendingImages] = useState<string[]>([]);
@@ -559,21 +582,28 @@ export function AgentPage({ initialPrompt, initialImages, onConsumedPrompt }: { 
             )}
           </div>
         </div>
-        <div className="flex-1 overflow-y-auto px-2 py-1 space-y-0.5">
+        <div className="flex-1 overflow-y-auto scrollbar px-2 py-1 space-y-0.5">
           {sessions.map(s => (
-            <button
+            <div
               key={s.id}
-              onClick={() => openSession(s.id)}
-              className={`w-full text-left px-3 py-2 rounded-md text-sm transition ${
+              className={`group relative w-full text-left px-3 py-2 rounded-md text-sm transition cursor-pointer ${
                 s.id === sid ? "bg-ink-800 text-white" : "text-ink-300 hover:bg-ink-800/60"
               }`}
+              onClick={() => openSession(s.id)}
             >
-              <div className="truncate">{s.title || "新会话"}</div>
+              <div className="truncate pr-5">{searchQ ? highlightText(s.title || "新会话", searchQ) : (s.title || "新会话")}</div>
               <div className="text-[10px] text-ink-500 mt-0.5 truncate">
                 <span className="bg-ink-700/60 px-1.5 py-0.5 rounded text-[9px]">{s.llm_provider}</span>
                 {" "}{s.llm_model}
               </div>
-            </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }}
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 text-ink-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition text-[11px] p-1"
+                title="删除会话"
+              >
+                <i className="fas fa-trash" />
+              </button>
+            </div>
           ))}
         </div>
       </aside>
@@ -611,7 +641,7 @@ export function AgentPage({ initialPrompt, initialImages, onConsumedPrompt }: { 
         </div>
 
         {/* Messages */}
-        <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden min-h-0">
+        <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden min-h-0 scrollbar">
           <div className="max-w-4xl mx-auto px-4 py-6 space-y-4">
             {items.length === 0 && !streaming && (
               <div className="flex flex-col items-center justify-center py-20 text-center">

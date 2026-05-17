@@ -29,7 +29,7 @@ class QuantSystem(Base):
     risk_cfg: Mapped[dict] = mapped_column(JSON, default=dict)
     exec_cfg: Mapped[dict] = mapped_column(JSON, default=dict)
 
-    initial_capital: Mapped[float] = mapped_column(Float, default=100000.0)
+    initial_capital: Mapped[float] = mapped_column(Float, default=1000000.0)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -95,7 +95,7 @@ class QuantBacktest(Base):
 
     start_date: Mapped[str] = mapped_column(String(10), nullable=False)
     end_date: Mapped[str] = mapped_column(String(10), nullable=False)
-    initial_capital: Mapped[float] = mapped_column(Float, default=100000.0)
+    initial_capital: Mapped[float] = mapped_column(Float, default=1000000.0)
 
     # 系统配置在回测时刻的快照（用户后续改了系统，老回测仍可重看）
     system_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)

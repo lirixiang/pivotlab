@@ -144,6 +144,15 @@ async def update_session(sid: str, req: dict):
     return {"ok": True}
 
 
+@router.delete("/sessions/{sid}")
+async def delete_session_endpoint(sid: str):
+    """Delete a session and all its messages."""
+    deleted = await session_db.delete_session(sid)
+    if not deleted:
+        raise HTTPException(404, "session not found")
+    return {"ok": True}
+
+
 @router.post("/chat/{sid}")
 async def chat_sse(sid: str, req: ChatReq, request: Request):
     """Send a message and stream the agent response via SSE."""

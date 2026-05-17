@@ -174,7 +174,7 @@ def run_backtest(
     signal_cfg = system.signal_cfg or {}
     risk_cfg = system.risk_cfg or {}
     exec_cfg = system.exec_cfg or {}
-    initial_capital = float(system.initial_capital or 100000.0)
+    initial_capital = float(system.initial_capital or 1000000.0)
     max_orders_per_day = int(exec_cfg.get("max_orders_per_day", 5))
 
     filters = universe_cfg.get("filters") or []
@@ -634,7 +634,7 @@ def run_single_stock_backtest(
     signal_cfg = system.signal_cfg or {}
     risk_cfg = system.risk_cfg or {}
     exec_cfg = system.exec_cfg or {}
-    initial_capital = float(system.initial_capital or 100000.0)
+    initial_capital = float(system.initial_capital or 1000000.0)
 
     eng = _get_engine()
     with Session(eng) as session:

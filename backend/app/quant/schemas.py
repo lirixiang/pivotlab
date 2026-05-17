@@ -12,7 +12,7 @@ class SystemBase(BaseModel):
     signal_cfg: dict = Field(default_factory=dict)
     risk_cfg: dict = Field(default_factory=dict)
     exec_cfg: dict = Field(default_factory=dict)
-    initial_capital: float = 100000.0
+    initial_capital: float = 1000000.0
 
 
 class SystemCreate(BaseModel):

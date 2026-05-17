@@ -181,3 +181,14 @@ async def log_trace(session_id: str, step: int, kind: str, payload: dict[str, An
             "INSERT INTO agent_traces(session_id, step, kind, payload) VALUES (:sid, :st, :k, CAST(:p AS JSONB))"
         ), {"sid": session_id, "st": step, "k": kind, "p": json.dumps(payload, ensure_ascii=False, default=str)})
         await s.commit()
+
+
+async def delete_session(session_id: str) -> bool:
+    """Delete a session and all its messages/traces (CASCADE)."""
+    _ensure_init()
+    async with _Session() as s:
+        r = await s.execute(text(
+            "DELETE FROM agent_sessions WHERE id = :id"
+        ), {"id": session_id})
+        await s.commit()
+        return r.rowcount > 0
