@@ -620,6 +620,33 @@ export const api = {
   },
   quantJournalSummary: (systemId: number) =>
     http<QuantJournalSummary>(`/quant/systems/${systemId}/journal/summary`),
+
+  // ── Sector Pool (赛道池) ────────────────────────────────
+  sectorPoolList: (includeArchived = false) =>
+    http<{ items: SectorPool[] }>(`/sector-pool${includeArchived ? "?include_archived=true" : ""}`),
+  sectorPoolCreate: (body: { name: string; category?: string; description?: string; rank?: number }) =>
+    http<SectorPool>("/sector-pool", { method: "POST", body: JSON.stringify(body) }),
+  sectorPoolUpdate: (id: number, body: Partial<{ name: string; category: string; description: string; rank: number; status: "active" | "archived" }>) =>
+    http<SectorPool>(`/sector-pool/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  sectorPoolDelete: (id: number) =>
+    http<{ ok: boolean; hard_deleted: boolean }>(`/sector-pool/${id}`, { method: "DELETE" }),
+  sectorPoolStocks: (sectorId: number) =>
+    http<{ items: SectorPoolStock[] }>(`/sector-pool/${sectorId}/stocks`),
+  sectorPoolAddStock: (sectorId: number, body: { code: string; tier?: number; note?: string }) =>
+    http<SectorPoolStock>(`/sector-pool/${sectorId}/stocks`, { method: "POST", body: JSON.stringify(body) }),
+  sectorPoolBulkAdd: (sectorId: number, codes: string[], tier = 2) =>
+    http<{ added: number; skipped_existing: number; skipped_unknown: number; added_codes: string[] }>(
+      `/sector-pool/${sectorId}/stocks/bulk`,
+      { method: "POST", body: JSON.stringify({ codes, tier }) },
+    ),
+  sectorPoolUpdateStock: (sectorId: number, code: string, body: { tier?: number; note?: string }) =>
+    http<SectorPoolStock>(`/sector-pool/${sectorId}/stocks/${code}`, { method: "PATCH", body: JSON.stringify(body) }),
+  sectorPoolRemoveStock: (sectorId: number, code: string) =>
+    http<{ ok: boolean }>(`/sector-pool/${sectorId}/stocks/${code}`, { method: "DELETE" }),
+  sectorPoolCodesUnion: (poolIds: number[], tierMax = 3) =>
+    http<{ codes: string[]; total: number; by_pool: Record<string, string[]> }>(
+      `/sector-pool/codes/union?pool_ids=${poolIds.join(",")}&tier_max=${tierMax}`,
+    ),
 };
 
 // ── Quant types ──────────────────────────────────────────────
@@ -630,6 +657,32 @@ export type QuantUniverseCfg = {
   filters: QuantRuleExpr[];
   exclude_codes: string[];
   max_size: number;
+  sector_pool_ids?: number[];
+  sector_pool_tier_max?: number;
+};
+
+// ── Sector Pool types ────────────────────────────────────────
+export type SectorPool = {
+  id: number;
+  name: string;
+  category: string;
+  description: string;
+  rank: number;
+  status: "active" | "archived";
+  stock_count: number;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+export type SectorPoolStock = {
+  id: number;
+  sector_id: number;
+  code: string;
+  name: string;
+  industry: string;
+  tier: number;
+  note: string;
+  added_at: string | null;
 };
 
 export type QuantSignalCfg = {

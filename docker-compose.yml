@@ -9,7 +9,7 @@ services:
     container_name: data-sync-worker
     network_mode: host
     ipc: host
-    shm_size: "4g"
+    shm_size: "4e4g"
     volumes:
       - ./backend:/app/backend
     environment:

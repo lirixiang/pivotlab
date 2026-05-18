@@ -451,3 +451,58 @@ class DragonSignal(Base):
         Index("idx_dragon_signal_date", "trade_date"),
         Index("idx_dragon_signal_score", "dragon_score"),
     )
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Sector Pool (人工维护的"主线赛道池" — Universe filter source)
+#
+#  设计要点：
+#   - 完全独立于自动抓取的 ConceptBoard/StockConcept（那是泛概念，几百个）
+#   - 用户精选 20-30 个主线赛道，每个赛道 3-5 只龙头股
+#   - 个股可归属多个赛道 (UNIQUE 含 removed_at 实现软删除友好)
+#   - 软删除 (archived_at / removed_at) 保留历史快照，第一版前端不暴露
+#   - 被 quant pipeline 在 Universe 段消费（不进入买卖信号层）
+# ═══════════════════════════════════════════════════════════════
+
+class SectorPool(Base):
+    """人工维护的赛道（如 CPO / 液冷 / AI 服务器）。"""
+    __tablename__ = "sector_pools"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(60), nullable=False)
+    category: Mapped[str] = mapped_column(String(40), default="")          # 上级分组，如 "AI算力"
+    description: Mapped[str] = mapped_column(Text, default="")             # 赛道逻辑/催化备注
+    rank: Mapped[int] = mapped_column(Integer, default=0)                  # 手动排序，越小越靠前
+    status: Mapped[str] = mapped_column(String(16), default="active")      # active / archived
+    archived_at: Mapped[str] = mapped_column(String(32), default="")       # ISO ts, 空=未归档
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        # 同名赛道在 active 状态下唯一；归档版本不冲突（archived_at 不同）
+        UniqueConstraint("name", "archived_at", name="uq_sector_pool_name_archived"),
+        Index("idx_sector_pool_status", "status"),
+        Index("idx_sector_pool_category", "category"),
+    )
+
+
+class SectorPoolStock(Base):
+    """赛道-个股 多对多关系，带 tier 标签。"""
+    __tablename__ = "sector_pool_stocks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    sector_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    code: Mapped[str] = mapped_column(String(10), nullable=False)
+    tier: Mapped[int] = mapped_column(Integer, default=2)                  # 1=龙一 / 2=龙二 / 3=跟风补涨
+    note: Mapped[str] = mapped_column(String(120), default="")
+    added_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    removed_at: Mapped[str] = mapped_column(String(32), default="")        # ISO ts, 空=未删除
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        # (sector_id, code, removed_at) 唯一：同赛道内同股票不重复，
+        # 但被移除后可以重新加入（removed_at 不同）
+        UniqueConstraint("sector_id", "code", "removed_at", name="uq_sector_stock_sid_code_removed"),
+        Index("idx_sector_pool_stocks_sid", "sector_id"),
+        Index("idx_sector_pool_stocks_code", "code"),
+    )

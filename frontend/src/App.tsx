@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { TopBar, IndexStrip, type TabKey } from "./components/TopBar";
 import { WorkspacePage } from "./pages/WorkspacePage";
 import { SystemPage } from "./pages/SystemPage";
+import { SectorPoolPage } from "./pages/SectorPoolPage";
 import { JournalPage } from "./pages/JournalPage";
 import { SyncPage } from "./pages/SyncPage";
 import { AgentPage } from "./pages/AgentPage";
@@ -11,6 +12,7 @@ import { ToastContainer } from "./components/Toast";
 const TAB_PATHS: Record<TabKey, string> = {
   workspace: "/",
   system: "/system",
+  sector: "/sector-pool",
   journal: "/journal",
   sync: "/sync",
   agent: "/agent",
@@ -138,6 +140,7 @@ export default function App() {
       )}
 
       {tab === "system" && <SystemPage />}
+      {tab === "sector" && <SectorPoolPage />}
       {tab === "journal" && <JournalPage />}
       {tab === "sync" && <SyncPage />}
       {tab === "agent" && <AgentPage initialPrompt={agentInitPrompt} initialImages={agentInitImages} onConsumedPrompt={() => { setAgentInitPrompt(""); setAgentInitImages([]); }} />}

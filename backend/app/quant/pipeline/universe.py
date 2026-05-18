@@ -24,7 +24,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from ...database import DATABASE_URL
-from ...models import DailyCandle, Stock
+from ...models import DailyCandle, SectorPoolStock, Stock
 from ..dsl import eval_rule
 
 logger = logging.getLogger(__name__)
@@ -59,6 +59,22 @@ def _is_main_board(code: str) -> bool:
 def _load_stocks(session: Session) -> list[Stock]:
     rows = list(session.execute(select(Stock)).scalars().all())
     return [s for s in rows if _is_main_board(s.code)]
+
+
+def _load_sector_pool_codes(
+    session: Session, pool_ids: list[int], tier_max: int
+) -> set[str]:
+    """返回若干赛道池里所有 active 个股代码的并集（tier <= tier_max）。"""
+    if not pool_ids:
+        return set()
+    rows = session.execute(
+        select(SectorPoolStock.code).where(
+            SectorPoolStock.sector_id.in_(pool_ids),
+            SectorPoolStock.removed_at == "",
+            SectorPoolStock.tier <= int(tier_max),
+        )
+    ).scalars().all()
+    return set(rows)
 
 
 def _load_candles_bulk(
@@ -114,6 +130,10 @@ def scan_universe(cfg: dict, end_date: str | None = None) -> dict[str, Any]:
     filters = cfg.get("filters") or []
     exclude_codes = set(cfg.get("exclude_codes") or [])
     max_size = int(cfg.get("max_size") or 200)
+    # ── 赛道池过滤（人工维护，可选）──
+    # 若 sector_pool_ids 非空，仅保留属于这些赛道池的股票（取并集再与基础池交集）
+    sector_pool_ids = [int(x) for x in (cfg.get("sector_pool_ids") or [])]
+    sector_tier_max = int(cfg.get("sector_pool_tier_max") or 3)
     lookback = 260  # 至少要够 200 日线 + 缓冲
 
     cutoff = (
@@ -126,8 +146,32 @@ def scan_universe(cfg: dict, end_date: str | None = None) -> dict[str, Any]:
         stocks = _load_stocks(session)
         stock_map = {s.code: s for s in stocks}
         codes = [s.code for s in stocks if s.code not in exclude_codes]
+
+        # 应用赛道池交集（如果配置了）
+        sector_filter_active = bool(sector_pool_ids)
+        if sector_filter_active:
+            sector_codes = _load_sector_pool_codes(session, sector_pool_ids, sector_tier_max)
+            before = len(codes)
+            codes = [c for c in codes if c in sector_codes]
+            logger.info(
+                "[quant.universe] sector_pool filter ACTIVE: pools=%s tier_max=%d "
+                "pool_codes=%d, base_codes=%d -> after_intersect=%d",
+                sector_pool_ids, sector_tier_max, len(sector_codes), before, len(codes),
+            )
+        else:
+            logger.info(
+                "[quant.universe] sector_pool filter INACTIVE (cfg.sector_pool_ids is empty). "
+                "cfg keys=%s",
+                sorted(list((cfg or {}).keys())),
+            )
+
         if not codes:
-            return {"candidates": [], "total_scanned": 0, "passed": 0, "duration_ms": 0}
+            return {
+                "candidates": [],
+                "total_scanned": 0,
+                "passed": 0,
+                "duration_ms": int((time.time() - t0) * 1000),
+            }
 
         candle_map = _load_candles_bulk(session, codes, cutoff_s, lookback)
 

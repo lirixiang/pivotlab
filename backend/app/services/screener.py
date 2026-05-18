@@ -1993,24 +1993,34 @@ def detect_volume_breakout_resistance(
     except Exception:
         return None
 
+    # Breakout window: accept breakouts that happened within the last `breakout_lookback`
+    # trading days (today inclusive). The reference close used to decide "was overhead"
+    # is therefore the minimum close over that window, not just yesterday.
+    breakout_lookback = 3
+    window_prior_closes = closes[-(breakout_lookback + 1):-1] if len(closes) >= breakout_lookback + 1 else closes[:-1]
+    ref_close = min(window_prior_closes) if window_prior_closes else prev_close
+
     resistances = [
         lv for lv in levels
-        if lv.kind == "resistance" and lv.price > prev_close * 0.99
+        if lv.kind == "resistance" and lv.price > ref_close * 0.99
     ]
     if not resistances:
         return None
 
-    # Sort by price ascending → find the nearest STRONG resistance that was just broken
-    # Only consider resistances with score ≥ 50; weak ones are not meaningful breakouts
+    # Sort by price ascending → find the nearest broken resistance.
+    # Score ≥ 35 keeps modest-strength levels in play (was 50).
     resistances.sort(key=lambda lv: lv.price)
     broken = None
     for r in resistances:
-        if r.score < 50:
-            continue  # skip weak resistance
-        # Today's close above resistance, yesterday's close was below or near
-        if cur >= r.price and prev_close < r.price * 1.005:
+        if r.score < 35:
+            continue  # skip very weak resistance
+        if cur < r.price:
+            continue  # today must still be at/above the level
+        # Breakout transition: at least one close in the last `breakout_lookback`
+        # prior bars was below (or only marginally above) the level.
+        if any(pc < r.price * 1.005 for pc in window_prior_closes):
             broken = r
-            break  # first (nearest) strong broken resistance
+            break  # first (nearest) broken resistance
 
     if broken is None:
         return None

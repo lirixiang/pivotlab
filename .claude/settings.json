@@ -1,0 +1,9 @@
+{
+  "model": "claude-opus-4-6",
+  "effortLevel": "medium",
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://aigw.gino.plus",
+    "ANTHROPIC_AUTH_TOKEN": "sk-9FSfvuoxb5HmHTZmofwQH1ajIGN2aUKtxM6AnANiCVcmzNcU",
+    "ANTHROPIC_MODEL": "claude-opus-4-6"
+  }
+}

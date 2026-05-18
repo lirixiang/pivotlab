@@ -33,7 +33,7 @@ from ..dsl import eval_rule
 from ..models import QuantSystem
 from .risk import size_order
 from .signal import evaluate_signal
-from .universe import _get_engine, _is_main_board
+from .universe import _get_engine, _is_main_board, _load_sector_pool_codes
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +81,11 @@ class StockSeries:
 
 
 def _load_all_series(
-    session: Session, start_date: str, end_date: str, warmup_days: int = 420
+    session: Session,
+    start_date: str,
+    end_date: str,
+    warmup_days: int = 420,
+    allowed_codes: set[str] | None = None,
 ) -> dict[str, StockSeries]:
     cutoff = (date.fromisoformat(start_date) - timedelta(days=warmup_days)).strftime("%Y-%m-%d")
 
@@ -89,6 +93,9 @@ def _load_all_series(
     stocks = [s for s in stocks if _is_main_board(s.code)]
     stock_map = {s.code: s for s in stocks}
     codes = list(stock_map.keys())
+    if allowed_codes is not None:
+        codes = [c for c in codes if c in allowed_codes]
+        stock_map = {c: stock_map[c] for c in codes}
 
     if not codes:
         return {}
@@ -183,9 +190,23 @@ def run_backtest(
     total_position_max_pct = float(risk_cfg.get("total_position_max_pct", 80.0))
     drawdown_breaker_pct = float(risk_cfg.get("drawdown_breaker_pct", 0.0) or 0.0)
 
+    # 赛道池白名单（如果配了，仅在池内股票走回测）
+    sector_pool_ids = [int(x) for x in (universe_cfg.get("sector_pool_ids") or [])]
+    sector_tier_max = int(universe_cfg.get("sector_pool_tier_max") or 3)
+
     eng = _get_engine()
     with Session(eng) as session:
-        series_map = _load_all_series(session, start_date, end_date)
+        allowed_codes: set[str] | None = None
+        if sector_pool_ids:
+            allowed_codes = _load_sector_pool_codes(session, sector_pool_ids, sector_tier_max)
+            logger.info(
+                "[backtest] sector_pool filter: pools=%s tier_max=%d -> %d codes",
+                sector_pool_ids, sector_tier_max, len(allowed_codes),
+            )
+            if not allowed_codes:
+                return _empty_result(start_date, end_date, initial_capital, t0,
+                                     err="赛道池内没有有效个股")
+        series_map = _load_all_series(session, start_date, end_date, allowed_codes=allowed_codes)
 
     if not series_map:
         return _empty_result(start_date, end_date, initial_capital, t0,

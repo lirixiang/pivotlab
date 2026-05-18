@@ -263,47 +263,46 @@ HIGH_RR_VOLUME_BREAKOUT = {
         "filters": [
             {"expr": "close > 10", "desc": "股价 > 10 元"},
             {"expr": "not is_st", "desc": "非 ST"},
-            {"expr": "ma(amount, 5) > 5e7", "desc": "5 日均成交额 > 5000 万（流动性）"},
+            {"expr": "ma(amount, 5) > 3e7", "desc": "5 日均成交额 > 3000 万（流动性）"},
             {"expr": "close > ma(close, 50)", "desc": "股价 > 50 日线（中期趋势向上）"},
-            {"expr": "ma(close, 50) > ma(close, 150)", "desc": "50 日线 > 150 日线（大趋势健康）"},
         ],
         "exclude_codes": [],
-        "max_size": 150,
+        "max_size": 300,
     },
 
     "signal_cfg": {
         "buy": {
             "all_of": [
-                # ① 缩量整理：抛压枯竭
-                {"expr": "ma(vol, 5) < ma(vol, 20) * 0.7",
-                 "desc": "缩量整理：5 日均量 < 20 日均量 × 70%"},
-                # ② 今日放量：资金进场确认
-                {"expr": "vol > ma(vol, 20) * 1.8",
-                 "desc": "今日放量 > 20 日均量 × 1.8"},
-                # ③ 不爆量（避免天量见顶）
-                {"expr": "vol < ma(vol, 20) * 5",
-                 "desc": "今日量 < 20 日均量 × 5（防天量见顶）"},
-                # ④ 突破 20 日高点（用昨日之前的数据，避免N字假突破）
+                # 核心①：缩量后放量（量价配合的灵魂）
+                {"expr": "ma(vol, 5) < ma(vol, 20) * 0.75",
+                 "desc": "缩量整理：5 日均量 < 20 日均量 × 75%"},
+                # 核心②：今日放量确认
+                {"expr": "vol > ma(vol, 20) * 1.5",
+                 "desc": "今日放量 > 20 日均量 × 1.5"},
+                # 核心③：突破 20 日高点
                 {"expr": "close > shift(highest(high, 20), 1)",
                  "desc": "突破昨日前的 20 日最高（Pivot 突破）"},
-                # ⑤ 阳线实体饱满（不是上影线假突破）
-                {"expr": "(close - open) / (high - low + 0.001) > 0.5",
-                 "desc": "阳线实体 > 振幅 50%（非上影线假突破）"},
-                # ⑥ 未涨停：留出追入空间
-                {"expr": "(close - shift(close, 1)) / shift(close, 1) < 0.07",
-                 "desc": "今日涨幅 < 7%（未涨停，有追入空间）"},
-                # ⑦ 不接高开飞机
-                {"expr": "(open - shift(close, 1)) / shift(close, 1) < 0.03",
-                 "desc": "开盘价相对昨收 < +3%（不追高开）"},
-                # ⑧ 窄幅整理确认：20 日振幅 < 15%（VCP 收缩核心）
-                {"expr": "(highest(high, 20) - lowest(low, 20)) / lowest(low, 20) < 0.15",
-                 "desc": "20 日振幅 < 15%（窄幅整理，突破更猛）"},
-                # ⑨ 均线多头排列
-                {"expr": "ma(close, 5) > ma(close, 10)",
-                 "desc": "5 日线 > 10 日线（短期向上）"},
-                {"expr": "ma(close, 10) > ma(close, 20)",
-                 "desc": "10 日线 > 20 日线（中短期多头排列）"},
+                # 核心④：阳线实体饱满
+                {"expr": "(close - open) / (high - low + 0.001) > 0.4",
+                 "desc": "阳线实体 > 振幅 40%（非上影线假突破）"},
             ],
+            "optional": {
+                "min_match": 2,
+                "rules": [
+                    # 可选①：窄幅整理（放宽到 20%）
+                    {"expr": "(highest(high, 20) - lowest(low, 20)) / lowest(low, 20) < 0.20",
+                     "desc": "20 日振幅 < 20%（窄幅整理）"},
+                    # 可选②：未涨停
+                    {"expr": "(close - shift(close, 1)) / shift(close, 1) < 0.07",
+                     "desc": "今日涨幅 < 7%（未涨停，有追入空间）"},
+                    # 可选③：不爆量
+                    {"expr": "vol < ma(vol, 20) * 5",
+                     "desc": "今日量 < 20 日均量 × 5（防天量见顶）"},
+                    # 可选④：短期均线向上
+                    {"expr": "ma(close, 5) > ma(close, 10)",
+                     "desc": "5 日线 > 10 日线（短期向上）"},
+                ],
+            },
         },
         "sell": {
             "any_of": [

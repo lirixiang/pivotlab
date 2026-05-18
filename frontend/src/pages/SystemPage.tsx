@@ -2313,13 +2313,29 @@ function UniverseSection({
   const [base, setBase] = useState(cfg?.base ?? "all_a_shares");
   const [maxSize, setMaxSize] = useState(cfg?.max_size ?? 200);
   const [filters, setFilters] = useState<RuleItem[]>(cfg?.filters || []);
+  const [sectorPoolIds, setSectorPoolIds] = useState<number[]>(
+    (cfg as any)?.sector_pool_ids || [],
+  );
+  const [sectorTierMax, setSectorTierMax] = useState<number>(
+    (cfg as any)?.sector_pool_tier_max ?? 3,
+  );
+  const [allPools, setAllPools] = useState<import("../services/api").SectorPool[]>([]);
 
   // reset on system change
   useEffect(() => {
     setBase(system.universe_cfg?.base ?? "all_a_shares");
     setMaxSize(system.universe_cfg?.max_size ?? 200);
     setFilters(system.universe_cfg?.filters || []);
+    setSectorPoolIds(((system.universe_cfg as any)?.sector_pool_ids) || []);
+    setSectorTierMax(((system.universe_cfg as any)?.sector_pool_tier_max) ?? 3);
   }, [system.id, system.updated_at]);
+
+  // load sector pools once when entering edit mode
+  useEffect(() => {
+    if (editing && allPools.length === 0) {
+      api.sectorPoolList().then((r) => setAllPools(r.items)).catch(() => {});
+    }
+  }, [editing, allPools.length]);
 
   const save = async () => {
     setSaving(true);
@@ -2330,7 +2346,9 @@ function UniverseSection({
           base,
           max_size: maxSize,
           filters: filters.filter((r) => r.expr.trim()),
-        },
+          sector_pool_ids: sectorPoolIds,
+          sector_pool_tier_max: sectorTierMax,
+        } as any,
       });
       setEditing(false);
     } catch (e: any) {
@@ -2340,11 +2358,65 @@ function UniverseSection({
     }
   };
 
+  // grouped pools by category for picker
+  const groupedPools = (() => {
+    const map = new Map<string, typeof allPools>();
+    for (const p of allPools) {
+      const k = p.category || "未分组";
+      if (!map.has(k)) map.set(k, []);
+      map.get(k)!.push(p);
+    }
+    return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+  })();
+
+  const togglePool = (id: number) => {
+    setSectorPoolIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    );
+  };
+
+  // 快捷操作
+  const selectAllPools = () => setSectorPoolIds(allPools.map((p) => p.id));
+  const invertPoolSelection = () => {
+    const all = allPools.map((p) => p.id);
+    setSectorPoolIds(all.filter((id) => !sectorPoolIds.includes(id)));
+  };
+  const setGroupSelection = (catItems: { id: number }[], mode: "add" | "remove" | "toggle") => {
+    const ids = catItems.map((x) => x.id);
+    setSectorPoolIds((prev) => {
+      const set = new Set(prev);
+      if (mode === "add") ids.forEach((i) => set.add(i));
+      else if (mode === "remove") ids.forEach((i) => set.delete(i));
+      else {
+        const allIn = ids.every((i) => set.has(i));
+        if (allIn) ids.forEach((i) => set.delete(i));
+        else ids.forEach((i) => set.add(i));
+      }
+      return Array.from(set);
+    });
+  };
+
+  // 大组：按 category 中 "-" 之前的前缀聚合（如 "AI算力-光通信" / "AI算力-硬件" 合并为 "AI算力"）
+  const macroGroups = (() => {
+    const map = new Map<string, typeof allPools>();
+    for (const p of allPools) {
+      const cat = p.category || "未分组";
+      const macro = cat.includes("-") ? cat.split("-")[0] : cat;
+      if (!map.has(macro)) map.set(macro, []);
+      map.get(macro)!.push(p);
+    }
+    return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+  })();
+
+  const sectorSummary = sectorPoolIds.length === 0
+    ? "未限定"
+    : `${sectorPoolIds.length} 个赛道 (tier≤${sectorTierMax})`;
+
   return (
     <Section
       i={1}
       title="选股池"
-      summary={`基准 ${cfg?.base ?? "—"}，${cfg?.filters?.length ?? 0} 条过滤规则，候选池上限 ${cfg?.max_size ?? "—"}`}
+      summary={`基准 ${cfg?.base ?? "—"}，${cfg?.filters?.length ?? 0} 条过滤规则，候选池上限 ${cfg?.max_size ?? "—"} · 赛道池：${((cfg as any)?.sector_pool_ids?.length || 0) === 0 ? "未限定" : `${(cfg as any).sector_pool_ids.length} 个`}`}
       onEdit={() => setEditing(!editing)}
       editing={editing}
     >
@@ -2374,6 +2446,136 @@ function UniverseSection({
               />
             </label>
           </div>
+
+          {/* 赛道池选择器（可选过滤） */}
+          <div className="border border-ink-800 rounded p-3 bg-ink-900/40">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-xs text-ink-300">
+                赛道池过滤
+                <span className="text-ink-500 ml-2">（可选 · 选中后仅保留这些赛道里的股票）</span>
+              </div>
+              <div className="flex items-center gap-3 text-xs">
+                <span className="text-ink-500">当前：{sectorSummary}</span>
+                {allPools.length > 0 && (
+                  <>
+                    <button
+                      onClick={selectAllPools}
+                      className="text-ink-400 hover:text-gold"
+                      disabled={sectorPoolIds.length === allPools.length}
+                    >
+                      全选
+                    </button>
+                    <button
+                      onClick={invertPoolSelection}
+                      className="text-ink-400 hover:text-gold"
+                    >
+                      反选
+                    </button>
+                  </>
+                )}
+                {sectorPoolIds.length > 0 && (
+                  <button
+                    onClick={() => setSectorPoolIds([])}
+                    className="text-ink-400 hover:text-red-400"
+                  >
+                    清空
+                  </button>
+                )}
+              </div>
+            </div>
+            {allPools.length === 0 ? (
+              <div className="text-xs text-ink-500 py-2">
+                还没有赛道池。先去顶部 <span className="text-gold">赛道池</span> tab 维护几个。
+              </div>
+            ) : (
+              <>
+                {/* 大组快选条（按 category 前缀聚合）*/}
+                {macroGroups.length > 1 && (
+                  <div className="flex flex-wrap items-center gap-1.5 pb-2 mb-2 border-b border-ink-800">
+                    <span className="text-[10px] text-ink-500 mr-1">大组：</span>
+                    {macroGroups.map(([macro, items]) => {
+                      const selectedInMacro = items.filter((p) => sectorPoolIds.includes(p.id)).length;
+                      const allIn = selectedInMacro === items.length;
+                      const noneIn = selectedInMacro === 0;
+                      return (
+                        <button
+                          key={macro}
+                          onClick={() => setGroupSelection(items, "toggle")}
+                          className={
+                            "text-[11px] px-2 py-1 rounded border transition " +
+                            (allIn
+                              ? "bg-gold/25 text-gold border-gold/50"
+                              : noneIn
+                                ? "bg-ink-800 text-ink-300 border-ink-700 hover:border-ink-500"
+                                : "bg-gold/10 text-gold/80 border-gold/30")
+                          }
+                          title={allIn ? "取消本大组" : "选中本大组"}
+                        >
+                          {macro}
+                          <span className="ml-1 text-ink-500">({selectedInMacro}/{items.length})</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+                <div className="max-h-44 overflow-y-auto space-y-2 pr-1">
+                  {groupedPools.map(([cat, items]) => {
+                    const selectedInCat = items.filter((p) => sectorPoolIds.includes(p.id)).length;
+                    const allInCat = selectedInCat === items.length;
+                    return (
+                      <div key={cat}>
+                        <div className="flex items-center gap-2 mb-1">
+                          <div className="text-[11px] text-ink-500">
+                            {cat}
+                            <span className="ml-1">({selectedInCat}/{items.length})</span>
+                          </div>
+                          <button
+                            onClick={() => setGroupSelection(items, "toggle")}
+                            className="text-[10px] text-ink-500 hover:text-gold"
+                          >
+                            {allInCat ? "取消本组" : "选中本组"}
+                          </button>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {items.map((p) => {
+                            const active = sectorPoolIds.includes(p.id);
+                            return (
+                              <button
+                                key={p.id}
+                                onClick={() => togglePool(p.id)}
+                                className={
+                                  "text-[11px] px-2 py-1 rounded border transition " +
+                                  (active
+                                    ? "bg-gold/20 text-gold border-gold/40"
+                                    : "bg-ink-800 text-ink-300 border-ink-700 hover:border-ink-500")
+                                }
+                              >
+                                {p.name}
+                                <span className="ml-1 text-ink-500">·{p.stock_count}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <label className="flex items-center gap-2 text-xs mt-3">
+                  <span className="text-ink-500">Tier 上限：</span>
+                  <select
+                    value={sectorTierMax}
+                    onChange={(e) => setSectorTierMax(Number(e.target.value))}
+                    className="bg-ink-850 border border-ink-700 rounded px-2 py-1 text-ink-200 text-xs outline-none"
+                  >
+                    <option value={1}>只龙一</option>
+                    <option value={2}>龙一+龙二</option>
+                    <option value={3}>全部 (含跟风)</option>
+                  </select>
+                </label>
+              </>
+            )}
+          </div>
+
           <div className="text-[11px] text-ink-500 mb-1">过滤规则（DSL 表达式）</div>
           <EditableRuleList rules={filters} onChange={setFilters} category="universe" />
           <div className="flex gap-2 pt-2">
@@ -2389,6 +2591,8 @@ function UniverseSection({
                 setFilters(system.universe_cfg?.filters || []);
                 setBase(system.universe_cfg?.base ?? "all_a_shares");
                 setMaxSize(system.universe_cfg?.max_size ?? 200);
+                setSectorPoolIds(((system.universe_cfg as any)?.sector_pool_ids) || []);
+                setSectorTierMax(((system.universe_cfg as any)?.sector_pool_tier_max) ?? 3);
                 setEditing(false);
               }}
               className="text-xs px-3 py-1.5 rounded bg-ink-800 text-ink-400 hover:text-ink-200"

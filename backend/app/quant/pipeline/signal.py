@@ -53,10 +53,24 @@ def _eval_side(side_cfg: dict | None, ctx: dict) -> SideReport:
         return SideReport(triggered=False, combine="empty")
     all_of = side_cfg.get("all_of") or []
     any_of = side_cfg.get("any_of") or []
+    optional = side_cfg.get("optional")
+
     if all_of:
         results = [eval_rule(r["expr"], ctx, r.get("desc", "")) for r in all_of]
-        passed = all(r.passed for r in results) if results else False
-        return SideReport(triggered=passed, rules=results, combine="all_of")
+        core_passed = all(r.passed for r in results) if results else False
+
+        if optional and core_passed:
+            opt_rules = optional.get("rules") or []
+            min_match = optional.get("min_match", 1)
+            opt_results = [eval_rule(r["expr"], ctx, r.get("desc", "")) for r in opt_rules]
+            opt_passed = sum(1 for r in opt_results if r.passed) >= min_match
+            return SideReport(
+                triggered=core_passed and opt_passed,
+                rules=results + opt_results,
+                combine="all_of+optional",
+            )
+
+        return SideReport(triggered=core_passed, rules=results, combine="all_of")
     if any_of:
         results = [eval_rule(r["expr"], ctx, r.get("desc", "")) for r in any_of]
         passed = any(r.passed for r in results) if results else False

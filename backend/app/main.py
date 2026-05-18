@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import init_db
-from .routers import market, screener, stocks, watchlist, sync, settings, backtest, algo, strategy, dragon, recommend, llmpick, agent, ocr
+from .routers import market, screener, stocks, watchlist, sync, settings, backtest, algo, strategy, dragon, recommend, llmpick, agent, ocr, sector_pool
 from .quant.router import router as quant_router
 from .services.data_provider import preload_candles
 from .services.sync_worker import spawn_sync
@@ -186,6 +186,7 @@ app.include_router(recommend.router)
 app.include_router(llmpick.router)
 app.include_router(agent.router)
 app.include_router(ocr.router)
+app.include_router(sector_pool.router)
 app.include_router(quant_router)
 
 
