@@ -22,8 +22,9 @@ from ..dsl import EvalResult, eval_rule
 class SideReport:
     triggered: bool
     rules: list[EvalResult] = field(default_factory=list)
-    # 组合方式："all_of" / "any_of" / "empty"
     combine: str = "empty"
+    core_count: int = 0
+    min_match: int = 0
 
 
 @dataclass
@@ -35,11 +36,15 @@ class SignalReport:
 
     def to_jsonable(self) -> dict[str, Any]:
         def side(s: SideReport) -> dict[str, Any]:
-            return {
+            d: dict[str, Any] = {
                 "triggered": s.triggered,
                 "combine": s.combine,
                 "rules": [asdict(r) for r in s.rules],
             }
+            if s.combine == "all_of+optional":
+                d["core_count"] = s.core_count
+                d["min_match"] = s.min_match
+            return d
         return {
             "code": self.code,
             "date": self.date,
@@ -59,7 +64,7 @@ def _eval_side(side_cfg: dict | None, ctx: dict) -> SideReport:
         results = [eval_rule(r["expr"], ctx, r.get("desc", "")) for r in all_of]
         core_passed = all(r.passed for r in results) if results else False
 
-        if optional and core_passed:
+        if optional:
             opt_rules = optional.get("rules") or []
             min_match = optional.get("min_match", 1)
             opt_results = [eval_rule(r["expr"], ctx, r.get("desc", "")) for r in opt_rules]
@@ -68,6 +73,8 @@ def _eval_side(side_cfg: dict | None, ctx: dict) -> SideReport:
                 triggered=core_passed and opt_passed,
                 rules=results + opt_results,
                 combine="all_of+optional",
+                core_count=len(results),
+                min_match=min_match,
             )
 
         return SideReport(triggered=core_passed, rules=results, combine="all_of")

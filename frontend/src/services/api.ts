@@ -685,9 +685,20 @@ export type SectorPoolStock = {
   added_at: string | null;
 };
 
+export type QuantOptionalBlock = {
+  min_match: number;
+  rules: QuantRuleExpr[];
+};
+
+export type QuantSignalSideCfg = {
+  all_of?: QuantRuleExpr[];
+  any_of?: QuantRuleExpr[];
+  optional?: QuantOptionalBlock;
+};
+
 export type QuantSignalCfg = {
-  buy: { all_of?: QuantRuleExpr[]; any_of?: QuantRuleExpr[] };
-  sell: { all_of?: QuantRuleExpr[]; any_of?: QuantRuleExpr[] };
+  buy: QuantSignalSideCfg;
+  sell: QuantSignalSideCfg;
 };
 
 export type QuantStopLoss = {
@@ -752,8 +763,10 @@ export type QuantRuleEvalResult = {
 
 export type QuantSideReport = {
   triggered: boolean;
-  combine: "all_of" | "any_of" | "empty";
+  combine: "all_of" | "any_of" | "all_of+optional" | "empty";
   rules: QuantRuleEvalResult[];
+  core_count?: number;
+  min_match?: number;
 };
 
 export type QuantTestResult = {

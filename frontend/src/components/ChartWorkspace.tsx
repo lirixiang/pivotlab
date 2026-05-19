@@ -626,6 +626,11 @@ function Row({ label, value, up, dn }: { label: string; value: string; up?: bool
 function SignalSidePanel({ label, side }: { label: string; side: QuantSideReport }) {
   if (side.rules.length === 0) return null;
   const triggered = side.triggered;
+  const isHybrid = side.combine === "all_of+optional";
+  const coreCount = side.core_count ?? side.rules.length;
+  const coreRules = side.rules.slice(0, coreCount);
+  const optRules = side.rules.slice(coreCount);
+  const optHit = optRules.filter((r) => r.passed).length;
   return (
     <div className={"rounded border px-2.5 py-2 text-[11px] " + (triggered ? "border-emerald-700 bg-emerald-900/15" : "border-ink-800 bg-ink-900/30")}>
       <div className="flex items-center gap-2 mb-1.5">
@@ -633,22 +638,55 @@ function SignalSidePanel({ label, side }: { label: string; side: QuantSideReport
           {triggered ? "✓" : "✗"} {label}信号
         </span>
         <span className="text-ink-600 text-[10px]">
-          {side.combine === "all_of" ? "全部满足" : side.combine === "any_of" ? "任一满足" : ""}
+          {isHybrid ? "核心+可选" : side.combine === "all_of" ? "全部满足" : side.combine === "any_of" ? "任一满足" : ""}
         </span>
       </div>
-      <div className="space-y-0.5">
-        {side.rules.map((r, i) => (
-          <div key={i} className="flex items-start gap-1.5">
-            <span className={r.passed ? "text-emerald-400" : "text-red-400"}>
-              {r.passed ? "✓" : "✗"}
-            </span>
-            <span className="text-ink-300 flex-1">{r.desc || r.expr}</span>
-            {r.value != null && (
-              <span className="text-ink-500 font-mono text-[10px]">{typeof r.value === "number" ? r.value.toFixed(2) : r.value}</span>
-            )}
+      {isHybrid ? (
+        <div className="space-y-1.5">
+          <div className="text-[10px] text-ink-500 font-semibold">核心（全部满足）</div>
+          <div className="space-y-0.5">
+            {coreRules.map((r, i) => (
+              <div key={i} className="flex items-start gap-1.5">
+                <span className={r.passed ? "text-emerald-400" : "text-red-400"}>
+                  {r.passed ? "✓" : "✗"}
+                </span>
+                <span className="text-ink-300 flex-1">{r.desc || r.expr}</span>
+                {r.value != null && (
+                  <span className="text-ink-500 font-mono text-[10px]">{typeof r.value === "number" ? r.value.toFixed(2) : r.value}</span>
+                )}
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
+          <div className="text-[10px] text-ink-500 font-semibold">可选（{optHit}/{optRules.length}，需≥{side.min_match ?? 1}）</div>
+          <div className="space-y-0.5">
+            {optRules.map((r, i) => (
+              <div key={i} className="flex items-start gap-1.5">
+                <span className={r.passed ? "text-emerald-400" : "text-red-400"}>
+                  {r.passed ? "✓" : "✗"}
+                </span>
+                <span className="text-ink-300 flex-1">{r.desc || r.expr}</span>
+                {r.value != null && (
+                  <span className="text-ink-500 font-mono text-[10px]">{typeof r.value === "number" ? r.value.toFixed(2) : r.value}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-0.5">
+          {side.rules.map((r, i) => (
+            <div key={i} className="flex items-start gap-1.5">
+              <span className={r.passed ? "text-emerald-400" : "text-red-400"}>
+                {r.passed ? "✓" : "✗"}
+              </span>
+              <span className="text-ink-300 flex-1">{r.desc || r.expr}</span>
+              {r.value != null && (
+                <span className="text-ink-500 font-mono text-[10px]">{typeof r.value === "number" ? r.value.toFixed(2) : r.value}</span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

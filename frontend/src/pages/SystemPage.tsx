@@ -409,7 +409,7 @@ function TemplateCard({
             <p className="text-xs text-ink-400 mt-1 leading-relaxed">{tpl.desc}</p>
             <div className="mt-2 text-[10px] text-ink-600">
               选股 {cfg?.universe_cfg?.filters?.length ?? 0} 条规则 ·
-              买入 {cfg?.signal_cfg?.buy?.all_of?.length ?? 0} 条 ·
+              买入 {(cfg?.signal_cfg?.buy?.all_of?.length ?? 0) + (cfg?.signal_cfg?.buy?.optional?.rules?.length ?? 0)} 条 ·
               卖出 {cfg?.signal_cfg?.sell?.any_of?.length ?? 0} 条 ·
               止损 {cfg?.risk_cfg?.stop_loss?.type === "ma"
                 ? `跌破 ${cfg?.risk_cfg?.stop_loss?.ma_period} 日线`
@@ -2031,22 +2031,59 @@ function SideResult({
       ? "text-green-300 bg-green-900/40"
       : "text-red-300 bg-red-900/40"
     : "text-ink-400 bg-ink-800";
+
+  const isHybrid = report.combine === "all_of+optional";
+
   return (
     <div>
       <div className="flex items-center gap-2 mb-1.5">
         <span className="text-sm font-semibold text-white">{label}</span>
         <span className="text-[10px] text-ink-500 uppercase tracking-wider">
-          ({report.combine === "all_of" ? "全部满足" : "任一满足"})
+          ({isHybrid ? "核心全满足 + 可选≥N" : report.combine === "all_of" ? "全部满足" : "任一满足"})
         </span>
         <span className={`text-[10px] px-2 py-0.5 rounded ${verdictColor}`}>
           {report.triggered ? "✓ 触发" : "未触发"}
         </span>
       </div>
-      <ul className="space-y-1">
-        {report.rules.map((r, i) => (
-          <RuleResultRow key={i} rule={r} />
-        ))}
-      </ul>
+      {isHybrid ? (
+        <HybridRulesList rules={report.rules} coreCount={report.core_count ?? 0} minMatch={report.min_match ?? 1} />
+      ) : (
+        <ul className="space-y-1">
+          {report.rules.map((r, i) => (
+            <RuleResultRow key={i} rule={r} />
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function HybridRulesList({ rules, coreCount, minMatch }: { rules: QuantRuleEvalResult[]; coreCount: number; minMatch: number }) {
+  const coreRules = rules.slice(0, coreCount);
+  const optRules = rules.slice(coreCount);
+  const optHit = optRules.filter((r) => r.passed).length;
+  return (
+    <div className="space-y-2">
+      <div>
+        <div className="text-[10px] text-ink-500 mb-1 font-semibold uppercase tracking-wider">
+          核心条件（全部满足）
+        </div>
+        <ul className="space-y-1">
+          {coreRules.map((r, i) => (
+            <RuleResultRow key={i} rule={r} />
+          ))}
+        </ul>
+      </div>
+      <div>
+        <div className="text-[10px] text-ink-500 mb-1 font-semibold uppercase tracking-wider">
+          可选条件（满足 {optHit}/{optRules.length}，需 ≥{minMatch}）
+        </div>
+        <ul className="space-y-1">
+          {optRules.map((r, i) => (
+            <RuleResultRow key={i} rule={r} />
+          ))}
+        </ul>
+      </div>
     </div>
   );
 }
@@ -2621,19 +2658,29 @@ function SignalSection({
   const [saving, setSaving] = useState(false);
   const cfg = system.signal_cfg;
   const [buyRules, setBuyRules] = useState<RuleItem[]>(cfg?.buy?.all_of || []);
+  const [optRules, setOptRules] = useState<RuleItem[]>(cfg?.buy?.optional?.rules || []);
+  const [minMatch, setMinMatch] = useState<number>(cfg?.buy?.optional?.min_match ?? 0);
   const [sellRules, setSellRules] = useState<RuleItem[]>(cfg?.sell?.any_of || []);
 
   useEffect(() => {
     setBuyRules(system.signal_cfg?.buy?.all_of || []);
+    setOptRules(system.signal_cfg?.buy?.optional?.rules || []);
+    setMinMatch(system.signal_cfg?.buy?.optional?.min_match ?? 0);
     setSellRules(system.signal_cfg?.sell?.any_of || []);
   }, [system.id, system.updated_at]);
 
   const save = async () => {
     setSaving(true);
     try {
+      const buyCore = buyRules.filter((r) => r.expr.trim());
+      const optFiltered = optRules.filter((r) => r.expr.trim());
+      const buyCfg: any = { all_of: buyCore };
+      if (optFiltered.length > 0 && minMatch > 0) {
+        buyCfg.optional = { rules: optFiltered, min_match: minMatch };
+      }
       await onUpdate({
         signal_cfg: {
-          buy: { all_of: buyRules.filter((r) => r.expr.trim()) },
+          buy: buyCfg,
           sell: { any_of: sellRules.filter((r) => r.expr.trim()) },
         },
       });
@@ -2645,7 +2692,7 @@ function SignalSection({
     }
   };
 
-  const buyCount = cfg?.buy?.all_of?.length || cfg?.buy?.any_of?.length || 0;
+  const buyCount = (cfg?.buy?.all_of?.length || 0) + (cfg?.buy?.optional?.rules?.length || 0);
   const sellCount = cfg?.sell?.any_of?.length || cfg?.sell?.all_of?.length || 0;
 
   return (
@@ -2660,10 +2707,31 @@ function SignalSection({
         <div className="space-y-4">
           <div>
             <div className="text-[11px] uppercase tracking-wider text-green-400 mb-2">
-              买入条件 (all_of — 全部满足)
+              核心买入条件 (all_of — 全部满足)
             </div>
             <EditableRuleList rules={buyRules} onChange={setBuyRules} category="buy" />
           </div>
+          {(optRules.length > 0 || minMatch > 0) && (
+            <div>
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-[11px] uppercase tracking-wider text-amber-400">
+                  可选条件 (满足 ≥
+                </span>
+                <input
+                  type="number"
+                  min={1}
+                  max={optRules.length || 4}
+                  value={minMatch}
+                  onChange={(e) => setMinMatch(Number(e.target.value))}
+                  className="w-10 text-xs bg-ink-850 border border-ink-700 rounded px-1.5 py-0.5 text-center text-white"
+                />
+                <span className="text-[11px] uppercase tracking-wider text-amber-400">
+                  条即触发)
+                </span>
+              </div>
+              <EditableRuleList rules={optRules} onChange={setOptRules} category="buy" />
+            </div>
+          )}
           <div>
             <div className="text-[11px] uppercase tracking-wider text-red-400 mb-2">
               卖出条件 (any_of — 任一触发)
@@ -2681,6 +2749,8 @@ function SignalSection({
             <button
               onClick={() => {
                 setBuyRules(system.signal_cfg?.buy?.all_of || []);
+                setOptRules(system.signal_cfg?.buy?.optional?.rules || []);
+                setMinMatch(system.signal_cfg?.buy?.optional?.min_match ?? 0);
                 setSellRules(system.signal_cfg?.sell?.any_of || []);
                 setEditing(false);
               }}
@@ -2694,10 +2764,18 @@ function SignalSection({
         <div className="space-y-3">
           <div>
             <div className="text-[11px] uppercase tracking-wider text-green-400 mb-1.5">
-              买入条件 (all of)
+              {cfg?.buy?.optional ? "核心买入条件 (all of)" : "买入条件 (all of)"}
             </div>
             <RuleList rules={cfg?.buy?.all_of || cfg?.buy?.any_of || []} />
           </div>
+          {cfg?.buy?.optional && cfg.buy.optional.rules.length > 0 && (
+            <div>
+              <div className="text-[11px] uppercase tracking-wider text-amber-400 mb-1.5">
+                可选条件 (满足 ≥{cfg.buy.optional.min_match} 条)
+              </div>
+              <RuleList rules={cfg.buy.optional.rules} />
+            </div>
+          )}
           <div>
             <div className="text-[11px] uppercase tracking-wider text-red-400 mb-1.5">
               卖出条件 (any of)
