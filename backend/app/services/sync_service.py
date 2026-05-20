@@ -551,10 +551,9 @@ def sync_quotes(_task_id: int = None) -> int:
             return task_id
 
         # Bulk upsert into daily_candles (today's row)
-        from datetime import date as _date
         from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-        today = _date.today().strftime("%Y-%m-%d")
+        today = _now_cn().strftime("%Y-%m-%d")
         now = datetime.utcnow()
         processed = 0
 
@@ -677,7 +676,6 @@ def _auto_backfill_gaps(today: str, synced_codes: set[str] | None = None):
     from requests.adapters import HTTPAdapter
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import threading
-    from datetime import date as _date
 
     candle_source = _source_for("daily_candles")
 
@@ -690,10 +688,10 @@ def _auto_backfill_gaps(today: str, synced_codes: set[str] | None = None):
     # If a stock has fewer than 15 days (30 calendar = ~21 trading days),
     # it likely has gaps.  Also check the second-most-recent date to detect
     # the gap between "today" (just inserted by sync_quotes) and prior data.
-    from datetime import date as _date
     from sqlalchemy import func as sa_func
+    _today = _now_cn().date()
 
-    cutoff_30 = (_date.today() - timedelta(days=30)).strftime("%Y-%m-%d")
+    cutoff_30 = (_today - timedelta(days=30)).strftime("%Y-%m-%d")
     today_str = today  # passed from caller
 
     with _get_session() as s:
@@ -707,7 +705,7 @@ def _auto_backfill_gaps(today: str, synced_codes: set[str] | None = None):
         ), {"today": today_str}).fetchall()
     prev_latest_map = {r[0]: str(r[1]) if r[1] else None for r in rows}
 
-    yesterday = (_date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+    yesterday = (_today - timedelta(days=1)).strftime("%Y-%m-%d")
 
     # Build backfill list: (code, start_date, gap_days)
     need_backfill: list[tuple[str, str, int]] = []
@@ -715,11 +713,11 @@ def _auto_backfill_gaps(today: str, synced_codes: set[str] | None = None):
         prev = prev_latest_map.get(code)
         if not prev:
             # No prior data — full backfill
-            beg = (_date.today() - timedelta(days=_BACKFILL_MAX_DAYS)).strftime("%Y%m%d")
+            beg = (_today - timedelta(days=_BACKFILL_MAX_DAYS)).strftime("%Y%m%d")
             need_backfill.append((code, beg, _BACKFILL_MAX_DAYS))
         else:
             prev_d = _date.fromisoformat(prev)
-            gap = (_date.today() - prev_d).days - 1  # exclude today itself
+            gap = (_today - prev_d).days - 1  # exclude today itself
             if gap <= 1:
                 continue  # yesterday or today — no gap
             next_day = (prev_d + timedelta(days=1)).strftime("%Y%m%d")
@@ -1031,7 +1029,7 @@ def sync_financials(_task_id: int = None) -> int:
         logger.info("sync_financials: loaded EPS history for %d stocks", len(eps_history))
 
         # Pre-load: PE from today's daily_candles
-        today = _date.today().strftime("%Y-%m-%d")
+        today = _now_cn().strftime("%Y-%m-%d")
         pe_map: dict[str, float] = {}  # code → pe_ratio
         with _get_session() as s:
             pe_rows = s.execute(
@@ -1189,8 +1187,7 @@ def sync_financial_history(_task_id: int = None, years: int = 5) -> int:
     batch_commit_size = 5000  # commit every N rows to DB
 
     # Calculate cutoff date
-    from datetime import date
-    cutoff = date(date.today().year - years, 1, 1).isoformat()
+    cutoff = date(_now_cn().year - years, 1, 1).isoformat()
 
     max_retries = 3
     session = _req.Session()
@@ -1794,8 +1791,7 @@ def _fetch_today_candles_clist(session) -> list[dict]:
     Returns list of dicts ready for DB upsert (code, trade_date, open, high, low, close, volume).
     API caps at 100/page, ~56 pages for full market.
     """
-    from datetime import date as _date
-    today = _date.today().strftime("%Y-%m-%d")
+    today = _now_cn().strftime("%Y-%m-%d")
     all_rows = []
     page = 1
 
@@ -1925,11 +1921,11 @@ def sync_candles(days: int = 365, _task_id: int = None) -> int:
             ).fetchall()
         latest_map = {r[0]: r[1] for r in latest_rows}
 
-        from datetime import date as _date
         # If a stock's latest candle is before yesterday, it needs backfill
         # (today's data is handled by sync_quotes every 30min)
-        cutoff = (_date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
-        default_beg = (_date.today() - timedelta(days=days * 2)).strftime("%Y%m%d")
+        _today = _now_cn().date()
+        cutoff = (_today - timedelta(days=1)).strftime("%Y-%m-%d")
+        default_beg = (_today - timedelta(days=days * 2)).strftime("%Y%m%d")
 
         http = requests.Session()
         http.headers["User-Agent"] = "Mozilla/5.0"
@@ -2541,8 +2537,7 @@ def run_screener(_task_id: int = None, pattern: str | None = None):
     sync_quotes()
     logger.info("screener: sync done")
     # Batch load today's candles into memory
-    from datetime import date as _date
-    today = _date.today().strftime("%Y-%m-%d")
+    today = _now_cn().strftime("%Y-%m-%d")
     with _get_session() as s:
         rows = s.execute(
             select(DailyCandle).where(DailyCandle.trade_date == today)

@@ -5,18 +5,19 @@ import { api } from "../services/api";
 // NOTE (M0 重构): 重新设计为完整量化系统闭环。
 // 旧 tab 暂时注释，待新模块（system/journal）稳定后于 M6 删除。
 // 旧 tab keys: "recommend" | "screener" | "aiscan" | "llmpick" | "backtest" | "strategy" | "monitor"
-export type TabKey = "workspace" | "system" | "sector" | "journal" | "sync" | "agent";
+export type TabKey = "workspace" | "system" | "sector" | "journal" | "sync" | "agent" | "jqstrategy" | "screener";
 
 const TABS: { k: TabKey; l: string }[] = [
   { k: "workspace", l: "画线工作台" },
   { k: "system", l: "交易系统" },
+  { k: "jqstrategy", l: "策略研究" },
+  { k: "screener", l: "形态筛选" },
   { k: "sector", l: "赛道池" },
   { k: "journal", l: "实盘日志" },
   { k: "agent", l: "AI对话" },
   { k: "sync", l: "数据同步" },
   // ── 旧 tab（M0 注释，M6 删除）──
   // { k: "recommend", l: "今日推荐" },
-  // { k: "screener", l: "形态筛选" },
   // { k: "aiscan", l: "AI选股" },
   // { k: "llmpick", l: "AI精选" },
   // { k: "backtest", l: "历史回测" },

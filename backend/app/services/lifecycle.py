@@ -14,6 +14,12 @@ import logging
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
+
+_CN_TZ = ZoneInfo("Asia/Shanghai")
+
+def _today_cn() -> date:
+    return datetime.now(_CN_TZ).date()
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
@@ -57,7 +63,7 @@ def update_lifecycle(*, lookback_days: int = 60, progress_cb=None) -> dict:
     Returns aggregate counts per state.
     """
     eng = _get_engine()
-    today = date.today()
+    today = _today_cn()
     today_s = today.strftime("%Y-%m-%d")
     cutoff = (today - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
 
@@ -257,7 +263,7 @@ def _walk_forward(o: RecommendationOutcome, candles: list[DailyCandle], today_s:
 def aggregate_outcomes(style: str | None = None, days: int = 90) -> dict:
     """Roll-up stats over recently-completed outcomes."""
     eng = _get_engine()
-    cutoff = (date.today() - timedelta(days=days)).strftime("%Y-%m-%d")
+    cutoff = (_today_cn() - timedelta(days=days)).strftime("%Y-%m-%d")
     with Session(eng) as session:
         stmt = select(RecommendationOutcome).where(
             RecommendationOutcome.scan_date >= cutoff

@@ -11,6 +11,8 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo as _ZoneInfo
+_CN_TZ = _ZoneInfo("Asia/Shanghai")
 from typing import Any
 
 from app.agent.tools.registry import registry
@@ -430,10 +432,10 @@ async def verify_signal(args: dict[str, Any]) -> dict[str, Any]:
     levels, signal, last_bar_date = await asyncio.to_thread(_compute_sr_and_signal, candles)
 
     # 数据新鲜度检查
-    from datetime import date as _date
-    today_str = _date.today().strftime("%Y-%m-%d")
+    today_str = datetime.now(_CN_TZ).strftime("%Y-%m-%d")
     if last_bar_date and last_bar_date[:10] < today_str:
-        days_old = (_date.today() - _date.fromisoformat(last_bar_date[:10])).days
+        from datetime import date as _date
+        days_old = (_date.fromisoformat(today_str) - _date.fromisoformat(last_bar_date[:10])).days
         if days_old > 3:
             warnings.append(f"⚠️ 最新K线为 {last_bar_date[:10]} ({days_old} 天前)，建议先 sync_daily_candles")
 

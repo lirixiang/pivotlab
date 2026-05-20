@@ -6,16 +6,20 @@ import { SectorPoolPage } from "./pages/SectorPoolPage";
 import { JournalPage } from "./pages/JournalPage";
 import { SyncPage } from "./pages/SyncPage";
 import { AgentPage } from "./pages/AgentPage";
+import { JQStrategyPage } from "./pages/JQStrategyPage";
+import { ScreenerPage } from "./pages/ScreenerPage";
 import { ToastContainer } from "./components/Toast";
 
 // ── URL ↔ state helpers ──
 const TAB_PATHS: Record<TabKey, string> = {
   workspace: "/",
   system: "/system",
+  screener: "/screener",
   sector: "/sector-pool",
   journal: "/journal",
   sync: "/sync",
   agent: "/agent",
+  jqstrategy: "/jq-strategy",
 };
 const PATH_TO_TAB: Record<string, TabKey> = Object.fromEntries(
   Object.entries(TAB_PATHS).map(([k, v]) => [v, k as TabKey]),
@@ -24,7 +28,6 @@ const PATH_TO_TAB: Record<string, TabKey> = Object.fromEntries(
 // 旧路径重定向（M0）：保证书签 / 历史 URL 不 404
 const LEGACY_REDIRECT: Record<string, TabKey> = {
   "/recommend": "system",
-  "/screener": "system",
   "/aiscan": "system",
   "/llmpick": "system",
   "/backtest": "system",
@@ -140,6 +143,8 @@ export default function App() {
       )}
 
       {tab === "system" && <SystemPage />}
+      {tab === "jqstrategy" && <JQStrategyPage />}
+      {tab === "screener" && <ScreenerPage onPickStock={goWorkspace} />}
       {tab === "sector" && <SectorPoolPage />}
       {tab === "journal" && <JournalPage />}
       {tab === "sync" && <SyncPage />}

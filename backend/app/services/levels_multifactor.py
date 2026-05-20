@@ -38,11 +38,11 @@ _ROUND_NUMBER_BONUS = 1.5      # round-number price bonus
 _DWELL_WEIGHT = 0.4            # per bar price sits in zone
 _MA_RESONANCE_BONUS = 2.0      # convergence with key MAs
 _STRUCTURE_PIVOT_BONUS = 3.0   # prior high/low
-_STRUCTURE_RANGE_BONUS = 2.0   # range edge
 _RETEST_CONFIRM_BONUS = 6.0    # breakout-retest confirmation
 _CONFLUENCE_MULT = 2.0         # weekly confluence multiplier
 _MIN_SCORE_THRESHOLD = 20      # noise filter
 _OVERLAP_WEIGHT = 0.8          # per-window overlap bonus
+_MIN_NORM_BASE = 15.0          # prevents a single weak level from normalising to 100
 
 # ── Default factor weights (kept for the /factors API) ──
 DEFAULT_WEIGHTS: dict[str, float] = {
@@ -183,7 +183,7 @@ def _collect_structure_candidates(
             if not _is_decisively_broken(recent, index, price, "support", tolerance):
                 _push("support", price, 3, _STRUCTURE_PIVOT_BONUS + age_weight, "前低支撑")
         if price > current * (1 + tolerance * 0.25):
-            if _detect_role_reversal(recent, index, price, "resistance", tolerance):
+            if _detect_role_reversal(recent, index, price, "resistance", tolerance) >= 0:
                 _push("resistance", price, 4, _RETEST_CONFIRM_BONUS + age_weight, "跌破后反抽确认")
 
     for index, price in swing_highs:
@@ -192,16 +192,8 @@ def _collect_structure_candidates(
             if not _is_decisively_broken(recent, index, price, "resistance", tolerance):
                 _push("resistance", price, 3, _STRUCTURE_PIVOT_BONUS + age_weight, "前高压力")
         if price < current * (1 - tolerance * 0.25):
-            if _detect_role_reversal(recent, index, price, "support", tolerance):
+            if _detect_role_reversal(recent, index, price, "support", tolerance) >= 0:
                 _push("support", price, 4, _RETEST_CONFIRM_BONUS + age_weight, "突破回踩确认")
-
-    range_lookback = recent[-30:]
-    range_high = max(c.high for c in range_lookback)
-    range_low = min(c.low for c in range_lookback)
-    if range_high > current:
-        _push("resistance", range_high, 2, _STRUCTURE_RANGE_BONUS, "区间上沿")
-    if range_low < current:
-        _push("support", range_low, 2, _STRUCTURE_RANGE_BONUS, "区间下沿")
 
     return candidates
 
@@ -241,7 +233,7 @@ def _is_decisively_broken(
             consecutive += 1
             if consecutive >= 2 and broke_with_volume:
                 reclaimed = False
-                for rc in future[idx + 1: idx + 8]:
+                for rc in future[idx + 1: idx + 20]:
                     if level_type == "support" and rc.close > level_price * (1 - tolerance * 0.3):
                         reclaimed = True
                         break
@@ -261,10 +253,15 @@ def _is_decisively_broken(
 def _detect_role_reversal(
     candles: list[Candle], start_index: int, level_price: float,
     target_type: Literal["support", "resistance"], tolerance: float,
-) -> bool:
+) -> int:
+    """Return bars-since-reversal-confirmation (>=0) when confirmed, else -1.
+
+    Callers use `>= 0` as a truthiness check; the age value allows callers to
+    apply time-decay to the bonus rather than treating ancient flips equally.
+    """
     future = candles[start_index + 1:]
     if len(future) < 4:
-        return False
+        return -1
     breakout_at: int | None = None
     for idx, c in enumerate(future):
         if target_type == "support" and c.close > level_price * (1 + tolerance * 0.6):
@@ -274,15 +271,15 @@ def _detect_role_reversal(
             breakout_at = idx
             break
     if breakout_at is None:
-        return False
-    for c in future[breakout_at + 1:]:
+        return -1
+    for i, c in enumerate(future[breakout_at + 1:]):
         if target_type == "support":
             if abs(c.low - level_price) / max(level_price, 1) <= tolerance and c.close >= level_price:
-                return True
+                return len(future) - (breakout_at + 1 + i) - 1
         else:
             if abs(c.high - level_price) / max(level_price, 1) <= tolerance and c.close <= level_price:
-                return True
-    return False
+                return len(future) - (breakout_at + 1 + i) - 1
+    return -1
 
 
 # ────────────────────────────────────────────────────────────
@@ -367,7 +364,7 @@ def _group_levels(
     sorted_raw = sorted(raw, key=lambda x: x[0])
     groups: list[list[tuple[float, int]]] = []
     for price, cnt in sorted_raw:
-        if groups and abs(price - groups[-1][-1][0]) / max(groups[-1][-1][0], 1) < tol:
+        if groups and abs(price - groups[-1][0][0]) / max(groups[-1][0][0], 1) < tol:
             groups[-1].append((price, cnt))
         else:
             groups.append([(price, cnt)])
@@ -506,7 +503,7 @@ def _score_level(
     ]
     structure_bonus = min(
         sum(float(cand.get("bonus", 0) or 0) for cand in matched_structure),
-        _RETEST_CONFIRM_BONUS + _STRUCTURE_PIVOT_BONUS + _STRUCTURE_RANGE_BONUS,
+        _RETEST_CONFIRM_BONUS + _STRUCTURE_PIVOT_BONUS,
     )
     structure_reasons = []
     seen_reasons: set[str] = set()
@@ -519,13 +516,15 @@ def _score_level(
     # ── False breakout penalty ──
     false_breaks = _count_false_breaks(candles, price, level_type, tolerance)
 
-    # ── Role reversal bonus ──
-    reversal = _detect_role_reversal(
-        candles, 0, price,
-        "support" if level_type == "resistance" else "resistance",
-        tolerance,
+    # ── Role reversal bonus (same direction as level_type, with age decay) ──
+    reversal_age = _detect_role_reversal(
+        candles, 0, price, level_type, tolerance,
     )
-    reversal_bonus = _REVERSAL_BONUS if reversal else 0.0
+    reversal = reversal_age >= 0
+    reversal_bonus = (
+        _REVERSAL_BONUS * math.exp(-_DECAY_LAMBDA * reversal_age)
+        if reversal else 0.0
+    )
 
     # ── Round number bonus ──
     round_bonus = 0.0
@@ -570,6 +569,7 @@ def _score_level(
         + reversal_bonus
         + round_bonus
         + structure_bonus
+        + ma_bonus
         + vp_bonus
     )
     trend_adjusted = base_score * trend_coeff
@@ -704,7 +704,7 @@ def detect_levels_multifactor(
             if not _is_decisively_broken(data, idx, price, "resistance", tolerance):
                 res_raw.append((price, 1, ovlp))
         elif price < last_price * (1 - tolerance * 0.15):
-            if _detect_role_reversal(data, idx, price, "support", tolerance):
+            if _detect_role_reversal(data, idx, price, "support", tolerance) >= 0:
                 sup_raw.append((price, 2, ovlp))
 
     for idx, price in seen_l.items():
@@ -713,23 +713,18 @@ def detect_levels_multifactor(
             if not _is_decisively_broken(data, idx, price, "support", tolerance):
                 sup_raw.append((price, 1, ovlp))
         elif price > last_price * (1 + tolerance * 0.15):
-            if _detect_role_reversal(data, idx, price, "resistance", tolerance):
+            if _detect_role_reversal(data, idx, price, "resistance", tolerance) >= 0:
                 res_raw.append((price, 2, ovlp))
 
-    # Add structure candidates
+    # Add structure candidates — only role-reversal confirmed patterns (突破回踩 / 跌破反抽).
+    # Plain prior-high / prior-low candidates are already captured by _detect_pivots_multiscale
+    # and would inflate base_count if added again here.
     for cand in structure["resistance"]:
-        res_raw.append((float(cand["price"]), int(cand["base_count"]), 1))
+        if "回踩" in cand.get("reason", "") or "反抽" in cand.get("reason", ""):
+            res_raw.append((float(cand["price"]), int(cand["base_count"]), 1))
     for cand in structure["support"]:
-        sup_raw.append((float(cand["price"]), int(cand["base_count"]), 1))
-
-    # Recent range edges
-    range_lookback = data[-20:]
-    range_high = max(c.high for c in range_lookback)
-    range_low = min(c.low for c in range_lookback)
-    if range_high > last_price * (1 + tolerance * 0.15):
-        res_raw.append((range_high, 1, 1))
-    if range_low < last_price * (1 - tolerance * 0.15):
-        sup_raw.append((range_low, 1, 1))
+        if "回踩" in cand.get("reason", "") or "反抽" in cand.get("reason", ""):
+            sup_raw.append((float(cand["price"]), int(cand["base_count"]), 1))
 
     # 5. Group nearby levels (keep max overlap per group)
     def _group_with_overlap(
@@ -740,7 +735,7 @@ def detect_levels_multifactor(
         sorted_raw = sorted(raw, key=lambda x: x[0])
         groups: list[list[tuple[float, int, int]]] = []
         for price, cnt, ovlp in sorted_raw:
-            if groups and abs(price - groups[-1][-1][0]) / max(groups[-1][-1][0], 1) < tol:
+            if groups and abs(price - groups[-1][0][0]) / max(groups[-1][0][0], 1) < tol:
                 groups[-1].append((price, cnt, ovlp))
             else:
                 groups.append([(price, cnt, ovlp)])
@@ -781,13 +776,14 @@ def detect_levels_multifactor(
         if result:
             sup_scored.append(result)
 
-    # 7. Normalise scores to 0-100 per side
+    # 7. Normalise scores to 0-100 per side.
+    # Use max(_MIN_NORM_BASE, group_max) so a single weak level doesn't auto-score 100.
     for scored_list in [res_scored, sup_scored]:
         if not scored_list:
             continue
-        max_raw = max(item["raw_score"] for item in scored_list) or 1
+        max_raw = max(max(item["raw_score"] for item in scored_list), _MIN_NORM_BASE) or 1
         for item in scored_list:
-            item["score"] = round(item["raw_score"] / max_raw * 100, 1)
+            item["score"] = round(min(item["raw_score"] / max_raw * 100, 100.0), 1)
             item["score_details"]["max_raw"] = round(max_raw, 2)
             item["score_details"]["normalized_score"] = item["score"]
 

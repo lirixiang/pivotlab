@@ -482,25 +482,34 @@ def get_candles(code: str, period: str = "daily", days: int = 240) -> list[Candl
     today = _now_cst().strftime("%Y%m%d")
     cache_key = f"{code}:{today}"
 
+    closed_key = f"{cache_key}:closed"
+
     if cached and cache_key in _candle_refresh_done:
-        # Already refreshed today, return cached
-        return cached[-days:]
+        # Already refreshed during trading today.
+        # After close, allow one more refresh to persist final OHLCV.
+        if not _market_closed_today() or closed_key in _candle_refresh_done:
+            return cached[-days:]
 
     # Outside trading hours with cached data — check if cache is up-to-date
     if cached and not _is_trade_hours():
         last_date = cached[-1].date.replace("-", "")[:8]
         latest_td = _latest_trade_date_str()
         if last_date >= latest_td:
-            # Cache already has latest trading day data, no refresh needed
-            _candle_refresh_done.add(cache_key)
-            return cached[-days:]
+            if not _market_closed_today():
+                # Weekend / pre-market — cache is current, no refresh needed
+                _candle_refresh_done.add(cache_key)
+                return cached[-days:]
+            # Market closed today but cache may be a mid-session snapshot;
+            # allow one post-close refresh (fall through to inline refresh)
         # Cache is stale (missing latest trading day) — fall through to refresh
 
     if cached:
         # Have data but may be stale — do inline refresh (fast, ~1s)
         # After market close, only refresh once to get final closing data
-        if cache_key not in _candle_refresh_done:
+        if cache_key not in _candle_refresh_done or closed_key not in _candle_refresh_done:
             _candle_refresh_done.add(cache_key)
+            if _market_closed_today():
+                _candle_refresh_done.add(closed_key)
             try:
                 new_candles = _fetch_candles_sync(code, days)
                 if new_candles:

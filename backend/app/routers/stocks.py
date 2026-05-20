@@ -129,7 +129,7 @@ async def stock_detail(
                 volume=live_vol,
                 estimated=(0 < elapsed < 240),
             ))
-        elif last_date == today_str and _is_trade_hours():
+        elif last_date == today_str and is_weekday:
             # Update today's candle with latest quote data
             candles[-1] = Candle(
                 date=today_str,

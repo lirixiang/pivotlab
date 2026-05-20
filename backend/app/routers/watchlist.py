@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..database import get_db
 from ..models import WatchlistItem, DailyCandle, Stock, FinancialSnapshot, StockConcept
 from ..schemas import WatchlistCreate
-from ..services.data_provider import get_candles, get_quote
+from ..services.data_provider import get_candles, get_quote, _now_cst
 from ..services.levels_multifactor import (
     compute_decision_score,
     detect_levels_multifactor,
@@ -174,8 +174,7 @@ async def list_watchlist(db: AsyncSession = Depends(get_db)):
 
     codes = [r.code for r in rows]
     # Batch-load today's candle data (replaces quote_cache)
-    from datetime import date as _date
-    today = _date.today().strftime("%Y-%m-%d")
+    today = _now_cst().strftime("%Y-%m-%d")
     quotes = {}
     qrows = (await db.execute(
         select(DailyCandle).where(DailyCandle.code.in_(codes), DailyCandle.trade_date == today)

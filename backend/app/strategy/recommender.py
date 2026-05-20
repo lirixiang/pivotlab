@@ -15,6 +15,12 @@ import logging
 import time as _time
 from collections import defaultdict
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+_CN_TZ = ZoneInfo("Asia/Shanghai")
+
+def _today_cn() -> date:
+    return datetime.now(_CN_TZ).date()
 
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
@@ -187,7 +193,7 @@ def _load_universe(session: Session, exclude_st: bool = True) -> list[Stock]:
 
 def _load_all_candles(session: Session, codes: list[str], days: int = 250) -> dict[str, list[Candle]]:
     """One bulk SQL pulling last `days` candles for all codes at once."""
-    cutoff = (date.today() - timedelta(days=int(days * 1.6))).strftime("%Y-%m-%d")
+    cutoff = (_today_cn() - timedelta(days=int(days * 1.6))).strftime("%Y-%m-%d")
     rows = session.execute(
         select(DailyCandle).where(
             DailyCandle.code.in_(codes),
@@ -207,7 +213,7 @@ def _load_all_candles(session: Session, codes: list[str], days: int = 250) -> di
 
 
 def _load_today_quotes(session: Session, codes: list[str]) -> dict[str, DailyCandle]:
-    today = date.today().strftime("%Y-%m-%d")
+    today = _today_cn().strftime("%Y-%m-%d")
     rows = session.execute(
         select(DailyCandle).where(
             DailyCandle.code.in_(codes),
@@ -294,7 +300,7 @@ def _build_features(
     fs.market_atr_pct = market_atr_pct
 
     # Calendar context
-    today = today_date or date.today()
+    today = today_date or _today_cn()
     fs.is_friday = int(today.weekday() == 4)
     # naive: 距下一个公历周末 = 5 - weekday (周一=0)
     fs.days_to_holiday = max(0, 5 - today.weekday())
@@ -362,7 +368,7 @@ def scan_universe(
         # Cross-sectional market environment from breadth.
         market_trend, market_atr_pct = _market_environment(candles_by_code)
         logger.info("scan_universe: market_trend=%.2f median_atr=%.3f", market_trend, market_atr_pct)
-        today_d = date.today()
+        today_d = _today_cn()
 
         # Per-style accumulators of (score, code, fs, reasons, factors)
         candidates: dict[str, list[tuple[float, str, FeatureSet, list[str], dict]]] = {
@@ -425,7 +431,7 @@ def scan_universe(
             progress_cb({"phase": "building_plans", "pct": 80})
 
         # ── Build plans for top-N per style and persist ──
-        scan_date = date.today().strftime("%Y-%m-%d")
+        scan_date = _today_cn().strftime("%Y-%m-%d")
         MAX_PER_INDUSTRY = 3       # only enforced within the core tier (rank ≤ CORE_SIZE)
         CORE_SIZE = 20             # industry diversity gate stops applying after this rank
         for s in styles:
@@ -503,7 +509,7 @@ def scan_universe(
                     "concept": top_concept,
                     "reasons": reasons,
                     "factors": factors,
-                    "expires_date": (date.today() + timedelta(
+                    "expires_date": (_today_cn() + timedelta(
                         days=plan.holding_days_max
                     )).strftime("%Y-%m-%d"),
                     "plan": plan,
