@@ -8,3 +8,13 @@ backend/data/*.db
 backend/.*
 .env
 *.log
+
+# 训练模型权重
+backend/models/*.pt
+backend/models/*.pkl
+backend/models/*.bin
+backend/models/*.safetensors
+
+# 前端构建缓存
+frontend/.vite/
+*.tsbuildinfo

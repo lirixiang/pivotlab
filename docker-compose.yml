@@ -3,21 +3,18 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        DOCKERHUB_LIBRARY_MIRROR: ${DOCKERHUB_LIBRARY_MIRROR:-m.daocloud.io/docker.io/library}
-    image: robot-harbor.geekplus.com/gino/data-sync-worker:v1.0.0
-    container_name: data-sync-worker
+    container_name: pivotlab-app
     network_mode: host
     ipc: host
-    shm_size: "4e4g"
     volumes:
       - ./backend:/app/backend
     environment:
       DATABASE_URL: postgresql+asyncpg://pivotlab:pivotlab@127.0.0.1:5433/pivotlab
-      QWEN_API_KEY: YOUR_QWEN_API_KEY
-      GEEKPLUS_API_KEY: YOUR_GEEKPLUS_API_KEY
-      LLM_DEFAULT_PROVIDER: geekplus
-      LLM_DEFAULT_MODEL: claude-sonnet-4-6
+      QWEN_API_KEY: ${QWEN_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LLM_DEFAULT_PROVIDER: ${LLM_DEFAULT_PROVIDER:-qwen}
+      LLM_DEFAULT_MODEL: ${LLM_DEFAULT_MODEL:-qwen-turbo}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
@@ -34,62 +31,9 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  trainer:
-    image: robot-harbor.geekplus.com/gino/data-sync-worker:v1.0.0
-    container_name: data-sync-trainer
-    network_mode: host
-    ipc: host
-    shm_size: "8g"
-    volumes:
-      - ./backend:/app/backend
-    environment:
-      DATABASE_URL: postgresql+asyncpg://pivotlab:pivotlab@127.0.0.1:5433/pivotlab
-      NVIDIA_VISIBLE_DEVICES: all
-      NVIDIA_DRIVER_CAPABILITIES: compute,utility
-      NCCL_DEBUG: WARN
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    working_dir: /app/backend
-    entrypoint: ["sleep", "infinity"]
-    depends_on:
-      db:
-        condition: service_healthy
-    restart: unless-stopped
-
-  finllm:
-    image: finllm-trainer:latest
-    container_name: finllm-serve
-    network_mode: host
-    ipc: host
-    working_dir: /work
-    volumes:
-      - ./finllm:/work
-    environment:
-      # 文本模型: /work/models/qwen7b-finance-v1
-      # 视觉模型: /work/models/Qwen/Qwen2___5-VL-7B-Instruct
-      MODEL_PATH: /work/models/qwen7b-finance-v1
-      PORT: "8001"
-      NVIDIA_VISIBLE_DEVICES: all
-      NVIDIA_DRIVER_CAPABILITIES: compute,utility
-    command: bash -lc "pip install -q fastapi uvicorn qwen_vl_utils 2>&1 | tail -2 && python serve_api.py"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    restart: unless-stopped
-
   db:
-    # image: ${DOCKERHUB_LIBRARY_MIRROR:-m.daocloud.io/docker.io/library}/postgres:16-alpine
     image: postgres:16-alpine
-    container_name: data-sync-db
+    container_name: pivotlab-db
     network_mode: host
     environment:
       POSTGRES_DB: pivotlab
