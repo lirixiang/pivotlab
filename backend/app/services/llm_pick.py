@@ -53,12 +53,6 @@ LLM_PROVIDERS = {
         "model": "glm-4-plus",
         "env_key": "GLM_API_KEY",
     },
-    "geekplus": {
-        "label": "Geekplus LLM Gateway",
-        "base_url": "https://llm.geekplus.com/v1",
-        "model": "claude-sonnet-4-6",
-        "env_key": "GEEKPLUS_API_KEY",
-    },
 }
 
 DEFAULT_PROMPT = """你是一位资深A股研究员。请基于当前宏观环境、产业政策、行业景气度变化，

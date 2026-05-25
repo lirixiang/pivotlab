@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     db_readonly_url: str | None = None
 
     # LLM
-    llm_default_provider: Literal["qwen", "deepseek", "openai", "siliconflow", "doubao", "glm", "geekplus"] = "qwen"
+    llm_default_provider: Literal["qwen", "deepseek", "openai", "siliconflow", "doubao", "glm"] = "qwen"
     llm_default_model: str = "qwen-turbo"
 
     qwen_api_key: str | None = None
@@ -36,8 +36,6 @@ class Settings(BaseSettings):
     doubao_model_id: str = ""  # user sets via env DOUBAO_MODEL_ID
     glm_api_key: str | None = None
     glm_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
-    geekplus_api_key: str | None = None
-    geekplus_base_url: str = "https://llm.geekplus.com/v1"
 
     # Agent
     agent_max_steps: int = 30
