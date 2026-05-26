@@ -1,3 +1,13 @@
+---
+title: PivotLab
+emoji: 📈
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # PivotLab 智线
 
 > **自动支撑压力位 · 形态筛选 · AI 策略训练 · 多 GPU DDP** —— 面向 A 股技术分析散户的开源辅助决策终端。
