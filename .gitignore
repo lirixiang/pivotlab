@@ -11,15 +11,12 @@ backend/.*
 
 # 训练模型权重
 backend/models/
-backend/data/models/
+backend/data/
 *.pt
 *.pkl
 *.bin
 *.safetensors
 *.zip
-
-# finllm 缓存
-finllm/
 
 # 前端构建缓存
 frontend/.vite/
