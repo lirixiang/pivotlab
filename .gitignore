@@ -1,12 +1,19 @@
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 .venv/
+venv/
+env/
 node_modules/
 dist/
 .DS_Store
+Thumbs.db
 backend/data/*.db
 backend/.*
 .env
+.env.local
+.env.*.local
 *.log
 
 # 训练模型权重
@@ -17,13 +24,33 @@ backend/data/
 *.bin
 *.safetensors
 *.zip
+*.onnx
+*.gguf
 
 # 前端构建缓存
 frontend/.vite/
 *.tsbuildinfo
+frontend/dist/
 
 # OCR 模型权重（体积大，不入库）
 backend/app/services/ocr_models/
 
 # 数据库备份
 backup/
+
+# IDE
+.idea/
+.vscode/
+.claude/
+*.swp
+*.swo
+
+# 测试 & 覆盖率
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# 系统临时文件
+*.tmp
+*.bak
