@@ -2,8 +2,8 @@
   "model": "claude-sonnet-4-6",
   "effortLevel": "medium",
   "env": {
-    "ANTHROPIC_BASE_URL": "https://aigw.gino.plus",
-    "ANTHROPIC_AUTH_TOKEN": "sk-9FSfvuoxb5HmHTZmofwQH1ajIGN2aUKtxM6AnANiCVcmzNcU"
+    "ANTHROPIC_BASE_URL": "https://llm.geekplus.com",
+    "ANTHROPIC_AUTH_TOKEN": "sk-hYtR7gJfH80hhfbUIfWZKc9LUJHrzVnnVdq9qDitCSUg97da"
   },
   "permissions": {
     "defaultMode": "bypassPermissions"

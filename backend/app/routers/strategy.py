@@ -338,7 +338,7 @@ async def clear_history():
 
 
 # ─── AI Stock Scanner (subprocess) ───
-_SCAN_DIR = Path("/app/backend/models/.scan_progress")
+_SCAN_DIR = Path(os.environ.get("APP_BACKEND_DIR", Path(__file__).parent.parent.parent)) / "models/.scan_progress"
 _SCAN_DIR.mkdir(parents=True, exist_ok=True)
 _scan_workers: dict[str, subprocess.Popen] = {}
 
