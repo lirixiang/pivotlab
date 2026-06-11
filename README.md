@@ -32,7 +32,9 @@ tags:
 
 [演示 Demo](https://huggingface.co/spaces/lirixiang/pivotlab) · [API 文档](https://huggingface.co/spaces/lirixiang/pivotlab/api/health) · [提交 Issue](https://github.com/lirixiang/pivotlab/issues) · [English](README_EN.md)
 
-![PivotLab 截图](docs/screenshot.png)
+![PivotLab 工作台截图](docs/screenshot.png)
+
+![PivotLab 策略研究截图](docs/screenshot-strategy.png)
 
 </div>
 
@@ -166,8 +168,8 @@ git push origin feat/your-feature
     <td align="center"><b>微信</b></td>
   </tr>
   <tr>
-    <td><img src="https://raw.githubusercontent.com/lirixiang/pivotlab/master/docs/alipay-qr.jpg" width="150"/></td>
-    <td><img src="https://raw.githubusercontent.com/lirixiang/pivotlab/master/docs/wechat-qr.jpg" width="150"/></td>
+    <td><img src="docs/alipay-qr.jpg" width="150"/></td>
+    <td><img src="docs/wechat-qr.jpg" width="150"/></td>
   </tr>
 </table>
 
