@@ -13,6 +13,12 @@ from sqlalchemy.orm import DeclarativeBase
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data/pivotlab.db")
 
+# Auto-fix plain postgresql:// → postgresql+asyncpg:// so HF Spaces env vars work without the driver prefix
+if DATABASE_URL.startswith("postgresql://") or DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1).replace(
+        "postgresql://", "postgresql+asyncpg://", 1
+    )
+
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -29,7 +35,7 @@ class _PostgresStrategy(_DBStrategy):
     supports_concurrent_writes = True
 
     def create_engine(self, url: str):
-        return create_async_engine(url, echo=False, pool_size=3, max_overflow=2)
+        return create_async_engine(url, echo=False, pool_size=2, max_overflow=1)
 
 
 class _SQLiteStrategy(_DBStrategy):
