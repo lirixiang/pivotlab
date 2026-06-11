@@ -35,7 +35,11 @@ class _PostgresStrategy(_DBStrategy):
     supports_concurrent_writes = True
 
     def create_engine(self, url: str):
-        return create_async_engine(url, echo=False, pool_size=2, max_overflow=1)
+        return create_async_engine(
+            url, echo=False,
+            pool_size=2, max_overflow=1,
+            pool_pre_ping=True, pool_recycle=300,
+        )
 
 
 class _SQLiteStrategy(_DBStrategy):
