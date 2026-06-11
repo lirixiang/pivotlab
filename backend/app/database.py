@@ -6,6 +6,7 @@ Set DATABASE_URL env var to switch backend:
 """
 
 import os
+import re
 
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -13,11 +14,10 @@ from sqlalchemy.orm import DeclarativeBase
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data/pivotlab.db")
 
-# Auto-fix plain postgresql:// → postgresql+asyncpg:// so HF Spaces env vars work without the driver prefix
-if DATABASE_URL.startswith("postgresql://") or DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1).replace(
-        "postgresql://", "postgresql+asyncpg://", 1
-    )
+# Normalize any Postgres URL to the asyncpg driver so HF Spaces env vars work
+# regardless of prefix: postgres://, postgresql://, postgresql+psycopg2://, etc.
+if re.match(r"^postgres(ql)?(\+\w+)?://", DATABASE_URL):
+    DATABASE_URL = re.sub(r"^postgres(ql)?(\+\w+)?://", "postgresql+asyncpg://", DATABASE_URL, count=1)
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -35,10 +35,17 @@ class _PostgresStrategy(_DBStrategy):
     supports_concurrent_writes = True
 
     def create_engine(self, url: str):
+        # Supabase / pgbouncer transaction pooler (port 6543) does NOT support
+        # prepared statements, which asyncpg uses by default. Disable the
+        # statement cache so pooled connections don't blow up mid-query.
         return create_async_engine(
             url, echo=False,
             pool_size=2, max_overflow=1,
             pool_pre_ping=True, pool_recycle=300,
+            connect_args={
+                "statement_cache_size": 0,
+                "prepared_statement_cache_size": 0,
+            },
         )
 
 
