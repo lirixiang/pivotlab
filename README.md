@@ -30,7 +30,7 @@ tags:
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688.svg)](https://fastapi.tiangolo.com/)
 [![React](https://img.shields.io/badge/React-18-61DAFB.svg)](https://react.dev/)
 
-[演示 Demo](https://huggingface.co/spaces/lirixiang/pivotlab) · [API 文档](https://huggingface.co/spaces/lirixiang/pivotlab/api/health) · [提交 Issue](https://github.com/lirixiang/pivotlab/issues)
+[演示 Demo](https://huggingface.co/spaces/lirixiang/pivotlab) · [API 文档](https://huggingface.co/spaces/lirixiang/pivotlab/api/health) · [提交 Issue](https://github.com/lirixiang/pivotlab/issues) · [English](README_EN.md)
 
 ![PivotLab 截图](docs/screenshot.png)
 
@@ -163,6 +163,27 @@ git push origin feat/your-feature
 - 仅使用 `akshare` 公开数据，不涉及任何非公开信息
 - 所有分析结果为**数据辅助参考**，**不构成投资建议**
 - 不提供自动交易功能
+
+## 支持作者
+
+如果这个项目对你有帮助，欢迎请我喝杯咖啡 ☕
+
+<table>
+  <tr>
+    <td align="center"><b>支付宝</b></td>
+    <td align="center"><b>微信</b></td>
+  </tr>
+  <tr>
+    <td><img src="docs/alipay-qr.jpg" width="150"/></td>
+    <td><img src="docs/wechat-qr.jpg" width="150"/></td>
+  </tr>
+</table>
+
+## 联系作者
+
+- 邮箱：[565539277@qq.com](mailto:565539277@qq.com)
+- 微信：lx-ivan
+- GitHub：[@lirixiang](https://github.com/lirixiang)
 
 ## License
 
