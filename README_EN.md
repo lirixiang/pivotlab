@@ -51,7 +51,7 @@ cp .env.example .env
 docker compose up -d
 ```
 
-- Frontend: `http://localhost:9173`
+- Frontend: `http://localhost:7860`
 - API: `http://localhost:18080/api/health`
 
 ### Option 2: Local Development

@@ -61,7 +61,7 @@ tags:
 ### 方式一：Docker（推荐）
 
 ```bash
-git clone https://github.com/yourname/pivotlab.git
+git clone https://github.com/lirixiang/pivotlab.git
 cd pivotlab
 
 cp .env.example .env
@@ -70,7 +70,7 @@ cp .env.example .env
 docker compose up -d
 ```
 
-- 前端：`http://localhost:9173`
+- 前端：`http://localhost:7860`
 - API：`http://localhost:18080/api/health`
 
 ### 方式二：本地开发
