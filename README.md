@@ -105,14 +105,6 @@ QWEN_API_KEY=your_key_here
 
 ## 部署
 
-### Render（免费）
-
-点击一键部署：
-
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/lirixiang/pivotlab)
-
-或手动：在 Render 控制台选择 **Blueprint**，连接本仓库，`render.yaml` 会自动创建 API 服务 + PostgreSQL。
-
 ### Hugging Face Spaces
 
 本仓库已包含 `Dockerfile.spaces`，直接在 HF Spaces 创建 Docker Space 并连接仓库即可。数据库使用 SQLite（重启后数据清空，适合演示）。
