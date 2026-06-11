@@ -9,7 +9,9 @@ node_modules/
 dist/
 .DS_Store
 Thumbs.db
-backend/data/*.db
+**/*.db
+**/*.db-shm
+**/*.db-wal
 backend/.*
 .env
 .env.local
