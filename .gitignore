@@ -53,3 +53,7 @@ coverage.xml
 # 系统临时文件
 *.tmp
 *.bak
+
+# 数据库备份
+backup/*.dump
+backup/*.sql
