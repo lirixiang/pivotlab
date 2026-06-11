@@ -37,6 +37,11 @@ server {
   root /usr/share/nginx/html;
   index index.html;
 
+  # HF proxies the public site over 443; nginx listens on 7860. Without this,
+  # `return 302 /agent` emits an absolute Location with :7860, unreachable publicly.
+  absolute_redirect off;
+  port_in_redirect off;
+
   location = / {
     return 302 /agent;
   }
