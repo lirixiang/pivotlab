@@ -166,8 +166,8 @@ git push origin feat/your-feature
     <td align="center"><b>微信</b></td>
   </tr>
   <tr>
-    <td><img src="docs/alipay-qr.jpg" width="150"/></td>
-    <td><img src="docs/wechat-qr.jpg" width="150"/></td>
+    <td><img src="https://raw.githubusercontent.com/lirixiang/pivotlab/master/docs/alipay-qr.jpg" width="150"/></td>
+    <td><img src="https://raw.githubusercontent.com/lirixiang/pivotlab/master/docs/wechat-qr.jpg" width="150"/></td>
   </tr>
 </table>
 
