@@ -143,7 +143,7 @@ def main():
     try:
         from sqlalchemy import create_engine, text
         from sqlalchemy.orm import Session
-        sync_url = os.environ.get("DATABASE_URL", "").replace("+asyncpg", "+psycopg2")
+        sync_url = os.environ.get("DATABASE_URL", "").strip().replace("+asyncpg", "+psycopg2")
         engine = create_engine(sync_url)
 
         codes_names: list[tuple[str, str]] = []

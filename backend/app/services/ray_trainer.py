@@ -80,7 +80,7 @@ def _load_candles_from_db(max_stocks: int, min_days: int) -> tuple[list, int]:
     from sqlalchemy import create_engine, text
     from sqlalchemy.orm import Session
 
-    db_url = os.environ.get("DATABASE_URL", "").replace("+asyncpg", "+psycopg2")
+    db_url = os.environ.get("DATABASE_URL", "").strip().replace("+asyncpg", "+psycopg2")
     engine = create_engine(db_url)
 
     with Session(engine) as session:

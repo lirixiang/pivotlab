@@ -55,7 +55,7 @@ def load_data(max_stocks: int, min_days: int):
     from sqlalchemy.orm import Session
     from app.services.data_provider import _cache_read
 
-    db_url = os.environ.get("DATABASE_URL", "")
+    db_url = os.environ.get("DATABASE_URL", "").strip()
     sync_url = db_url.replace("+asyncpg", "+psycopg2")
     if not sync_url:
         logger.error("DATABASE_URL not set")

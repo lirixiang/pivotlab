@@ -12,7 +12,7 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data/pivotlab.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data/pivotlab.db").strip()
 
 # Normalize any Postgres URL to the asyncpg driver so HF Spaces env vars work
 # regardless of prefix: postgres://, postgresql://, postgresql+psycopg2://, etc.
