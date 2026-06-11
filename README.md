@@ -30,7 +30,7 @@ tags:
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688.svg)](https://fastapi.tiangolo.com/)
 [![React](https://img.shields.io/badge/React-18-61DAFB.svg)](https://react.dev/)
 
-[演示 Demo](https://huggingface.co/spaces/lirixiang/pivotlab) · [API 文档](https://huggingface.co/spaces/lirixiang/pivotlab/api/health) · [提交 Issue](https://github.com/lirixiang/pivotlab/issues) · [English](README_EN.md)
+[演示 Demo](https://lirixiang-pivotlab.hf.space/) · [API 文档](https://huggingface.co/spaces/lirixiang/pivotlab/api/health) · [提交 Issue](https://github.com/lirixiang/pivotlab/issues) · [English](README_EN.md)
 
 ![PivotLab 工作台截图](docs/screenshot.png)
 

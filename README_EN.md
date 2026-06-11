@@ -11,7 +11,7 @@ Auto support/resistance detection · Pattern screening · AI strategy training �
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688.svg)](https://fastapi.tiangolo.com/)
 [![React](https://img.shields.io/badge/React-18-61DAFB.svg)](https://react.dev/)
 
-[Live Demo](https://huggingface.co/spaces/lirixiang/pivotlab) · [Issues](https://github.com/lirixiang/pivotlab/issues) · [中文](README.md)
+[Live Demo](https://lirixiang-pivotlab.hf.space/) · [Issues](https://github.com/lirixiang/pivotlab/issues) · [中文](README.md)
 
 ![PivotLab Screenshot](docs/screenshot.png)
 
